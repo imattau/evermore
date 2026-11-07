@@ -8,8 +8,7 @@ use serde_json::json;
 
 use crate::keyring_store;
 
-pub fn run() -> std::io::Result<()> {
-    let socket_path = evermore_common::runtime_socket_path();
+pub fn run(socket_path: std::path::PathBuf) -> std::io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;

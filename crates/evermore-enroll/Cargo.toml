@@ -1,0 +1,8 @@
+[package]
+name = "evermore-enroll"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+serde_json = "1"
+zbus = "5.19.0"

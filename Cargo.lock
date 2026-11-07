@@ -1336,6 +1336,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "evermore-enroll"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "evermore-notifyd"
 version = "0.1.0"
 dependencies = [

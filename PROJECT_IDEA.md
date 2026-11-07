@@ -389,6 +389,41 @@ implementation plan the way Phases 0-5 are.
   the install image, which every human user provisioned on that device
   inherits as a floor and can extend, rather than a hardcoded
   distribution key baked into every binary.
+- **Greeter framework: `greetd`.** A minimal, UI-agnostic greeter daemon
+  rather than a full display manager — matches the project's own
+  "don't build the shell in egui" stance, since the actual login UI is
+  whichever stock frontend is installed (`agreety`, `tuigreet`,
+  `gtkgreet`, …), not Evermore's own code.
+
+  **Verified on the VM (2026-11-08), not assumed:** `greetd` is
+  officially packaged in Arch's `extra` repo (`greetd` 0.10.3, plus
+  `greetd-agreety`/`greetd-tuigreet`/`greetd-gtkgreet`/`greetd-regreet`
+  as installable frontends) and installs cleanly with its own dedicated
+  `greeter` system user. Its PAM config (`/etc/pam.d/greetd`) chains
+  through `system-local-login` → `system-login` → `system-auth` — and
+  `system-auth` already wires in `pam_systemd_home.so` at the auth,
+  account, password, *and* session phases, as Arch's **default,
+  unmodified PAM configuration** (confirmed by reading the actual file
+  on the VM, not from memory). `/etc/pam.d/login` uses the identical
+  chain. This means: **a completely stock `greetd` + stock frontend
+  needs zero Evermore-specific code for password- or FIDO2-backed homed
+  accounts** — `pam_systemd_home` already does the homed-aware
+  authentication as part of a standard Arch install, exactly the same
+  way it would for any other PAM client (`login`, `sshd`, `su`). The
+  account just needs the right auth factor attached via its homed
+  record (which `evermore-enroll`'s `create` already can set).
+
+  For the NIP-46 priority-1 path, this is genuinely good news, not a
+  gap: the PKCS#11 provider already identified as the concrete path
+  (see the unlock-priority decision above) slots in at the **homed**
+  layer, the same place FIDO2 already does — so NIP-46 support doesn't
+  need any greeter-specific or PAM-specific code either, once that
+  provider exists. The only Evermore-specific *greeter* work that's
+  left is UI polish, not auth plumbing: showing `kind:0` profile data
+  (name/avatar) at the login screen, which no stock frontend knows how
+  to do. A completely stock `tuigreet` works, generically, right now
+  for the password/FIDO2 paths — profile display is a later layer on
+  top of a already-functional login, not a blocker for one.
 
 **Still open:**
 

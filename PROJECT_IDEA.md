@@ -70,68 +70,117 @@ one less thing to design, build, and secure.
 
 ## Phased Roadmap: Integration-First
 
-The phases are ordered by dependency and risk. Each phase delivers a working, testable slice of the integrated system before moving on.
+The phases are ordered by dependency and risk. Each phase delivers a working, testable slice of the integrated system before moving on. Every phase's validation step is meant to run inside the build VM (`vm/`) first, with milestone numbers (`M<phase>.<n>`) tracking individual deliverables so progress is checkable without re-deriving scope each time.
+
+**Repo layout** these milestones assume (a Cargo workspace, added as the phases land, not all at once):
+
+```
+evermore/
+  Cargo.toml                    <- workspace manifest
+  crates/
+    evermore-common/            <- shared NIP-01/44/78/51 types, the Unix-socket RPC schema
+    evermore-signer/            <- Phase 1: signing daemon
+    evermore-relay-supervisor/  <- Phase 2: wraps/configures khatru, applies local policy
+    evermore-settingsd/         <- Phase 2: NIP-78 settings sync
+    evermore-notifyd/           <- Phase 3: notification bridge
+    evermore-blossom-fs/        <- Phase 4: Blossom FUSE mount / sync daemon
+    evermore-npack/             <- Phase 5: package manager core
+  apps/
+    evermore-panel/             <- egui control panel (tabs: identity, settings, notifications, packages)
+  packaging/
+    systemd/                    <- user unit files, one per daemon
+    archiso/                    <- Phase 5 ISO profile
+```
+
+### Phase 0: Toolchain & Scaffold
+
+**Goal:** An empty-but-correct Cargo workspace that builds and runs inside the build VM, before any Nostr logic exists.
+
+**Milestones:**
+- **M0.1** — `Cargo.toml` workspace + the six crate/app stubs above, each `cargo new --lib`/`--bin` with a one-line `main`/`lib.rs`. `cargo build --workspace` succeeds on the host.
+- **M0.2** — Pin the Rust toolchain: `rust-toolchain.toml` (stable, pinned version) so `vm/create-vm.sh`'s `rustup default stable` and the workspace agree exactly.
+- **M0.3** — Add `nostr-sdk` (or `nostr` + `nostr-relay-pool`) as the shared Nostr types/crypto dependency in `evermore-common`, so every later daemon builds event signing/parsing on one vetted library instead of hand-rolling NIP-01.
+- **M0.4** — `packaging/systemd/` directory with a template unit file (`Type=simple`, `Restart=on-failure`, runs under `systemctl --user`) that later daemons copy, so unit-file conventions are decided once.
+
+**Validation:** `vm/connect.sh "cd evermore && cargo build --workspace"` succeeds against a git-cloned copy of the repo inside the VM (confirms the VM's `rustup`/`base-devel` toolchain actually matches what the workspace needs, not just the host's).
 
 ### Phase 1: The Signing Foundation (Identity as a Service)
 
 **Goal:** A working Nostr signing daemon on a standard Arch install, exposing a stable interface that any application (including egui apps) can use without ever touching the raw `nsec`.
 
-**Concrete work:**
-- Build or adapt a **signing daemon** that stores the `nsec` in the **Linux kernel keyring** and exposes a Unix socket (`$XDG_RUNTIME_DIR/nostr-signer.sock`) with methods like `sign_event`, `get_public_key`, `nip44_encrypt`, `nip44_decrypt`, and `wrap_dm`. This pattern is already production-proven in the NanoClaw project.
-- Package it as a **systemd user service** that starts with the session and holds multiple identities (personal, work) selectable by account name.
-- Write a minimal **egui control panel** that lets the user unlock the daemon, list loaded identities, and view their public keys—your first integration UI.
+**Milestones:**
+- **M1.1** — `evermore-signer` stores one `nsec` in the Linux kernel keyring (`keyctl` via the `linux-keyutils` crate), keyed by a chosen identity name.
+- **M1.2** — Unix socket at `$XDG_RUNTIME_DIR/evermore/signer.sock` (`0600`, owner-only) speaking a small JSON-RPC-ish protocol defined once in `evermore-common`: `sign_event`, `get_public_key`, `nip44_encrypt`, `nip44_decrypt`, `wrap_dm` (NIP-17/59). This pattern is already production-proven in the NanoClaw project.
+- **M1.3** — Multi-identity support: the daemon holds N keys (personal, work), selected per-request by an identity name parameter — not a single global key.
+- **M1.4** — `packaging/systemd/evermore-signer.service` (from the Phase 0 template) starting the daemon with the session.
+- **M1.5** — `apps/evermore-panel`'s first tab: unlock the daemon, list loaded identities, show each public key (npub). First integration UI, no settings/relay logic yet.
+- **M1.6** — A throwaway `evermore-signer-test-client` binary (deleted or folded into integration tests once Phase 1 is done) that connects to the socket, signs a `kind:1` note, and uploads a file to a public Blossom server using that signature — proving the `nsec` never leaves the daemon process.
 
-**Validation:** An egui test application signs a note and uploads a file to Blossom through the daemon socket, without the `nsec` ever entering the application process.
+**Validation:** Run M1.6's test client inside the VM via `vm/connect.sh`; inspect `/proc/<signer-pid>/status` / the client's own memory to confirm the secret key bytes exist only in the daemon's process, never the client's.
 
 ### Phase 2: Settings That Follow the Key
 
-**Goal:** Desktop preferences that sync across machines via NIP-78, so "sign in once and your settings follow you" becomes real.
+**Goal:** Desktop preferences that sync across machines via NIP-78, so "sign in once and your settings follow you" becomes real — with the local control-plane relay established as the pattern every later daemon reuses.
 
-**Concrete work:**
-- Stand up the **local control-plane relay** (khatru, localhost-only, from
-  "The Local Control-Plane Relay" above) as a systemd user service — this is
-  the first thing the settings daemon talks to, and later phases (Phase 3's
-  notification bridge, Phase 5's `npack` trust layer) reuse the same relay.
-- Build a **settings daemon** (systemd user service) that owns the NIP-78 sync loop. It reads local config changes and publishes encrypted `kind:30078` events with a `d` tag identifying the application or settings domain, to the local relay, which selectively bridges them to the user's external relays.
-- Define a minimal **desktop settings schema**: theme, keyboard layout, panel configuration, and—critically—**relay configuration** (which relays the system uses for settings, DMs, and package discovery).
-- Expose a **D-Bus interface** (or a local HTTP socket) so applications and system components can read and write settings through the daemon rather than managing their own config files.
-- Build an **egui Settings panel** that reads from and writes to this daemon, showing current relay choices and sync status.
+**Milestones:**
+- **M2.1** — `evermore-relay-supervisor` vendors/builds `khatru` (Go) as a subprocess, binds it to `127.0.0.1` only, and applies the NIP-86 policy (allowed kinds, loopback-only write access) described in "The Local Control-Plane Relay" above.
+- **M2.2** — `packaging/systemd/evermore-relay.service` starts the relay before any daemon that depends on it (`After=`/`Wants=` ordering).
+- **M2.3** — `evermore-settingsd` connects to `evermore-signer`'s socket (for signing) and to the local relay (for storage/sync), defines the settings schema as a single `kind:30078` event per domain (`d` tags: `evermore:theme`, `evermore:keyboard`, `evermore:panels`, `evermore:relays`), NIP-44-encrypted to self.
+- **M2.4** — Bridging rule: `evermore-settingsd` also connects to the user's configured *external* relays (from the `evermore:relays` settings domain itself — bootstrapped from a hardcoded default list on first run) and selectively republishes settings events there, gated by NIP-42 `AUTH`.
+- **M2.5** — Local read/write interface for other components: a second, simpler Unix socket (`settingsd.sock`) rather than full D-Bus to start — `get(domain, key)` / `set(domain, key, value)` — with a D-Bus wrapper only added later if a non-Evermore desktop component needs it (see "Key Design Decisions").
+- **M2.6** — `apps/evermore-panel`'s Settings tab: edit theme/keyboard/relay list, see last-sync timestamp per domain.
 
-**Validation:** Change a setting on one machine (e.g., theme or relay list), and it appears on a second machine logged in with the same Nostr key.
+**Validation:** Run two VM instances (a second overlay disk from `vm/create-vm.sh`, or a second VM profile) signed in with the same test identity; change a setting in one, confirm it appears in the other within the external-relay round trip.
 
 ### Phase 3: Nostr-Aware Notifications
 
-**Goal:** Mentions, replies, reactions, zaps, and DMs arrive as native desktop notifications, indistinguishable in form from local application alerts.
+**Goal:** Mentions, replies, reactions, zaps, and DMs arrive as native desktop notifications, indistinguishable in form from local application alerts — and local system events ride the same pipe.
 
-**Concrete work:**
-- Build a **notification bridge daemon** that subscribes to the user's Nostr streams for the relevant event kinds (mentions, replies, DMs via NIP-17 gift wrap) — both external relays and the local control-plane relay from Phase 2, so system-local events (e.g. a finished build, a package update available) arrive through the same path as social notifications. When an event arrives, it calls the standard `org.freedesktop.Notifications` D-Bus interface to show a desktop toast.
-- Optionally, implement the **reverse direction**: a systemd user service that monitors local D-Bus notifications and forwards them into a Nostr chat stream (the pattern used in `spaces-os`).
-- Build an **egui notification center** that displays a merged timeline of local and Nostr notifications, with filters by source.
+**Milestones:**
+- **M3.1** — `evermore-notifyd` subscribes to the user's external relays for the standard kinds (mentions/replies: `kind:1` with `p`-tags; DMs: NIP-17 gift-wrapped `kind:1059`).
+- **M3.2** — Same daemon also subscribes to the **local control-plane relay** for system-local notification-worthy events (a convention: any event tagged `["t","evermore-notify"]` on the local relay, published by any daemon — e.g. `evermore-npack` announcing an available update).
+- **M3.3** — On any matching event, call `org.freedesktop.Notifications.Notify` over D-Bus (via `zbus`) to raise a native toast — this is the one place D-Bus is used directly, since it's the existing desktop-wide notification standard, not something to reinvent.
+- **M3.4** — Reverse bridge (optional, lower priority): a small D-Bus monitor that republishes local notifications as local-relay events tagged `["t","evermore-notify"]`, so they also appear in the notification center — the `spaces-os` pattern.
+- **M3.5** — `apps/evermore-panel`'s Notification Center tab: merged, filterable timeline (source: Nostr social / local system), backed by a read-only subscription to both relay sources.
 
-**Validation:** A mention on Nostr produces a desktop notification while a local build finishes, and both appear in the same notification center.
+**Validation:** From a second identity/VM, send a DM to the test identity; separately, have `evermore-npack` (even a stub) publish one `evermore-notify`-tagged event locally. Confirm both produce a toast and both appear in the notification center, correctly attributed to their source.
 
 ### Phase 4: Blossom as a Filesystem Surface
 
 **Goal:** Make Blossom storage a first-class part of the file manager without replacing the local filesystem.
 
-**Concrete work:**
-- Implement a **Blossom FUSE mount** (or a GVFS backend) that authenticates with the signing daemon and presents a Blossom server as a network location in the file manager (e.g., a "Nostr Files" sidebar entry). Garland already demonstrates this "virtual drive" model.
-- Alternatively, build a **sync daemon** for a designated folder (`~/Nostr`) that watches for changes, uploads new files to Blossom, and publishes signed file-index events.
-- Add a **"Publish to Nostr" context-menu action** in the file manager that uploads a file to Blossom and copies a `nostr:` or NIP-92 `imeta` reference.
+**Milestones:**
+- **M4.1** — `evermore-blossom-fs` implements the Blossom HTTP API client (upload/get/list/mirror) authorized via `evermore-signer`'s socket (NIP-98-style signed auth events, not a stored API key).
+- **M4.2** — First surface: a **sync daemon** for `~/Nostr/` (simpler than FUSE to start) using `notify`/inotify — new/changed files upload to Blossom and get indexed in a `kind:30000`-ish addressable "file index" event per directory, signed by the user's key.
+- **M4.3** — FUSE mount (`fuser` crate) as the second, richer surface once M4.2's upload/index logic is proven — mounts a Blossom server read/write at a configurable path, so it shows up as an ordinary filesystem location (a GVFS backend is the GNOME-specific equivalent, evaluated only if FUSE proves awkward for Nautilus/Files integration).
+- **M4.4** — File-manager integration: a "Publish to Nostr" Nautilus/Files extension (or a right-click script as a stopgap) that uploads the selected file via M4.1 and copies a `nostr:`/NIP-92 `imeta` reference to the clipboard.
 
-**Validation:** A user copies a file into the Blossom mount, and it is retrievable from another machine via the same Nostr key.
+**Validation:** Drop a file into `~/Nostr/` on one VM; from a second VM/identity pairing to the same key, confirm the file is retrievable (via the FUSE mount or a direct Blossom fetch) without manually copying anything.
 
 ### Phase 5: `npack` as the System Package Manager
 
 **Goal:** A bootable Arch-based ISO where `npack` is the primary software distribution mechanism, bootstrapped with a minimal default trust set.
 
-**Concrete work:**
-- Use **`archiso`** with the `baseline` profile to build a minimal ISO, including the kernel, Wayland compositor, Rust toolchain, and—critically—`npack` itself as a pre-installed system package.
-- Ship a **minimal default trust set** (the distribution's publisher key plus a few foundational packages) because a blank trust graph is not usable. Represent it as NIP-51 lists on the local control-plane relay (from Phase 2), so trust edits are just events, and make the set editable in the Settings panel.
-- Build an **egui package manager frontend** that wraps `npack`, showing packages discovered through the user's trust graph and social follows, with install/update/remove actions.
-- Integrate **"Software Sources" into the Settings daemon**: a panel for managing trusted publishers, relays, and Blossom servers (the `npack` equivalent of repository configuration).
+**Milestones:**
+- **M5.1** — `evermore-npack` core: `.npk` archive format (likely a signed tarball — reuse an existing signed-archive crate rather than inventing one), publisher trust represented as **NIP-51 lists** on the local control-plane relay (`evermore:trusted-publishers`), not a bespoke trust-graph file.
+- **M5.2** — Package discovery via NIP-89 handlers + `kind:32267` (software-application) and `kind:30063` (release-artifact sets) events, fetched from the publishers in the user's trust list — no central index to query.
+- **M5.3** — Default trust seed: a hardcoded bootstrap list (the distribution's own publisher key + a handful of foundational packages) written into `evermore:trusted-publishers` on first boot, editable afterward — ships *as data*, not as a separate mechanism.
+- **M5.4** — Install/update/remove flow: resolve → fetch via Blossom (Phase 4's client) → verify signature against the trust list → unpack → register with systemd/the filesystem.
+- **M5.5** — `apps/evermore-panel`'s Packages tab: browse discovered packages (grouped by trusted publisher and, later, social follows), install/update/remove actions, and a "Software Sources" view that's really just `evermore-settingsd`'s `evermore:trusted-publishers` and `evermore:relays` domains surfaced as UI.
+- **M5.6** — `packaging/archiso/` profile based on `archiso`'s `baseline`: kernel, a Wayland compositor (plain Sway — see "Key Design Decisions" on not building the shell in egui), the pinned Rust toolchain, and all Phase 0-5 daemons pre-installed and enabled.
 
-**Validation:** A fresh ISO boots, and a user can install a new egui application entirely through the Nostr-native `npack` loop, using only their configured relays and trust set.
+**Validation:** Build the ISO (`mkarchiso`), boot it in a *fresh* VM (not the dev build VM — a clean target, built the same way `vm/create-vm.sh` builds the dev one), and install one new egui application end-to-end through `npack` using only the default trust set and the ISO's preconfigured relays.
+
+### Phase 6: Dogfood & Harden
+
+**Goal:** Stop treating this as a demo and start running it as a daily system on at least one real machine, finding the rough edges Phases 0-5's narrow validations didn't surface.
+
+**Milestones:**
+- **M6.1** — Run the ISO (or the equivalent package set on an existing Arch install) as a real daily session for a defined period; log every manual workaround needed as a tracked issue.
+- **M6.2** — Security pass on the two trust boundaries that matter most: the signing daemon's socket permissions/identity-switching, and the local relay's NIP-86 policy (can anything on the loopback plane write kinds it shouldn't?). Written up the same way `imattau/nostrhost`'s `SECURITY-REVIEW.md` does it.
+- **M6.3** — Cross-device validation for real: two *different physical machines* (not two VMs on one host) signed in with the same key, confirming settings/notifications/files/packages all actually follow the identity as designed, not just within one host's loopback relay.
+- **M6.4** — Backup/recovery story for the `nsec`: NIP-49 `ncryptsec` export/import flow through the signing daemon, tested by deliberately wiping a VM's keyring and recovering from the exported backup.
+- **M6.5** — Decide and document the public release shape (ISO download, AUR packages for the daemons on stock Arch, or both) based on what Phase 5/6 actually proved out.
 
 ## Key Design Decisions and Risks
 
@@ -143,4 +192,4 @@ A few decisions will shape the entire project and are worth resolving early:
 - **D-Bus vs. Unix socket for the signing interface.** A Unix socket is simpler and more portable across languages; D-Bus gives you standard service discovery and permission integration. The NanoClaw pattern uses a Unix socket with a read-only mount into containers, which is a clean security boundary. Start with a Unix socket and add a D-Bus wrapper later if integration with existing desktop services demands it.
 - **NIP-78 encryption and relay auth.** NIP-78 settings should be encrypted with NIP-44 and relays should require NIP-42 `AUTH` before serving `kind:30078` events. This is not optional for a production system—without it, settings are either public or served to the wrong clients.
 
-The first concrete step is **Phase 1**: get the signing daemon running on Arch and expose it to a trivial egui application. Once that interface is stable, every subsequent service—settings, notifications, Blossom, `npack`—can be built against it without re-solving key management. This is the smallest, most reusable foundation for the entire distribution.
+The first concrete step is **M0.1**: scaffold the workspace. The first step that actually matters is **Phase 1**: get the signing daemon running on Arch and expose it to a trivial egui application. Once that interface is stable, every subsequent service—settings, notifications, Blossom, `npack`—can be built against it without re-solving key management. This is the smallest, most reusable foundation for the entire distribution.

@@ -157,3 +157,15 @@ running `create-vm.sh`.
   `user,id=net0,hostfwd=tcp::2222-:22,hostfwd=tcp::9229-:9229`).
 - Resources are hardcoded in `create-vm.sh` (4 vCPU / 8GB RAM / 40GB disk
   overlay) — edit the script if you need more/less.
+- **If a daemon you backgrounded with `nohup ... &` suddenly can't read its
+  own kernel keyring entries** (`evermore-signer` returning `KeyRevoked` for
+  an identity that worked moments ago), it's not a code bug: the Linux
+  *session* keyring is scoped per PAM session, and Arch's default PAM config
+  revokes a session's keyring when that session's last connection closes.
+  `connect.sh`/`sync-repo.sh`/`screenshot.sh` all share one multiplexed SSH
+  connection (`ControlMaster`/`ControlPersist`, socket at
+  `vm/.local/run/ssh-control.sock`) specifically so a daemon backgrounded via
+  one of these calls survives that call returning — but if you open your own
+  raw `ssh` to the VM instead of using these scripts, or kill and restart the
+  control socket between launching a daemon and using it, you can still hit
+  this. `destroy-vm.sh` tears the control connection down along with the VM.

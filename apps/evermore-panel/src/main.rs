@@ -1,3 +1,4 @@
+mod settings_client;
 mod signer_client;
 
 use eframe::egui;
@@ -37,6 +38,9 @@ struct PanelApp {
     identities: Vec<Identity>,
     identity_error: Option<String>,
     identities_loaded: bool,
+    theme_domain: serde_json::Map<String, serde_json::Value>,
+    settings_error: Option<String>,
+    settings_loaded: bool,
 }
 
 impl PanelApp {
@@ -51,6 +55,27 @@ impl PanelApp {
                 self.identities.clear();
                 self.identity_error = Some(e);
             }
+        }
+    }
+
+    fn refresh_theme(&mut self) {
+        self.settings_loaded = true;
+        match settings_client::get_domain("theme") {
+            Ok(map) => {
+                self.theme_domain = map;
+                self.settings_error = None;
+            }
+            Err(e) => {
+                self.theme_domain.clear();
+                self.settings_error = Some(e);
+            }
+        }
+    }
+
+    fn set_theme_mode(&mut self, mode: &str) {
+        match settings_client::set("theme", "mode", serde_json::Value::String(mode.to_string())) {
+            Ok(()) => self.refresh_theme(),
+            Err(e) => self.settings_error = Some(e),
         }
     }
 }
@@ -103,8 +128,45 @@ impl eframe::App for PanelApp {
                 }
             }
             Tab::Settings => {
+                if !self.settings_loaded {
+                    self.refresh_theme();
+                }
                 ui.heading("Settings");
-                ui.label("NIP-78 sync lands in Phase 2.");
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_theme();
+                    }
+                    ui.label(
+                        evermore_common::settings::runtime_socket_path()
+                            .display()
+                            .to_string(),
+                    );
+                });
+                ui.add_space(8.0);
+
+                if let Some(err) = &self.settings_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                    ui.add_space(8.0);
+                }
+
+                let current_mode = self
+                    .theme_domain
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unset)")
+                    .to_string();
+                ui.label(format!(
+                    "evermore:theme.mode = {current_mode} (synced via the control-plane relay, kind:30078)"
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Set dark").clicked() {
+                        self.set_theme_mode("dark");
+                    }
+                    if ui.button("Set light").clicked() {
+                        self.set_theme_mode("light");
+                    }
+                });
             }
             Tab::Notifications => {
                 ui.heading("Notifications");

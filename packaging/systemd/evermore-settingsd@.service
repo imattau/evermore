@@ -1,0 +1,24 @@
+[Unit]
+Description=Evermore settings daemon (NIP-78 sync over the control-plane relay)
+Documentation=https://github.com/imattau/evermore
+After=evermore-signer.service evermore-relay.service
+Wants=evermore-signer.service evermore-relay.service
+
+[Service]
+Type=simple
+# Assumes `cargo install --path crates/evermore-settingsd` has put the
+# binary on the user's cargo bin path, same caveat as evermore-signer's
+# unit. %i (systemd instance name) carries the identity to run as, so this
+# is enabled per-identity: `systemctl --user enable evermore-settingsd@personal`.
+ExecStart=%h/.cargo/bin/evermore-settingsd --identity %i
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/evermore
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="$SCRIPT_DIR/.local/run"
 PIDFILE="$RUN_DIR/qemu.pid"
 MONITOR_SOCK="$RUN_DIR/monitor.sock"
+SSH_CONTROL_SOCK="$RUN_DIR/ssh-control.sock"
 
 pid_alive() {
   [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
@@ -29,7 +30,10 @@ else
   echo "==> VM not running"
 fi
 
-rm -f "$PIDFILE" "$MONITOR_SOCK"
+if [[ -S "$SSH_CONTROL_SOCK" ]]; then
+  ssh -o ControlPath="$SSH_CONTROL_SOCK" -O exit builder@127.0.0.1 2>/dev/null || true
+fi
+rm -f "$PIDFILE" "$MONITOR_SOCK" "$SSH_CONTROL_SOCK"
 echo "==> VM stopped"
 
 if [[ "${1:-}" == "--wipe" ]]; then

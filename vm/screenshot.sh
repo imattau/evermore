@@ -13,8 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY="$SCRIPT_DIR/.local/ssh/id_ed25519"
 OUT="${1:-$SCRIPT_DIR/.local/run/screenshot.png}"
 
-SSH_OPTS=(-i "$KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
-SCP_OPTS=(-i "$KEY" -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+mkdir -p "$SCRIPT_DIR/.local/run"
+# Shares one SSH connection with connect.sh/sync-repo.sh -- see the comment
+# in connect.sh for why (PAM session / kernel keyring scoping).
+CONTROL_OPTS=(-o ControlMaster=auto -o ControlPersist=10m -o ControlPath="$SCRIPT_DIR/.local/run/ssh-control.sock")
+SSH_OPTS=(-i "$KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "${CONTROL_OPTS[@]}")
+SCP_OPTS=(-i "$KEY" -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "${CONTROL_OPTS[@]}")
 
 if [[ ! -f "$KEY" ]]; then
   echo "no SSH key at $KEY -- run vm/create-vm.sh first" >&2

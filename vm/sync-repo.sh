@@ -10,7 +10,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 KEY="$SCRIPT_DIR/.local/ssh/id_ed25519"
 
-SSH_OPTS=(-i "$KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+mkdir -p "$SCRIPT_DIR/.local/run"
+# Shares one SSH connection (and PAM session) with connect.sh/screenshot.sh
+# -- see the comment in connect.sh for why that matters beyond speed.
+SSH_OPTS=(-i "$KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+  -o ControlMaster=auto -o ControlPersist=10m -o ControlPath="$SCRIPT_DIR/.local/run/ssh-control.sock")
 
 if [[ ! -f "$KEY" ]]; then
   echo "no SSH key at $KEY -- run vm/create-vm.sh first" >&2

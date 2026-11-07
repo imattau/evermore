@@ -70,3 +70,58 @@ impl Response {
         }
     }
 }
+
+/// Wire protocol for `evermore-settingsd` and its clients. Same framing
+/// (newline-delimited JSON) and the same `Ok`/`Err` response shape as the
+/// signer's, kept in its own module since it's a different socket/daemon.
+pub mod settings {
+    use serde::{Deserialize, Serialize};
+
+    pub const SOCKET_RELATIVE_PATH: &str = "evermore/settingsd.sock";
+
+    pub fn runtime_socket_path() -> std::path::PathBuf {
+        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "method", content = "params", rename_all = "snake_case")]
+    pub enum Request {
+        /// List the settings domains currently known (i.e. that have at
+        /// least one key set).
+        ListDomains,
+        /// Get a single key's value within a domain.
+        Get { domain: String, key: String },
+        /// List every key/value pair in a domain.
+        GetDomain { domain: String },
+        /// Set a key's value within a domain. Triggers a NIP-44-encrypted
+        /// kind:30078 event (one per domain, replacing the previous one)
+        /// to be signed and published to the control-plane relay.
+        Set {
+            domain: String,
+            key: String,
+            value: serde_json::Value,
+        },
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    pub enum Response {
+        Ok { data: serde_json::Value },
+        Err { message: String },
+    }
+
+    impl Response {
+        pub fn ok(data: impl Serialize) -> Self {
+            Response::Ok {
+                data: serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
+            }
+        }
+
+        pub fn err(message: impl Into<String>) -> Self {
+            Response::Err {
+                message: message.into(),
+            }
+        }
+    }
+}

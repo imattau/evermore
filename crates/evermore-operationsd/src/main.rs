@@ -3,9 +3,11 @@ mod store;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine;
 use evermore_common::operations::{self, Request, Response};
 use nostr::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
@@ -15,6 +17,7 @@ use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
 
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:4869";
+static OWNER_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
@@ -27,9 +30,10 @@ fn main() {
         Some("revoke-grant") => revoke_grant_cli().map_err(|e| e.to_string()),
         Some("grants") => grants_cli().map_err(|e| e.to_string()),
         Some("status") => status_cli().map_err(|e| e.to_string()),
+        Some("export") => export_cli().map_err(|e| e.to_string()),
         _ => {
             eprintln!(
-                "usage: evermore-operationsd <serve|catalog|invoke|request|approve|grant|revoke-grant|grants|status>"
+                "usage: evermore-operationsd <serve|catalog|invoke|request|approve|grant|revoke-grant|grants|status|export>"
             );
             eprintln!("  serve --owner-identity NAME --service-identity NAME");
             eprintln!("  serve    run the catalogue and operation control plane");
@@ -43,6 +47,7 @@ fn main() {
             );
             eprintln!("  grants   list stored agent grants");
             eprintln!("  status   show the durable state for an operation_id");
+            eprintln!("  export   encrypt and export the local journal to the configured relay");
             std::process::exit(2);
         }
     };
@@ -60,6 +65,7 @@ fn serve() -> std::io::Result<()> {
             "serve requires --owner-identity NAME",
         )
     })?;
+    let _ = OWNER_IDENTITY.set(owner_identity.clone());
     let service_identity = arg_value("--service-identity").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -181,6 +187,62 @@ fn handle_connection(
             Ok(Request::OperationStatus { operation_id }) => match store.status(&operation_id) {
                 Ok(record) => Response::ok(record),
                 Err(error) => Response::err(error),
+            },
+            Ok(Request::ListPendingOperations) => match store.all_records() {
+                Ok(records) => {
+                    let pending: Vec<Value> = records
+                        .into_iter()
+                        .filter(|r| r.status == store::Status::Pending)
+                        .map(|record| {
+                            serde_json::json!({
+                                "operation_id": record.operation_id,
+                                "actor_pubkey": record.actor_pubkey,
+                                "operation": record.operation,
+                                "operation_version": record.operation_version,
+                                "arguments": record.arguments,
+                                "created_at": record.created_at,
+                                "expires_at": record.expires_at,
+                                "request_published": record.request_published
+                            })
+                        })
+                        .collect();
+                    Response::ok(pending)
+                }
+                Err(error) => Response::err(error),
+            },
+            Ok(Request::OperationHistory { limit }) => match store.all_records() {
+                Ok(mut records) => {
+                    records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
+                    records.truncate(limit.clamp(1, 100));
+                    let history: Vec<Value> = records.into_iter().map(|record| serde_json::json!({
+                        "operation_id": record.operation_id,
+                        "actor_pubkey": record.actor_pubkey,
+                        "operation": record.operation,
+                        "operation_version": record.operation_version,
+                        "arguments": record.arguments,
+                        "status": record.status,
+                        "result": record.result,
+                        "error": record.error,
+                        "created_at": record.created_at,
+                        "request_published": record.request_published,
+                        "approval_event_id": record.approval_event.as_ref().and_then(|event| event.get("id")),
+                        "approval_published": record.approval_published,
+                        "execution_event_id": record.execution_event.as_ref().and_then(|event| event.get("id")),
+                        "execution_published": record.execution_published,
+                        "result_event_id": record.result_event.as_ref().and_then(|event| event.get("id")),
+                        "result_published": record.result_published
+                    })).collect();
+                    Response::ok(history)
+                }
+                Err(error) => Response::err(error),
+            },
+            Ok(Request::ExportSnapshot) => match (store.all_records(), store.grants()) {
+                (Ok(operations), Ok(grants)) => Response::ok(serde_json::json!({
+                    "owner_pubkey": store.owner_pubkey_hex(),
+                    "operations": operations,
+                    "grants": grants,
+                })),
+                (Err(error), _) | (_, Err(error)) => Response::err(error),
             },
             Ok(Request::SubmitGrant { event }) => match store.register_grant(event) {
                 Ok(grant) => Response::ok(reconcile_grant_for_reply(&store, grant, relay_url)),
@@ -306,6 +368,34 @@ fn reconcile_record(
         record = store.mark_published(operation_id, RelayPhase::Approval)?;
     }
     if record.status == store::Status::Approved {
+        if record.execution_event.is_none() {
+            let content = serde_json::json!({
+                "operation_id": record.operation_id,
+                "operation": record.operation,
+                "operation_version": record.operation_version,
+                "request_event_id": record.operation_id,
+                "approval_event_id": record.approval_event.as_ref().and_then(|event| event.get("id")),
+                "status": "execution_attempt"
+            }).to_string();
+            let event = sign_event(
+                service_identity,
+                content,
+                vec![
+                    vec!["t".to_string(), "evermore-operation-execution".to_string()],
+                    vec!["e".to_string(), record.operation_id.clone()],
+                    vec!["p".to_string(), record.actor_pubkey.clone()],
+                ],
+            )?;
+            record = store.save_execution_event(operation_id, event)?;
+        }
+        if !record.execution_published {
+            let event = record
+                .execution_event
+                .as_ref()
+                .ok_or_else(|| "execution event wasn't saved".to_string())?;
+            publish_event(relay_url, event)?;
+            store.mark_published(operation_id, RelayPhase::Execution)?;
+        }
         if let Err(error) = execute_approved(store, operation_id) {
             let latest = store.status(operation_id)?;
             if latest.status != store::Status::Running {
@@ -321,6 +411,7 @@ fn reconcile_record(
             | store::Status::Failed
             | store::Status::ExecutionUnknown
             | store::Status::Denied
+            | store::Status::Cancelled
             | store::Status::Expired
             | store::Status::Revoked
     ) {
@@ -362,7 +453,7 @@ fn publish_event(relay_url: &str, event: &Value) -> Result<(), String> {
         .and_then(Value::as_str)
         .ok_or_else(|| "signed event is missing id".to_string())?;
     let (mut socket, _) = tungstenite::connect(relay_url)
-        .map_err(|error| format!("couldn't connect to control relay at {relay_url}: {error}"))?;
+        .map_err(|error| format!("couldn't connect to configured relay: {error}"))?;
     if let MaybeTlsStream::Plain(tcp) = socket.get_ref() {
         tcp.set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| error.to_string())?;
@@ -409,37 +500,322 @@ fn execute_approved(
     operation_id: &str,
 ) -> Result<store::OperationRecord, String> {
     let record = store.claim_execution(operation_id)?;
-    if record.operation != "settings.set" {
-        return store.finish_execution(
+    match record.operation.as_str() {
+        "packages.remove" => {
+            let package_id = record.arguments["package_id"]
+                .as_str()
+                .expect("validated string");
+            let output = Command::new("evermore-npack")
+                .arg("remove")
+                .arg(package_id)
+                .output();
+            match output {
+                Ok(output) if output.status.success() => store.finish_execution(
+                    operation_id,
+                    Ok(serde_json::json!({"package_id": package_id, "removed": true})),
+                ),
+                Ok(output) => store.finish_execution(
+                    operation_id,
+                    Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+                ),
+                Err(error) => store.finish_execution(
+                    operation_id,
+                    Err(format!("couldn't start evermore-npack: {error}")),
+                ),
+            }
+        }
+        "ai.model.install_signed_npack" => {
+            let request = evermore_common::ai::Request::InstallNpackModel {
+                package_id: record.arguments["package_id"]
+                    .as_str()
+                    .expect("validated string")
+                    .to_string(),
+            };
+            match send_request::<_, evermore_common::ai::Event>(
+                &evermore_common::ai::runtime_infer_socket_path(),
+                &request,
+            ) {
+                Ok(evermore_common::ai::Event::ModelInstalled { package_id, model }) => store
+                    .finish_execution(
+                        operation_id,
+                        Ok(serde_json::json!({"package_id": package_id, "model": model})),
+                    ),
+                Ok(evermore_common::ai::Event::Error { message, .. }) => {
+                    store.finish_execution(operation_id, Err(message))
+                }
+                Ok(_) => store.mark_execution_unknown(
+                    operation_id,
+                    "inference service returned an unexpected model import response".into(),
+                ),
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "blossom.delete" => {
+            let sha256 = record.arguments["sha256"]
+                .as_str()
+                .expect("validated string")
+                .to_ascii_lowercase();
+            let result = (|| -> Result<Value, String> {
+                let base = blossom_base_url()?;
+                let owner = OWNER_IDENTITY
+                    .get()
+                    .ok_or("owner identity is unavailable")?;
+                let owned = blossom_list_owned(&base, owner)?;
+                if !owned.iter().any(|item| {
+                    item.get("sha256")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(&sha256))
+                }) {
+                    return Err("the configured identity does not own this Blossom blob".into());
+                }
+                let url = format!("{base}/{sha256}");
+                let auth = blossom_auth(owner, "DELETE", &url, Some(&sha256))?;
+                ureq::delete(&url)
+                    .header("Authorization", &auth)
+                    .call()
+                    .map_err(|error| format!("Blossom delete failed: {error}"))?;
+                Ok(serde_json::json!({"sha256": sha256, "deleted": true}))
+            })();
+            store.finish_execution(operation_id, result)
+        }
+        "packages.install_pinned" => {
+            let Some(blossom_url) = std::env::var_os("EVERMORE_BLOSSOM_URL") else {
+                return store.finish_execution(
+                    operation_id,
+                    Err("EVERMORE_BLOSSOM_URL is required for package installation".into()),
+                );
+            };
+            let owner_identity = OWNER_IDENTITY
+                .get()
+                .ok_or("owner identity is unavailable")?;
+            let output = Command::new("evermore-npack")
+                .arg("install")
+                .arg(
+                    record.arguments["package_id"]
+                        .as_str()
+                        .expect("validated string"),
+                )
+                .arg("--version")
+                .arg(
+                    record.arguments["version"]
+                        .as_str()
+                        .expect("validated string"),
+                )
+                .arg("--sha256")
+                .arg(
+                    record.arguments["sha256"]
+                        .as_str()
+                        .expect("validated string"),
+                )
+                .arg("--identity")
+                .arg(owner_identity)
+                .arg("--blossom-url")
+                .arg(blossom_url)
+                .output();
+            match output {
+                Ok(output) if output.status.success() => store.finish_execution(operation_id, Ok(serde_json::json!({
+                    "package_id": record.arguments["package_id"], "version": record.arguments["version"], "sha256": record.arguments["sha256"]
+                }))),
+                Ok(output) => store.finish_execution(operation_id, Err(String::from_utf8_lossy(&output.stderr).trim().to_string())),
+                Err(error) => store.finish_execution(operation_id, Err(format!("couldn't start evermore-npack: {error}"))),
+            }
+        }
+        "settings.set" => {
+            let request = evermore_common::settings::Request::Set {
+                domain: record.arguments["domain"]
+                    .as_str()
+                    .expect("validated as string")
+                    .to_string(),
+                key: record.arguments["key"]
+                    .as_str()
+                    .expect("validated as string")
+                    .to_string(),
+                value: record.arguments["value"].clone(),
+            };
+            match send_request::<_, evermore_common::settings::Response>(
+                &evermore_common::settings::runtime_socket_path(),
+                &request,
+            ) {
+                Ok(evermore_common::settings::Response::Ok { data }) => {
+                    store.finish_execution(operation_id, Ok(data))
+                }
+                Ok(evermore_common::settings::Response::Err { message }) => {
+                    store.mark_execution_unknown(operation_id, message)
+                }
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "notifications.dismiss" => {
+            let request = evermore_common::notifications::Request::Dismiss {
+                notification_id: record.arguments["notification_id"]
+                    .as_str()
+                    .expect("validated string")
+                    .to_string(),
+            };
+            match send_request::<_, evermore_common::notifications::Response>(
+                &evermore_common::notifications::runtime_socket_path(),
+                &request,
+            ) {
+                Ok(evermore_common::notifications::Response::Ok { data }) => {
+                    store.finish_execution(operation_id, Ok(data))
+                }
+                Ok(evermore_common::notifications::Response::Err { message }) => {
+                    store.finish_execution(operation_id, Err(message))
+                }
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "notifications.clear_recent" => {
+            let request = evermore_common::notifications::Request::ClearRecent;
+            match send_request::<_, evermore_common::notifications::Response>(
+                &evermore_common::notifications::runtime_socket_path(),
+                &request,
+            ) {
+                Ok(evermore_common::notifications::Response::Ok { data }) => {
+                    store.finish_execution(operation_id, Ok(data))
+                }
+                Ok(evermore_common::notifications::Response::Err { message }) => {
+                    store.finish_execution(operation_id, Err(message))
+                }
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "sway.switch_workspace" => {
+            let number = record.arguments["workspace_number"]
+                .as_u64()
+                .expect("validated as integer");
+            execute_sway_command(
+                store,
+                operation_id,
+                &["workspace".into(), "number".into(), number.to_string()],
+                serde_json::json!({"workspace_number": number}),
+            )
+        }
+        "sway.launch_app" => {
+            let program = record.arguments["program"]
+                .as_str()
+                .expect("validated string");
+            let args: Vec<&str> = record.arguments["args"]
+                .as_array()
+                .expect("validated array")
+                .iter()
+                .map(|argument| argument.as_str().expect("validated string"))
+                .collect();
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(home) = std::env::var_os("HOME") {
+                command.current_dir(home);
+            }
+            match command.spawn() {
+                Ok(child) => store.finish_execution(
+                    operation_id,
+                    Ok(serde_json::json!({
+                        "program": program,
+                        "started": true,
+                        "pid": child.id()
+                    })),
+                ),
+                Err(error) => store.finish_execution(
+                    operation_id,
+                    Err(format!(
+                        "couldn't launch approved application '{program}': {error}"
+                    )),
+                ),
+            }
+        }
+        "sway.focus_window" => {
+            let con_id = record.arguments["con_id"]
+                .as_u64()
+                .expect("validated as integer");
+            match sway_list_windows() {
+                Ok(windows)
+                    if windows.iter().any(|window| {
+                        window.get("con_id").and_then(Value::as_u64) == Some(con_id)
+                    }) =>
+                {
+                    execute_sway_command(
+                        store,
+                        operation_id,
+                        &[format!("[con_id={con_id}] focus")],
+                        serde_json::json!({"con_id": con_id}),
+                    )
+                }
+                Ok(_) => store.finish_execution(
+                    operation_id,
+                    Err("the requested Sway window no longer exists".into()),
+                ),
+                Err(error) => store.finish_execution(operation_id, Err(error)),
+            }
+        }
+        _ => store.finish_execution(
             operation_id,
             Err(format!(
                 "no executor is registered for '{}'",
                 record.operation
             )),
-        );
+        ),
     }
-    let request = evermore_common::settings::Request::Set {
-        domain: record.arguments["domain"]
-            .as_str()
-            .expect("validated as string")
-            .to_string(),
-        key: record.arguments["key"]
-            .as_str()
-            .expect("validated as string")
-            .to_string(),
-        value: record.arguments["value"].clone(),
-    };
-    match send_request::<_, evermore_common::settings::Response>(
-        &evermore_common::settings::runtime_socket_path(),
-        &request,
-    ) {
-        Ok(evermore_common::settings::Response::Ok { data }) => {
-            store.finish_execution(operation_id, Ok(data))
+}
+
+fn execute_sway_command(
+    store: &OperationStore,
+    operation_id: &str,
+    args: &[String],
+    result: Value,
+) -> Result<store::OperationRecord, String> {
+    match Command::new("swaymsg").args(args).output() {
+        Ok(output) if output.status.success() => {
+            let response: Value = match serde_json::from_slice(&output.stdout) {
+                Ok(value) => value,
+                Err(error) => {
+                    return store.mark_execution_unknown(
+                        operation_id,
+                        format!("unreadable Sway result: {error}"),
+                    );
+                }
+            };
+            let Some(items) = response.as_array() else {
+                return store.mark_execution_unknown(
+                    operation_id,
+                    "Sway returned an unexpected response".into(),
+                );
+            };
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.get("success").and_then(Value::as_bool) == Some(true))
+            {
+                store.finish_execution(operation_id, Ok(result))
+            } else if let Some(error) = items
+                .iter()
+                .find(|item| item.get("success").and_then(Value::as_bool) == Some(false))
+            {
+                let message = error
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Sway rejected the operation");
+                store.finish_execution(operation_id, Err(message.to_string()))
+            } else {
+                store.mark_execution_unknown(
+                    operation_id,
+                    "Sway returned an incomplete command result".into(),
+                )
+            }
         }
-        Ok(evermore_common::settings::Response::Err { message }) => {
-            store.mark_execution_unknown(operation_id, message)
-        }
-        Err(error) => store.mark_execution_unknown(operation_id, error),
+        // Once Sway IPC received a command, a transport/error response can be
+        // ambiguous. Never retry this write automatically.
+        Ok(output) => store.mark_execution_unknown(
+            operation_id,
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ),
+        Err(error) => store.finish_execution(
+            operation_id,
+            Err(format!("could not start swaymsg: {error}")),
+        ),
     }
 }
 
@@ -479,7 +855,8 @@ fn request_cli() -> std::io::Result<()> {
         .transpose()
         .map_err(|error| invalid_input(&format!("invalid JSON arguments: {error}")))?
         .unwrap_or_else(|| serde_json::json!({}));
-    operations::validate_input(&name, &arguments).map_err(|error| invalid_input(&error))?;
+    let arguments =
+        operations::canonicalize_input(&name, &arguments).map_err(|error| invalid_input(&error))?;
     let definition = operations::find(&name).ok_or_else(|| invalid_input("unknown operation"))?;
     if definition.access != operations::Access::Write
         || definition.approval != operations::Approval::Required
@@ -516,9 +893,9 @@ fn approval_cli() -> std::io::Result<()> {
         .ok_or_else(|| invalid_input("missing operation_id"))?;
     let decision = args
         .next()
-        .ok_or_else(|| invalid_input("decision must be approve or deny"))?;
-    if decision != "approve" && decision != "deny" {
-        return Err(invalid_input("decision must be approve or deny"));
+        .ok_or_else(|| invalid_input("decision must be approve, deny, or cancel"))?;
+    if decision != "approve" && decision != "deny" && decision != "cancel" {
+        return Err(invalid_input("decision must be approve, deny, or cancel"));
     }
     let identity =
         arg_value("--identity").ok_or_else(|| invalid_input("missing --identity OWNER"))?;
@@ -638,12 +1015,167 @@ fn status_cli() -> std::io::Result<()> {
     let operation_id = std::env::args()
         .nth(2)
         .ok_or_else(|| invalid_input("missing operation_id"))?;
-    let response: Response = send_request(
+    let response: Result<Response, String> = send_request(
         &operations::runtime_socket_path(),
-        &Request::OperationStatus { operation_id },
+        &Request::OperationStatus {
+            operation_id: operation_id.clone(),
+        },
+    );
+    match response {
+        Ok(response) => print_response(response),
+        Err(daemon_error) => match store::OperationStore::read_status_offline(&operation_id) {
+            Ok(record) => {
+                let mut data = serde_json::to_value(record).map_err(std::io::Error::other)?;
+                data["status_source"] = serde_json::json!("local_journal_offline");
+                println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                Ok(())
+            }
+            Err(journal_error) => Err(std::io::Error::other(format!(
+                "operation daemon unavailable ({daemon_error}); offline journal lookup failed ({journal_error})"
+            ))),
+        },
+    }
+}
+
+fn export_cli() -> std::io::Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let relay = std::env::var("EVERMORE_ACTIVITY_EXPORT_RELAY").map_err(|_| {
+        invalid_input(
+            "activity export is disabled; set EVERMORE_ACTIVITY_EXPORT_RELAY to the user-selected relay",
+        )
+    })?;
+    if !(relay.starts_with("ws://") || relay.starts_with("wss://")) || relay.len() > 2048 {
+        return Err(invalid_input(
+            "EVERMORE_ACTIVITY_EXPORT_RELAY must be a ws:// or wss:// URL",
+        ));
+    }
+    let identity = arg_value("--identity")
+        .ok_or_else(|| invalid_input("export requires --identity SERVICE_IDENTITY"))?;
+    let owner_identity = arg_value("--owner-identity")
+        .ok_or_else(|| invalid_input("export requires --owner-identity OWNER_IDENTITY"))?;
+    let owner_pubkey = match send_request::<_, evermore_common::Response>(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::GetPublicKey {
+            identity: owner_identity,
+        },
     )
-    .map_err(std::io::Error::other)?;
-    print_response(response)
+    .map_err(std::io::Error::other)?
+    {
+        evermore_common::Response::Ok { data } => data
+            .get("pubkey_hex")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| invalid_input("signer response is missing owner pubkey"))?,
+        evermore_common::Response::Err { message } => return Err(std::io::Error::other(message)),
+    };
+    let service_pubkey = match send_request::<_, evermore_common::Response>(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::GetPublicKey {
+            identity: identity.clone(),
+        },
+    )
+    .map_err(std::io::Error::other)?
+    {
+        evermore_common::Response::Ok { data } => data
+            .get("pubkey_hex")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| invalid_input("signer response is missing service pubkey"))?,
+        evermore_common::Response::Err { message } => return Err(std::io::Error::other(message)),
+    };
+    if service_pubkey == owner_pubkey {
+        return Err(invalid_input(
+            "activity export must use a service identity distinct from the owner",
+        ));
+    }
+    let snapshot: Response =
+        send_request(&operations::runtime_socket_path(), &Request::ExportSnapshot)
+            .map_err(std::io::Error::other)?;
+    let snapshot = match snapshot {
+        Response::Ok { data } => data,
+        Response::Err { message } => return Err(std::io::Error::other(message)),
+    };
+    if snapshot.get("owner_pubkey").and_then(Value::as_str) != Some(&owner_pubkey) {
+        return Err(invalid_input(
+            "the selected owner identity doesn't match the operations daemon's configured owner",
+        ));
+    }
+    let operation_count = snapshot
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let plaintext = serde_json::json!({
+        "format": "evermore-operation-journal-v1",
+        "exported_at": unix_time(),
+        "owner_pubkey": owner_pubkey,
+        "journal": snapshot,
+    })
+    .to_string();
+    let export_id = hex::encode(Sha256::digest(plaintext.as_bytes()));
+    let chunks = utf8_chunks(&plaintext, 24 * 1024);
+    let total = chunks.len();
+    let mut event_ids = Vec::with_capacity(total);
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let ciphertext =
+            encrypt_text(&identity, &owner_pubkey, chunk).map_err(std::io::Error::other)?;
+        let event = sign_event(
+            &identity,
+            ciphertext,
+            vec![
+                vec!["t".into(), "evermore-operation-journal-export".into()],
+                vec!["p".into(), owner_pubkey.clone()],
+                vec!["export".into(), export_id.clone()],
+                vec!["part".into(), (index + 1).to_string(), total.to_string()],
+            ],
+        )
+        .map_err(std::io::Error::other)?;
+        publish_event(&relay, &event).map_err(|error| {
+            std::io::Error::other(format!(
+                "export {export_id} stopped after {}/{} acknowledged parts: {error}",
+                event_ids.len(),
+                total
+            ))
+        })?;
+        event_ids.push(
+            event
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "exported": true,
+            "encrypted": true,
+            "relay_configured": true,
+            "export_id": export_id,
+            "event_ids": event_ids,
+            "parts": total,
+            "operation_count": operation_count,
+        })
+    );
+    Ok(())
+}
+
+fn utf8_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + max_bytes).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&text[start..end]);
+        start = end;
+    }
+    if chunks.is_empty() {
+        chunks.push("");
+    }
+    chunks
 }
 
 fn sign_event(identity: &str, content: String, tags: Vec<Vec<String>>) -> Result<Value, String> {
@@ -737,6 +1269,76 @@ fn load_public_key(identity: &str) -> Result<PublicKey, String> {
     }
 }
 
+fn blossom_base_url() -> Result<String, String> {
+    let raw = std::env::var("EVERMORE_BLOSSOM_URL")
+        .map_err(|_| "EVERMORE_BLOSSOM_URL is required".to_string())?;
+    let base = raw.trim_end_matches('/');
+    if base.len() > 2048
+        || !(base.starts_with("http://") || base.starts_with("https://"))
+        || base.bytes().any(|b| b.is_ascii_control())
+        || base.contains('@')
+    {
+        return Err(
+            "EVERMORE_BLOSSOM_URL must be a valid HTTP(S) origin without credentials".into(),
+        );
+    }
+    Ok(base.to_string())
+}
+
+fn blossom_auth(
+    identity: &str,
+    method: &str,
+    url: &str,
+    payload_sha256: Option<&str>,
+) -> Result<String, String> {
+    let mut tags = vec![
+        vec!["u".to_string(), url.to_string()],
+        vec!["method".to_string(), method.to_string()],
+    ];
+    if let Some(sha) = payload_sha256 {
+        tags.push(vec!["payload".to_string(), sha.to_string()]);
+    }
+    let event = match send_request::<_, evermore_common::Response>(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::SignEvent {
+            identity: identity.to_string(),
+            kind: 27235,
+            content: String::new(),
+            tags,
+            created_at: None,
+        },
+    )? {
+        evermore_common::Response::Ok { data } => data,
+        evermore_common::Response::Err { message } => return Err(message),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(
+        serde_json::to_vec(&event).map_err(|error| format!("encoding NIP-98 event: {error}"))?,
+    );
+    Ok(format!("Nostr {encoded}"))
+}
+
+fn blossom_list_owned(base: &str, identity: &str) -> Result<Vec<Value>, String> {
+    let pubkey = load_public_key(identity)?.to_hex();
+    let url = format!("{base}/list/{pubkey}");
+    let auth = blossom_auth(identity, "GET", &url, None)?;
+    let mut response = ureq::get(&url)
+        .header("Authorization", &auth)
+        .call()
+        .map_err(|error| format!("Blossom listing failed: {error}"))?;
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(8 * 1024 * 1024)
+        .read_to_string()
+        .map_err(|error| format!("reading Blossom listing: {error}"))?;
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("invalid Blossom listing JSON: {error}"))?;
+    value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "Blossom listing response must be an array".into())
+}
+
 fn arg_value(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter()
@@ -766,7 +1368,8 @@ fn print_response(response: Response) -> std::io::Result<()> {
 
 fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
     let definition = operations::find(name).ok_or_else(|| format!("unknown operation '{name}'"))?;
-    operations::validate_input(name, arguments)?;
+    let normalized_arguments = operations::canonicalize_input(name, arguments)?;
+    let arguments = &normalized_arguments;
     if definition.access != operations::Access::Read {
         return Err(format!(
             "'{name}' is a write operation and cannot run before approval support is enabled"
@@ -794,9 +1397,93 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
                 &evermore_common::notifications::runtime_socket_path(),
                 &evermore_common::notifications::Request::ListRecent,
             )? {
-                evermore_common::notifications::Response::Ok { data } => data,
+                evermore_common::notifications::Response::Ok { data } => {
+                    let mut records = data.as_array().cloned().unwrap_or_default();
+                    records.retain(|record| {
+                        record.get("source").and_then(Value::as_str) != Some("dm")
+                    });
+                    Value::Array(records)
+                }
                 evermore_common::notifications::Response::Err { message } => return Err(message),
             }
+        }
+        "packages.list_installed" => {
+            let output = Command::new("evermore-npack")
+                .args(["installed", "--json"])
+                .output()
+                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            }
+            serde_json::from_slice(&output.stdout)
+                .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?
+        }
+        "packages.list_available" => {
+            let owner_identity = OWNER_IDENTITY
+                .get()
+                .ok_or("owner identity is unavailable")?;
+            let relay = std::env::var("EVERMORE_RELAY_URL")
+                .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
+            let output = Command::new("evermore-npack")
+                .args([
+                    "available",
+                    "--identity",
+                    owner_identity,
+                    "--relay",
+                    &relay,
+                    "--json",
+                ])
+                .output()
+                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            }
+            serde_json::from_slice(&output.stdout)
+                .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?
+        }
+        "packages.explain_dependencies" => {
+            let output = Command::new("evermore-npack")
+                .args(["installed", "--json"])
+                .output()
+                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            }
+            let manifests: Vec<evermore_npack::Manifest> =
+                serde_json::from_slice(&output.stdout)
+                    .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?;
+            let package_id = arguments["package_id"].as_str().expect("validated string");
+            let package = manifests
+                .iter()
+                .find(|manifest| manifest.id == package_id)
+                .ok_or_else(|| format!("package '{package_id}' is not installed"))?;
+            let dependencies: Vec<Value> = package
+                .dependencies
+                .iter()
+                .map(|dependency_id| {
+                    let dependency = manifests
+                        .iter()
+                        .find(|manifest| manifest.id == *dependency_id);
+                    serde_json::json!({
+                        "package_id": dependency_id,
+                        "installed": dependency.is_some(),
+                        "name": dependency.map(|manifest| manifest.name.as_str()),
+                        "version": dependency.map(|manifest| manifest.version.as_str())
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "package_id": package.id,
+                "name": package.name,
+                "version": package.version,
+                "dependencies": dependencies
+            })
+        }
+        "blossom.list_owned" => {
+            let owner = OWNER_IDENTITY
+                .get()
+                .ok_or("owner identity is unavailable")?;
+            Value::Array(blossom_list_owned(&blossom_base_url()?, owner)?)
         }
         "settings.get" => {
             let request = evermore_common::settings::Request::Get {
@@ -841,10 +1528,105 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
                 evermore_common::settings::Response::Err { message } => return Err(message),
             }
         }
+        "ai.context.list_sources" => {
+            match send_request::<_, evermore_common::ai_context::Event>(
+                &evermore_common::ai_context::runtime_socket_path(),
+                &evermore_common::ai_context::Request::ListSources,
+            )? {
+                evermore_common::ai_context::Event::Sources { sources } => {
+                    serde_json::json!(sources)
+                }
+                evermore_common::ai_context::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected context service response".into()),
+            }
+        }
+        "ai.context.get" => {
+            let source = arguments["source"]
+                .as_str()
+                .expect("validated as string")
+                .to_string();
+            match send_request::<_, evermore_common::ai_context::Event>(
+                &evermore_common::ai_context::runtime_socket_path(),
+                &evermore_common::ai_context::Request::Get { source },
+            )? {
+                evermore_common::ai_context::Event::Context { data, .. } => data,
+                evermore_common::ai_context::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected context service response".into()),
+            }
+        }
+        "ai.index.search" => {
+            let request = evermore_common::ai_index::Request::Search {
+                query: arguments["query"]
+                    .as_str()
+                    .expect("validated as string")
+                    .to_string(),
+                limit: arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|limit| limit as usize),
+            };
+            match send_request::<_, evermore_common::ai_index::Event>(
+                &evermore_common::ai_index::runtime_socket_path(),
+                &request,
+            )? {
+                evermore_common::ai_index::Event::Results { results, .. } => {
+                    serde_json::json!(results)
+                }
+                evermore_common::ai_index::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected index service response".into()),
+            }
+        }
+        "sway.list_windows" => serde_json::json!(sway_list_windows()?),
         _ => return Err(format!("'{name}' has no operation handler")),
     };
 
     Ok(operations::redact_result(&definition, data))
+}
+
+fn sway_list_windows() -> Result<Vec<Value>, String> {
+    let output = Command::new("swaymsg")
+        .args(["-t", "get_tree", "-r"])
+        .output()
+        .map_err(|e| format!("running swaymsg: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("swaymsg exited with {}", output.status));
+    }
+    let tree: Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid Sway tree: {e}"))?;
+    let mut windows = Vec::new();
+    collect_sway_windows(&tree, None, &mut windows);
+    Ok(windows)
+}
+
+fn collect_sway_windows(node: &Value, parent_workspace: Option<String>, output: &mut Vec<Value>) {
+    let workspace = if node.get("type").and_then(Value::as_str) == Some("workspace") {
+        node.get("name").and_then(Value::as_str).map(str::to_owned)
+    } else {
+        parent_workspace
+    };
+    let node_type = node.get("type").and_then(Value::as_str);
+    let is_window = node_type.is_some_and(|kind| kind == "con" || kind == "floating_con")
+        && (node.get("window").is_some_and(|window| !window.is_null())
+            || node.get("app_id").and_then(Value::as_str).is_some());
+    if is_window {
+        if let Some(con_id) = node.get("id").and_then(Value::as_u64) {
+            output.push(serde_json::json!({
+                "con_id": con_id,
+                "title": node.get("name").and_then(Value::as_str).unwrap_or(""),
+                "app_id": node.get("app_id").and_then(Value::as_str).unwrap_or(""),
+                "window_class": node.get("window_properties").and_then(|p| p.get("class")).and_then(Value::as_str).unwrap_or(""),
+                "workspace": workspace.as_deref().unwrap_or(""),
+                "focused": node.get("focused").and_then(Value::as_bool).unwrap_or(false)
+            }));
+        }
+    }
+    for key in ["nodes", "floating_nodes"] {
+        if let Some(children) = node.get(key).and_then(Value::as_array) {
+            for child in children {
+                collect_sway_windows(child, workspace.clone(), output);
+            }
+        }
+    }
 }
 
 fn send_request<T: Serialize, R: DeserializeOwned>(

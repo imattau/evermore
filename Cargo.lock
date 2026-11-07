@@ -1379,11 +1379,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "evermore-contextd"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "evermore-enroll"
 version = "0.1.0"
 dependencies = [
  "serde_json",
  "zbus",
+]
+
+[[package]]
+name = "evermore-indexd"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "evermore-inferd"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "evermore-npack",
+ "hex",
+ "nostr",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "evermore-mcp"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1419,11 +1459,16 @@ dependencies = [
 name = "evermore-operationsd"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "evermore-common",
+ "evermore-npack",
+ "hex",
  "nostr",
  "serde",
  "serde_json",
+ "sha2",
  "tungstenite",
+ "ureq",
 ]
 
 [[package]]
@@ -1467,6 +1512,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "evermore-sway-ai-bridge"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

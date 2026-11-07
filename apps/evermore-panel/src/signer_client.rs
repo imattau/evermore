@@ -50,6 +50,49 @@ pub fn fetch_identities() -> Result<Vec<Identity>, String> {
     Ok(identities)
 }
 
+pub fn sign_event(
+    identity: &str,
+    kind: u16,
+    content: String,
+    tags: Vec<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let sign_request = Request::SignEvent {
+        identity: identity.to_string(),
+        kind,
+        content,
+        tags,
+        created_at: None,
+    };
+    let mut stream = connect()?;
+    match request(&mut stream, sign_request)? {
+        Response::Ok { data } => Ok(data),
+        Response::Err { message } => Err(message),
+    }
+}
+
+pub fn nip44_encrypt(
+    identity: &str,
+    recipient_pubkey: &str,
+    plaintext: String,
+) -> Result<String, String> {
+    let mut stream = connect()?;
+    match request(
+        &mut stream,
+        Request::Nip44Encrypt {
+            identity: identity.to_string(),
+            recipient_pubkey: recipient_pubkey.to_string(),
+            plaintext,
+        },
+    )? {
+        Response::Ok { data } => data
+            .get("ciphertext")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "signer response omitted NIP-44 ciphertext".into()),
+        Response::Err { message } => Err(message),
+    }
+}
+
 fn connect() -> Result<UnixStream, String> {
     let path = evermore_common::runtime_socket_path();
     UnixStream::connect(&path).map_err(|e| {

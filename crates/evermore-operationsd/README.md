@@ -1,6 +1,6 @@
 # evermore-operationsd
 
-Local operation catalogue and approval-gated settings write path.
+Local operation catalogue and approval-gated operation executor.
 
 The daemon listens on `$XDG_RUNTIME_DIR/evermore/operationsd.sock` with
 owner-only directory/socket permissions. The service uses the configured
@@ -33,6 +33,11 @@ evermore-operationsd invoke settings.get '{"domain":"theme","key":"mode"}'
 
 Read calls route to the existing daemons. Arguments are validated against the
 shared catalogue and model-visible results pass through its redaction policy.
+`packages.list_installed` reads local manifests, while
+`packages.list_available` asks `npack` for the latest versions and archive
+hashes from the owner's trusted publisher list. These reads support package
+comparison and discovery; install proposals still bind to the exact version
+and SHA-256 and require owner approval.
 
 ## Approval-gated writes
 
@@ -43,6 +48,12 @@ evermore-operationsd request settings.set \
 evermore-operationsd approve <operation-id> approve --identity personal
 evermore-operationsd status <operation-id>
 ```
+
+`status` normally reads the live daemon. If the daemon is stopped, it falls
+back to the permission-restricted local journal and marks the response with
+`status_source: local_journal_offline`. Offline reads report expired pending
+requests as expired and conservatively report a persisted `running` claim as
+`execution_unknown`; they never execute or mutate the journal.
 
 Owner-signed grants let an agent submit only the named write operations:
 
@@ -76,9 +87,34 @@ If the settings daemon returns an error or its reply is lost after dispatch,
 the outcome is also marked `execution_unknown` because the write may already
 have taken effect.
 
-At this stage only `settings.set` has an executor. Request details and results
-are kept in a permission-restricted local state file, while the signed event
-chain is published to the control-plane relay. Relay publication is retried
-from durable state. Agent write requests require an active owner-signed grant
-for that exact operation. Read MCP identity authorization and broader policy
-remain future work.
+The current executor supports catalogue-backed settings, notification,
+package, model-import, and Sway operations. Package installation is pinned to a
+trusted signed release and exact archive digest. Package removal and signed
+model import also require owner approval; model import reads an installed
+package and does not download it. Request details and results are kept in a
+permission-restricted local state file, while the signed event chain is
+published to the control-plane relay. Relay publication is retried from
+durable state. Agent write requests require an active owner-signed grant for
+that exact operation. Reads and writes exposed through MCP use this same
+executor and catalogue.
+
+## Optional encrypted activity export
+
+Export is off unless the owner explicitly configures
+`EVERMORE_ACTIVITY_EXPORT_RELAY` with a `ws://` or `wss://` relay URL. A manual
+export requires both the service signing identity and owner identity:
+
+```sh
+EVERMORE_ACTIVITY_EXPORT_RELAY=wss://relay.example \
+  evermore-operationsd export --identity personal-operations --owner-identity personal
+```
+
+The command reads the full local operation and grant journal, splits the JSON
+into UTF-8-safe chunks below the NIP-44 plaintext limit, encrypts each chunk to
+the owner's public key, and signs kind:1 export events with the service
+identity. Each part is tagged with the SHA-256 export ID and its part number;
+the command requires a positive relay acknowledgement for every part. It does
+not run on a timer or send data anywhere unless the relay is configured and
+the owner invokes the command. Owners can query the relay for the export
+marker, group by export ID, sort parts by their `part` tags, decrypt each event
+with the service pubkey as sender, then concatenate the plaintext chunks.

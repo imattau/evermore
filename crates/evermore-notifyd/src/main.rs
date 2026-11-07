@@ -100,6 +100,7 @@ fn notify(appname_suffix: &str, summary: &str, body: &str) {
 
 fn handle_local_event(event: Event, store: &NotificationStore) {
     let record = NotificationRecord {
+        id: String::new(),
         source: Source::Local,
         title: "System".to_string(),
         body: event.content.clone(),
@@ -112,6 +113,7 @@ fn handle_local_event(event: Event, store: &NotificationStore) {
 fn handle_mention(event: Event, store: &NotificationStore) {
     let short_pubkey = short(&event.pubkey.to_hex());
     let record = NotificationRecord {
+        id: String::new(),
         source: Source::Mention,
         title: format!("Mention from {short_pubkey}"),
         body: event.content.clone(),
@@ -131,6 +133,7 @@ fn handle_gift_wrap(event: Event, signer: &SignerClient, store: &NotificationSto
     };
     let short_pubkey = short(&rumor.sender_pubkey);
     let record = NotificationRecord {
+        id: String::new(),
         source: Source::Dm,
         title: format!("DM from {short_pubkey} (kind {})", rumor.kind),
         body: rumor.content,
@@ -198,6 +201,13 @@ fn handle_connection(stream: UnixStream, store: &NotificationStore) -> std::io::
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(Request::ListRecent) => Response::ok(store.list_recent()),
+            Ok(Request::ClearRecent) => {
+                Response::ok(serde_json::json!({"cleared": store.clear_recent()}))
+            }
+            Ok(Request::Dismiss { notification_id }) => match store.dismiss(&notification_id) {
+                Ok(dismissed) => Response::ok(serde_json::json!({"dismissed": dismissed})),
+                Err(message) => Response::err(message),
+            },
             Err(e) => Response::err(format!("invalid request: {e}")),
         };
         let mut out = serde_json::to_string(&response)

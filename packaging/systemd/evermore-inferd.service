@@ -1,0 +1,22 @@
+[Unit]
+Description=Evermore local inference service
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/evermore-inferd
+Restart=on-failure
+RestartSec=3
+Environment=EVERMORE_LLAMA_SERVER_BIN=/usr/bin/llama-server
+Environment=EVERMORE_INFER_MAX_MODELS=2
+Environment=EVERMORE_INFER_READY_TIMEOUT_SECS=120
+UMask=0077
+NoNewPrivileges=true
+KillMode=control-group
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=default.target

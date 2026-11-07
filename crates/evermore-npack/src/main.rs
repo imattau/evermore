@@ -191,7 +191,11 @@ fn available_cmd() -> Result<(), String> {
     let own_pubkey = signer.get_public_key()?;
     let trust_list = fetch_trust_list(&relay, &own_pubkey)?;
     if trust_list.is_empty() {
-        println!("(no trusted publishers -- `evermore-npack trust PUBKEY_HEX`)");
+        if json_flag() {
+            println!("[]");
+        } else {
+            println!("(no trusted publishers -- `evermore-npack trust PUBKEY_HEX`)");
+        }
         return Ok(());
     }
 
@@ -200,16 +204,16 @@ fn available_cmd() -> Result<(), String> {
         let combined: Vec<serde_json::Value> = listings
             .into_iter()
             .map(|listing| {
-                let version = fetch_latest_release(&relay, &listing.id, &trust_list)
+                let release = fetch_latest_release(&relay, &listing.id, &trust_list)
                     .ok()
-                    .flatten()
-                    .map(|r| r.version);
+                    .flatten();
                 serde_json::json!({
                     "id": listing.id,
                     "name": listing.name,
                     "description": listing.description,
                     "publisher_pubkey": listing.publisher_pubkey,
-                    "version": version,
+                    "version": release.as_ref().map(|r| r.version.clone()),
+                    "sha256": release.map(|r| r.sha256),
                 })
             })
             .collect();
@@ -274,6 +278,14 @@ fn fetch_latest_release(
     id: &str,
     trust_list: &[String],
 ) -> Result<Option<ReleaseListing>, String> {
+    Ok(fetch_latest_release_event(relay, id, trust_list)?.map(|(release, _)| release))
+}
+
+fn fetch_latest_release_event(
+    relay: &str,
+    id: &str,
+    trust_list: &[String],
+) -> Result<Option<(ReleaseListing, serde_json::Value)>, String> {
     let filter = serde_json::json!({
         "kinds": [evermore_npack::KIND_RELEASE_ARTIFACT_SET],
         "authors": trust_list,
@@ -281,14 +293,16 @@ fn fetch_latest_release(
     });
     let events = relay_client::query(relay, filter)?;
     let latest = events.into_iter().max_by_key(|e| e.created_at);
-    Ok(latest.and_then(|e| {
-        Some(ReleaseListing {
+    Ok(latest.and_then(|event| {
+        let release = ReleaseListing {
             id: id.to_string(),
-            version: tag_value(&e, "version")?,
-            publisher_pubkey: e.pubkey.to_hex(),
-            blossom_url: tag_value(&e, "url")?,
-            sha256: tag_value(&e, "x")?,
-        })
+            version: tag_value(&event, "version")?,
+            publisher_pubkey: event.pubkey.to_hex(),
+            blossom_url: tag_value(&event, "url")?,
+            sha256: tag_value(&event, "x")?,
+        };
+        let signed_event = serde_json::to_value(event).ok()?;
+        Some((release, signed_event))
     }))
 }
 
@@ -296,6 +310,9 @@ fn fetch_latest_release(
 
 fn install_cmd(id: Option<String>) -> Result<(), String> {
     let id = require(id, "PACKAGE_ID")?;
+    if !safe_package_component(&id) {
+        return Err("PACKAGE_ID contains characters unsafe for an install path".into());
+    }
     let blossom_url = arg_value("--blossom-url").ok_or("missing --blossom-url URL")?;
     let signer = identity_arg()?;
     let relay = relay_arg();
@@ -305,13 +322,59 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
     if trust_list.is_empty() {
         return Err("no trusted publishers -- `evermore-npack trust PUBKEY_HEX` first".into());
     }
-    let release = fetch_latest_release(&relay, &id, &trust_list)?
-        .ok_or_else(|| format!("no release of '{id}' found from a trusted publisher"))?;
+    let requested_version = arg_value("--version");
+    let requested_sha256 = arg_value("--sha256");
+    if requested_version.is_some() != requested_sha256.is_some() {
+        return Err("--version and --sha256 must be supplied together".into());
+    }
+    let (release, signed_release_event) = if let (Some(version), Some(sha256)) =
+        (&requested_version, &requested_sha256)
+    {
+        if !safe_package_component(version)
+            || sha256.len() != 64
+            || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("pinned version or SHA-256 is malformed".into());
+        }
+        let events = relay_client::query(
+            &relay,
+            serde_json::json!({
+                "kinds": [evermore_npack::KIND_RELEASE_ARTIFACT_SET], "authors": trust_list, "#d": [&id]
+            }),
+        )?;
+        events
+            .into_iter()
+            .find_map(|event| {
+                let candidate = ReleaseListing {
+                    id: id.clone(),
+                    version: tag_value(&event, "version")?,
+                    publisher_pubkey: event.pubkey.to_hex(),
+                    blossom_url: tag_value(&event, "url")?,
+                    sha256: tag_value(&event, "x")?,
+                };
+                if candidate.version == *version && candidate.sha256.eq_ignore_ascii_case(sha256) {
+                    Some((candidate, serde_json::to_value(event).ok()?))
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| format!("no trusted signed release matches {id} {version} {sha256}"))?
+    } else {
+        fetch_latest_release_event(&relay, &id, &trust_list)?
+            .ok_or_else(|| format!("no release of '{id}' found from a trusted publisher"))?
+    };
+
+    if !safe_package_component(&release.version)
+        || release.sha256.len() != 64
+        || !release.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("trusted release contains an unsafe version or malformed SHA-256".into());
+    }
 
     let archive_bytes = blossom_client::download(&blossom_url, &release.sha256)
         .or_else(|_| blossom_client::download(&release.blossom_url, &release.sha256))?;
     let actual_sha256 = blossom_client::hex_sha256(&archive_bytes);
-    if actual_sha256 != release.sha256 {
+    if !actual_sha256.eq_ignore_ascii_case(&release.sha256) {
         return Err(format!(
             "downloaded content doesn't match the signed release (expected {}, got {actual_sha256}) -- refusing to install",
             release.sha256
@@ -326,6 +389,20 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
             manifest.id
         ));
     }
+    if manifest.version != release.version {
+        return Err(format!(
+            "archive manifest version '{}' doesn't match signed release '{}'",
+            manifest.version, release.version
+        ));
+    }
+
+    std::fs::write(
+        version_dir.join("evermore-release-event.json"),
+        serde_json::to_vec(&signed_release_event).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("writing signed release evidence: {e}"))?;
+    std::fs::write(version_dir.join("package.npk"), &archive_bytes)
+        .map_err(|e| format!("retaining verified package archive: {e}"))?;
 
     let current_link = install_root().join(&id).join("current");
     let _ = std::fs::remove_file(&current_link);
@@ -361,8 +438,20 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn safe_package_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
+}
+
 fn remove_cmd(id: Option<String>) -> Result<(), String> {
     let id = require(id, "PACKAGE_ID")?;
+    if !safe_package_component(&id) {
+        return Err("PACKAGE_ID contains characters unsafe for an install path".into());
+    }
     let package_dir = install_root().join(&id);
     let current_link = package_dir.join("current");
 

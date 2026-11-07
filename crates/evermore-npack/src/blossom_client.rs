@@ -38,12 +38,23 @@ pub fn upload(base_url: &str, signer: &SignerClient, data: &[u8]) -> Result<Stri
 
 pub fn download(base_url: &str, sha256: &str) -> Result<Vec<u8>, String> {
     let base_url = base_url.trim_end_matches('/');
-    let url = format!("{base_url}/{sha256}");
+    // A signed release may contain either a Blossom server base URL or the
+    // complete content URL returned by BUD-02 upload. Avoid appending the
+    // digest twice when the release already pins the content URL.
+    let url = if base_url.rsplit('/').next() == Some(sha256) {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/{sha256}")
+    };
     let mut response = ureq::get(&url)
         .call()
         .map_err(|e| format!("download failed: {e}"))?;
     response
         .body_mut()
+        .with_config()
+        // Model packages routinely exceed ureq's 10 MiB default. Keep a
+        // finite ceiling while allowing ordinary local GGUF packages.
+        .limit(1024 * 1024 * 1024)
         .read_to_vec()
         .map_err(|e| format!("reading download body: {e}"))
 }

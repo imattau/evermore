@@ -64,6 +64,7 @@ vm/
   create-vm.sh        <- (re)download image, build cloud-init seed, boot the VM (committed)
   connect.sh          <- SSH into the running VM (committed)
   sync-repo.sh         <- rsync the working tree into the VM, optionally run a command (committed)
+  phase7-offline-inference.sh <- run a local model with egress blocked (committed)
   screenshot.sh         <- grab a PNG of the VM's Sway session via grim+SSH (committed)
   destroy-vm.sh           <- gracefully stop the VM, optionally wipe the disk (committed)
   .gitignore           <- ignores everything under .local/
@@ -88,7 +89,8 @@ running `create-vm.sh`.
    This downloads the official Arch Linux cloud image (~550MB, once), builds a
    cloud-init seed that creates a `builder` user with passwordless sudo and
    installs `base-devel`, `git`, `rustup` (default toolchain set to stable),
-   `rsync`, and the GUI build dependencies egui/eframe need to compile
+   `rsync`, `llama-cpp`, `bubblewrap`, `iproute2`, and the GUI build
+   dependencies egui/eframe need to compile
    (`wayland`, `wayland-protocols`, `libxkbcommon`, `mesa`, `fontconfig`) —
    boots QEMU directly, and polls until SSH answers. First boot takes roughly
    1-2 minutes while cloud-init provisions the user and runs package installs
@@ -132,6 +134,33 @@ running `create-vm.sh`.
 5. You're now `builder` with passwordless sudo inside a disposable Arch VM.
    Clone/build Evermore components there, test `systemd --user` daemons, etc.
    without touching the host.
+
+## Phase 7 offline model check
+
+Install the Arch inference package in the VM once:
+
+```bash
+sudo pacman -S --noconfirm llama-cpp
+```
+
+After importing signed model packages so the model store contains
+`manifest.json` plus the GGUFs under `~/.local/share/evermore/models`, run:
+
+```bash
+vm/sync-repo.sh "bash vm/phase7-offline-inference.sh"
+```
+
+The script copies the model store to a temporary directory and runs
+`evermore-inferd` (which supervises `llama-server`) inside a Bubblewrap network
+namespace with only loopback enabled. It checks the store scan, a real embedding
+response, and then confirms an external TCP connection is unreachable. To also
+test streamed chat against a locally imported model, set
+`EVERMORE_P7_CHAT_MODEL=evermore/p7.model.tinyllama:1.0.0`. The VM needs
+`bubblewrap`, `iproute2`, `llama-cpp`, and passwordless sudo; the host/VM
+firewall and running desktop network are not changed. Set
+`EVERMORE_P7_MODEL_DIR`, `EVERMORE_P7_MODEL`, `EVERMORE_P7_INFERD_BIN`, or
+`EVERMORE_LLAMA_SERVER_BIN` in the VM to select a different model store, default
+model, daemon binary, or `llama-server`.
 
 6. When done:
    ```bash

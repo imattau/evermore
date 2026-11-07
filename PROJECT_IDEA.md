@@ -85,9 +85,12 @@ evermore/
     evermore-notifyd/           <- Phase 3: notification bridge
     evermore-blossom-fs/        <- Phase 4: Blossom FUSE mount / sync daemon
     evermore-npack/             <- Phase 5: package manager core
+    evermore-inferd/            <- Phase 7.5: llama.cpp supervisor and model store
     evermore-mcp/               <- Phase 7: MCP server exposing daemons to AI agents
   apps/
-    evermore-panel/             <- egui control panel (tabs: identity, settings, notifications, packages)
+    evermore-panel/             <- egui control panel and desktop launcher/drawers
+  tools/
+    model-build/                <- Phase 7.5: GGUF/LoRA conversion and npack recipes
   packaging/
     systemd/                    <- user unit files, one per daemon
     archiso/                    <- Phase 5 ISO profile
@@ -512,39 +515,92 @@ approval rules, and audit trail. This builds on Phase 1's signer and Phase 2's
 existing loopback control relay at `127.0.0.1:4869`; it does not introduce a
 second relay or grant any service the owner's raw `nsec`.
 
-**Implementation status (2026-11-07):** M7.1 has started in
-`evermore-common::operations` with versioned schemas, access classes, grants,
-approval metadata, and redaction policy for existing identity, notification,
-and settings capabilities. `evermore-operationsd catalog` serves these
-definitions over a private Unix socket and prints the same data as JSON; the
-panel's AI tab reads the same catalogue and shows the required grant and
-approval classification. The CLI routes catalogued reads to the existing
-signer, settings, and notification daemons, validates arguments from the
-catalogue, and redacts secret-shaped results. Initial M7.2 support accepts
+**Implementation status (2026-11-08):** The initial M7.1 catalogue is
+implemented in `evermore-common::operations` with versioned schemas, access
+classes, grants, approval metadata, and redaction policy for identity,
+notification, settings, context, local-search, and Sway capabilities. It
+canonicalizes validated arguments and records the catalogue version with each
+request. `evermore-operationsd catalog` serves
+these definitions over a private Unix socket and prints the same data as JSON;
+the panel's AI tab reads the same catalogue and shows the required grant and
+approval classification. The CLI routes catalogued reads to the signer,
+settings, notification, context, and semantic-index services, validates
+arguments from the catalogue, and redacts secret-shaped results. MCP derives
+its context/search tools from this catalogue and requires matching agent read
+grants. AI-facing notification reads exclude DMs until a separate explicit
+consent scope exists. Initial M7.2 support accepts
 signed kind:1 requests and owner approvals, encrypts request content to the
 owner, persists lifecycle state, publishes acknowledged events on the
 existing local relay, and signs outcome events with a distinct service
-identity. It executes the approval-gated `settings.set` operation. Approval is
+identity. It executes approval-gated `settings.set`, Sway focus, workspace,
+and application-launch operations. Owners can approve, deny, or cancel a pending request;
+cancellation is persisted and returned through the signed result lifecycle.
+The panel's AI tab lists pending operation requests,
+shows their actor and exact arguments, and submits signed owner approvals,
+denials, or cancellations through the signer. The panel also displays recent lifecycle status,
+operation IDs, relay acknowledgement, approval/result event IDs, and results.
+Approval is
 bound to the signed request event ID and exact request payload. A persisted
 `running` state becomes `execution_unknown` after restart or an ambiguous
-daemon response to prevent blind replay. M7.5 adds owner-signed, expiring
+daemon response to prevent blind replay. Before an approved side effect, the
+service persists and relay-publishes a signed execution-attempt event binding
+the operation ID, catalogue version, request event, and approval event; it
+executes only after relay acknowledgement. The panel history exposes its event
+ID and acknowledgement state. When the executor socket is unavailable, the
+CLI, MCP `op_status`, and panel history/pending views fall back to the read-only
+private local journal; offline panel snapshots cannot approve or deny
+requests. An interrupted execution claim is conservatively reported as
+`execution_unknown` without replay. M7.5 adds owner-signed, expiring
 agent grants scoped to exact write operation names. Grant publication must be
 acknowledged by the local relay before use; revocation is immediate in local
 state and blocks queued requests, with signed relay publication retried in the
 background. The grant is checked at submission, approval, and execution.
-Only `settings.set` currently has an executor; broader write handlers and
-read-side MCP identity authorization remain open.
+The VM validation used distinct test identities: a relay-acknowledged grant
+limited an agent to `sway.switch_workspace`, the agent's self-approval was
+rejected, and the owner's approval completed the request.
+The initial M7.6 stdio adapter now exposes catalogue-backed MCP tools,
+uses a configured dedicated agent identity, checks exact operation grants,
+and provides `mcp_status` and actor-scoped `op_status`. It now also supports
+Streamable HTTP on a loopback-only listener with bearer authentication,
+Host/Origin validation, secure session IDs, and required negotiated protocol
+headers. HTTP calls still route to the same configured agent identity and
+operation-grant checks. The endpoint returns JSON responses and rejects GET
+with 405 because it does not provide server-initiated SSE streams. M7.3 now has
+an initial `evermore-inferd` service with a versioned Unix socket API, streamed
+chat, installed-model listing/unloading, and per-request CPU/GPU/auto backend
+selection through a loopback Ollama-compatible backend. Npack manifests can
+declare a GGUF file and digest; installation retains the signed release event
+and verified archive, and `evermore-inferd` verifies the release signature,
+package/version binding, archive hash, and GGUF hash before importing into
+local Ollama. This is exposed through the approval-required
+`ai.model.install_signed_npack` operation and performs no download. The panel's
+AI tab lists installed local models, persists the selected model and backend in
+a private per-user preference file, and streams chat through `evermore-inferd`.
+The loopback Ollama-compatible backend is a first implementation and is
+superseded by Phase 7.5, which replaces it with a supervised `llama-server`
+while keeping this socket contract. If no model is installed, it explains the
+signed package install/import path.
+No cloud provider is exposed by this service. VM runtime validation imported locally
+available BGE and TinyLlama GGUFs from pinned, publisher-signed NPK releases;
+each package install and model import used distinct-owner approval and
+relay-acknowledged lifecycle events. BGE returned 384-dimension embeddings and
+powered explicit-file indexing/search with secret redaction. The reusable VM
+check runs both embeddings and streamed TinyLlama chat in a private Bubblewrap
+network namespace; both succeeded while an external TCP connect failed with
+`ENETUNREACH`. The VM panel selected the installed TinyLlama package, stored
+the model/backend preference with mode 0600, and its selected model completed a
+streamed inference request.
 
 **Service boundaries:**
 
 | Service | Responsibility | Authority |
 | :--- | :--- | :--- |
-| `ai-inferd` | Runs local models and streams inference responses; cloud inference is available only by explicit per-request opt-in. | Thinks; cannot execute system operations. |
-| `ai-contextd` | Provides selected session context such as focused window, workspace, settings, notifications, and package state. | Observes only; returns only data allowed by the user's context policy. |
-| `ai-indexd` | Builds a local semantic index for explicitly selected Nostr events, files, settings, and package metadata. | Searches only; private messages and file contents are not indexed without consent. |
+| `ai-inferd` | Runs locally installed models and streams inference responses. The initial service has no cloud-provider path. | Thinks; cannot execute system operations. |
+| `ai-contextd` | Provides selected session context such as focused window, workspace, theme settings, and non-DM notification metadata. | Observes only; serves only sources enabled by the user-session allowlist. |
+| `ai-indexd` | Builds and searches a local semantic index for explicitly selected text files. | Searches only; indexes only per-file selections and redacts secret-shaped values. |
 | `evermore-operationsd` | Owns the operation catalogue, authorization checks, approval state, execution, result redaction, and audit events. | The only path for AI-requested mutations; executes writes only after required approval. |
-| `ai-agentd` | Plans and coordinates multi-step tasks using inference, context, and registered operations. | Submits operation requests; cannot invoke shell commands or bypass the executor. |
-| `ai-policyd` | Supplies advisory risk and trust summaries to the human approval flow. | Advises only; cannot grant permissions or approve an operation. |
+| `ai-agentd` (future optional) | Could coordinate multi-step tasks using inference, context, and registered operations. External agents use MCP in the initial implementation. | No shell or execution authority; not shipped in this phase. |
+| `ai-policyd` (future optional) | Could supply advisory risk and trust summaries to the human approval flow. | No grant or approval authority; not shipped in this phase. |
 | `evermore-mcp` | Adapts registered operations to MCP tools and transports. | Interface only; contains no policy or execution authority. |
 
 All AI-facing services bind to Unix sockets or loopback. They never listen on
@@ -590,11 +646,11 @@ authority for the model or MCP client.
 - **M7.2 — Signed operation control plane.** Add `evermore-operationsd` as
   the executor for local operations such as settings writes, package actions,
   and Sway IPC. Requests carry a Nostr actor identity and are correlated to
-  approval, execution, and result events on the existing local relay. Adopt
-  `kind:2200` request and `2201`/`2203`/`2204`/`2205` lifecycle pattern only
-  after mapping the need against standard NIPs and checking kind assignments;
-  add the chosen kinds to the relay's NIP-86 allowlist. Store
-  the lifecycle as regular, immutable events. The agent signs its request,
+  approval, execution, and result events on the existing local relay. Keep the
+  current signed kind:1 event format with operation marker tags: [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) classifies
+  kinds 2200–2205 as ephemeral, so they would not meet the durable recovery
+  requirement. The local relay already accepts kind:1; no custom NIP-86
+  allowlist is needed. Store the lifecycle as regular, immutable events. The agent signs its request,
   the owner signs approval, and the executor signs
   execution/result events; event IDs and `operation_id` correlate the chain.
   Local reads may execute immediately.
@@ -606,21 +662,52 @@ authority for the model or MCP client.
   duplicate events, or daemon restarts cannot replay a write. Approval itself
   only changes eligibility; the executor reloads and rechecks the operation,
   grant, and approval before making a side effect. Expose `operation_id` status
-  through CLI, egui, and MCP.
-- **M7.3 — Local inference service.** Build `ai-inferd` with a stable Unix
-  socket API, model management, streaming responses, and CPU/GPU backend
-  selection. Prove an offline local-model path first. Models are installed
-  and verified as signed `npack` artifacts; a small optional first-run model
-  can provide offline capability without forcing a large model into every
-  ISO. Benchmark a backend such as llama.cpp, Candle, or an Ollama-compatible
-  service behind the stable interface. Cloud providers require explicit
-  per-request consent and disclose what context will leave the device.
-- **M7.4 — Context and semantic search.** Build read-only `ai-contextd` and
-  `ai-indexd` interfaces. Start with compositor state, settings, notification
-  metadata, package metadata, and user-selected `~/Nostr` files. Keep indexing
-  local by default. Require explicit opt-in and scopes before indexing DM
-  contents, private files, or other sensitive data. Context subscriptions
-  must not become an alternate write path.
+  through CLI, egui, and MCP. The panel approval inbox and recent-activity view
+  now provide the egui status and decision surface for the initial operations.
+- **M7.3 — Local inference service.** Initial `evermore-inferd` is implemented
+  with a stable Unix socket API, streamed responses, installed-model
+  listing/unloading, and per-request CPU/GPU/auto selection over a loopback
+  Ollama-compatible backend. It rejects cloud model tags and exposes no
+  remote-provider path. Signed `npack` model import is implemented through an
+  approval-required operation: the importer checks the retained signed release,
+  package/version binding, archive hash, and manifest GGUF hash before local
+  Ollama import. Offline VM validation uses signed locally imported BGE and
+  TinyLlama packages with networking disabled in a private network namespace.
+  The panel provides first-run local model selection, backend preference, and
+  streamed chat, with signed-package installation guidance when no model is
+  installed. The local CPU chat and embedding paths have been smoke-checked on
+  the host; VM validation
+  imported the signed models through owner approval and returned embeddings
+  plus streamed chat. Any future cloud path
+  requires per-request consent and clear disclosure of the context leaving the
+  device.
+- **M7.4 — Context and semantic search.** Initial read-only `ai-contextd`
+  and `ai-indexd` services are implemented. `ai-contextd` serves only
+  allowlisted compositor, theme-settings, and non-DM notification sources;
+  `ai-indexd` indexes explicitly selected individual text files. It
+  uses the local embedding service, stores a private local vector index, and
+  redacts secret-shaped values before embedding and storage. Selection is
+  configured through `EVERMORE_INDEX_FILES`; only regular `.md`, `.txt`,
+  `.rst`, and `.org` files up to 2 MiB are accepted. The AI tab now manages
+  per-file selections, reindexing, removal/purge, and semantic search through
+  a private config file, with an explicit picker for supported files in
+  `~/Nostr`. Context sources include installed package manifests. The AI tab
+  controls the allowlist for compositor, theme, non-DM notification metadata,
+  and installed packages through a private config file. VM context validation
+  returned all installed package manifests. The current disposable test set
+  contains signed BGE and TinyLlama model packages plus a dependency-report
+  fixture.
+  Host socket smoke checks pass for indexing/search
+  and default-deny context source access; both services compile on the VM. The
+  shared operation catalogue exposes context listing/reading and semantic
+  search to CLI/MCP; MCP checks the matching agent grant for these calls.
+  Private messages and other sensitive sources remain excluded unless a
+  future explicit consent flow scopes them. Context subscriptions must not
+  become an alternate write path. The VM compositor-context smoke check
+  returned its live focused workspace. VM runtime validation installed a
+  local embedding backend and successfully indexed and searched an explicitly
+  selected fixture file. A separate VM context query returned the installed
+  package manifest from the complete current NPK package set.
 - **M7.5 — Scoped agent and approval enforcement.** Agent identities are
   separate Nostr keypairs, never the owner's key. Owner-signed grants constrain
   exact operation names, expire within 365 days, and require relay
@@ -628,58 +715,508 @@ authority for the model or MCP client.
   request submission, approval, and execution; only the owner can approve, so
   an agent cannot approve its own request. Revocation takes effect locally
   immediately, prevents queued work from executing, and publishes a signed
-  revocation with background retry. The initial implementation is complete
-  for the current write executor. Addressable grant events, kind/domain-level
-  scopes, signer-side enforcement, and broader write executors remain open.
-- **M7.6 — Thin MCP adapter.** Implement `evermore-mcp` as a transport and
-  schema adapter over the operation catalogue and core daemons. It exposes
-  read tools and scoped operation requests, never raw signing or shell
-  passthrough. MCP is an interface, not an authority boundary. For any HTTP
-  transport, authenticate and bind the caller's Nostr identity before
-  dispatch; local stdio transports must bind to the owning user session.
-  Provide stdio first and optional loopback Streamable HTTP for clients that
-  need it; reject non-loopback binding by default. Make `mcp_status` report
-  adapter reachability and recognized caller identity without depending on
-  the operation relay/executor, and expose `op_status(operation_id)` for
-  durable approval and execution results. The adapter has no root privilege,
-  policy implementation, or direct execution path.
-- **M7.7 — Sway and egui integration.** Add a `sway-ai-bridge` that reports
-  selected window and workspace changes to `ai-contextd`. Read operations
-  such as listing windows are available through the catalogue; workspace,
-  focus, and launch changes go through approval-gated operations, never
-  direct model-issued `swaymsg`. Add contextual help and operation proposals
-  to existing egui panels, with a system-wide hotkey command palette as the
-  shared interaction surface. Local speech-to-text voice input may be added
-  later through the same inference and operation path.
-- **M7.8 — Existing services use the same operations.** Add `npack` update
-  proposals, settings changes, notification triage, and Blossom file search
-  as catalogue operations. Support trust-graph-grounded package discovery
-  (for example, finding a screenshot tool from a followed publisher) and
-  dependency explanations. An agent may draft a package update but
+  revocation with background retry. The exact-operation grant milestone is
+  complete for settings, notification, package, model-import, Blossom, and
+  Sway writes. Future hardening may add addressable grants, additional scope
+  levels, signer-side grant enforcement, and more write executors.
+- **M7.6 — Thin MCP adapter.** The initial stdio adapter is implemented as
+  `evermore-mcp`. It derives tools and schemas from the shared catalogue,
+  binds the process to a configured dedicated agent identity in the owning
+  user session, checks exact operation grants, and submits writes only through
+  the signed approval path. It exposes `mcp_status` and actor-scoped
+  `op_status`, with no raw signing or shell passthrough. Actor-scoped
+  `op_status` remains available from the local journal while the executor is
+  stopped. Streamable HTTP is
+  implemented with a loopback-only bind, required bearer token, Host and
+  Origin validation, per-session IDs, protocol-version checks, body/header
+  limits, and JSON responses. GET is rejected with 405 because this adapter
+  does not initiate SSE streams. The token grants access to the configured
+  dedicated agent identity; operation grants remain enforced independently by
+  the adapter and operations daemon. MCP remains an interface, not an
+  authority boundary.
+- **M7.7 — Sway and egui integration.** Initial `evermore-sway-ai-bridge`
+  reports focused-window/workspace changes to `ai-contextd`. The catalogue
+  exposes window listing plus approval-gated focus, numbered workspace, and
+  application-launch operations; launch accepts a bounded argv and invokes the
+  executable directly without a shell. `evermore-operationsd` rechecks a focus target before acting and
+  records ambiguous Sway responses as `execution_unknown`. The panel has an
+  owner approval/denial inbox that signs decisions through the signer. It now
+  has a catalogue-driven generic write proposal form: select a loaded signer
+  identity and approved operation, enter JSON arguments, and the panel
+  validates, encrypts to the configured owner, signs, and submits through the
+  operations daemon. A compact catalogue-search palette now opens from the
+  global Sway binding `$mod+Shift+space` through
+  `evermore-panel --command-palette`; it uses the same grant and approval path
+  and has no direct command execution. `evermore-panel --ai` opens the full
+  local-model view directly. VM validation opened two temporary
+  windows and confirmed an owner-approved `sway.focus_window` request focused
+  the specified container ID after the other window had focus. An
+owner-approved `sway.launch_app` request started the harmless `true`
+executable and emitted acknowledged request, approval, execution, and result
+events. Host and VM `cargo test --offline --workspace` pass, as do host
+`cargo check --offline --workspace`, `cargo fmt --all --check`, and
+`git diff --check`. Local
+  speech-to-text voice input may be added later
+  through the same inference and operation path.
+- **M7.8 — Existing services use the same operations.** The catalogue now
+  routes settings writes through approval, filters DM records from AI
+  notification reads, supports approval-gated notification dismissal and clear, and
+  accepts approval-gated package install and removal proposals. Installs bind
+  to an exact package ID, version, and SHA-256 from a trusted signed release;
+  removals target one validated package ID and remove its package-managed
+  executable link. Catalogue reads now expose installed package manifests and
+  latest versions plus archive hashes from the owner's trusted-publisher
+  list, supporting trust-graph-grounded discovery and exact-version update
+  explanations. The operation daemon invokes `evermore-npack` with the
+  owner's configured identity for trusted-release lookups and installs; set
+  `EVERMORE_BLOSSOM_URL` in its service environment. `npack` rechecks the
+  trusted signed release and archive hash before extraction. This path compiles
+  on host and VM. A trusted publisher release was installed from a pinned
+  signed listing through `packages.install_pinned` in the VM; a distinct owner
+  approved it, and request, approval, execution, and result events were
+  acknowledged. A disposable local notification was also dismissed through
+  `notifications.dismiss` after owner approval, with the other fixture
+  notification left in place. `blossom.list_owned` uses owner-signed NIP-98
+  authentication; `blossom.delete` verifies ownership in that listing and
+  requires owner approval. A VM disposable-blob flow exercised listing,
+  short-lived exact-operation grant, approved deletion, and relay acknowledgement
+  of request, approval, execution, and result; the grant was revoked afterward
+  and the empty listing confirmed. `packages.explain_dependencies` reports
+  direct dependencies and installed versions; VM validation distinguished the
+  installed BGE and TinyLlama packages from a missing fixture dependency.
+  Exact-version installation/update is supported; richer batch/update planning
+  and additional notification triage remain future work. An agent may draft a
+  package update but
   publishing still requires the publisher identity's own signature.
-  Notifications and package trust assessments from `ai-policyd` are
-  explanations for the user, not automatic policy decisions.
-- **M7.9 — Activity log and optional agent collaboration.** Render the
-  request → approval → execution → result event chain in an egui Activity
-  Log. Each event records actor, operation, request correlation, approval,
-  and outcome. Keep the audit local by default; allow encrypted export to a
-  user-selected relay only when configured. Later, scoped sub-agents may use
+  No `ai-policyd` is shipped in this implementation; notification and package
+  trust decisions remain with the owner rather than being inferred by policy.
+- **M7.9 — Activity log and optional agent collaboration.** The panel's recent
+  activity view renders operation IDs, actor, operation, request/approval/
+  execution/result publication status, approval/execution/result event IDs,
+  arguments, and outcome from the durable local operation store. The immutable
+  result event records status only; details remain in the permissioned local
+  journal. Manual encrypted export is implemented: it is disabled unless
+  `EVERMORE_ACTIVITY_EXPORT_RELAY` names a user-selected relay and the owner
+  invokes `evermore-operationsd export`. The command encrypts the full local
+  operation/grant snapshot to the owner with NIP-44, publishes service-signed
+  parts with acknowledgements, and tags each part with an export ID and index.
+  Optional scoped sub-agents may later use
   their own Nostr keys or owner-mediated NIP-46 signing, with no shared owner
   secret and no self-approval.
 
-**Validation:** First prove a vertical slice in the VM: invoke a read
-operation from CLI and MCP using the same generated schema; submit a write;
-verify it stays pending until a distinct owner approves; deny another write;
-restart the executor while an approval is pending; then approve and verify
-the operation completes once. Check expiry, duplicate submission, stale or
-modified arguments, out-of-scope requests, and self-approval are refused or
-handled deterministically. Confirm the signed lifecycle chain reconstructs
-from persisted state after restart, `operation_id` remains queryable, local
-status works while the executor is stopped, and secrets are redacted before
-model-visible results. Then preload a verified test model, disconnect the
-network, and prove the local inference path. Finally verify the agent cannot
-reach privileged operations through MCP, shell, Sway, or an egui panel outside
-the catalogue.
+**Verification progress (2026-11-08):** Full workspace `cargo check --offline`
+and `cargo test --offline --workspace` pass on host and VM; the signer
+socket-roundtrip integration test passed in both environments. Host runtime checks exercised local CPU chat, embeddings,
+file indexing/search, scope removal/purge, context source denial, and package
+manifest context. VM runtime checks exercised live Sway context, bridge updates,
+and an approval-gated workspace switch; a separate VM flow verified the exact
+agent grant was relay-acknowledged, agent self-approval was rejected, owner
+approval succeeded, and request/approval/result event IDs were queryable from
+the local activity history. After adding execution-attempt events, a separate
+isolated VM store exercised an owner-signed Sway workspace request end to end:
+the distinct service identity's execution event was relay-acknowledged before
+the workspace command, and request, approval, execution, and result events all
+showed relay acknowledgement with final status `succeeded`. A host runtime
+check also queried the agent's operation through both the CLI and MCP after
+stopping the executor; both returned the actor-scoped record from the local
+journal. A host runtime
+smoke check exercised the MCP HTTP
+initialize/session and tool-list flow, including bearer-token and Origin
+rejection. A VM runtime flow used temporary owner, agent, and service
+identities plus an isolated operation journal: the relay acknowledged
+exact-operation grants; a granted `settings.list_domains` call succeeded over
+Streamable HTTP; `settings.get` outside the grant was refused; `settings.set`
+returned `pending`; the owner denied it; and actor-scoped `op_status` returned
+the denied record. Request, approval, and result events were acknowledged, and
+the denied write did not execute. A second VM flow exercised
+`packages.remove` through MCP against a disposable package fixture: it stayed
+pending until owner approval, then removed only the fixture and finished with
+request, approval, execution, and result acknowledgements. Replaying that exact
+signed request after an operations-daemon restart returned the stored
+`succeeded` outcome without repeating the removal. A separate pending settings
+request remained `pending` after daemon restart and was then owner-denied with
+acknowledged approval and result events. The package catalogue reads were also
+called through VM MCP: `packages.list_installed` returned a disposable fixture
+manifest, and `packages.list_available` returned a valid empty list for an
+owner with no trusted publishers. The optional activity export was invoked
+against the local relay with a disposable journal; a mismatched owner identity
+was refused, then the configured owner target produced a NIP-44-encrypted,
+service-signed event and received the relay acknowledgement. A VM model flow
+used the local BGE GGUF artifact without pulling a model, installed its
+publisher-signed package at a pinned version and archive digest through the
+`packages.install_pinned` operation, and passed model import through a distinct
+owner's approval. Both package installs and model imports succeeded with
+relay-acknowledged lifecycle events. Embedding and explicitly selected
+text-file index/search succeeded; the returned excerpt redacted the fixture's
+password-shaped value. TinyLlama also streamed chat tokens from the inference
+socket while running in a private network namespace; an external TCP
+connection was unreachable. One deliberately space-constrained install left
+an execution claim interrupted; daemon restart reported `execution_unknown`
+without replay. After removing duplicate test copies, a new owner-approved
+install completed successfully. The VM panel displayed and selected
+`evermore/p7.model.tinyllama:1.0.0`, stored the selection with private file
+permissions, and a request through the inference socket streamed the expected
+short response. A disposable
+notification dismissal succeeded through owner approval and removed only the
+selected fixture; a focus request also succeeded for the requested Sway
+container ID after starting two temporary windows. In the isolated VM journal, a
+modified copy of a signed request was rejected with an invalid event ID; after
+simulating an expired deadline and restarting the daemon, the request became
+`expired` and owner approval was refused. The new
+palette was built and launched in VM Sway; the configured rule produced a
+centered 720×560 floating window, and the VM's original Sway config was restored
+after the visual check. Blossom listing and deletion were exercised against a
+disposable VM blob: a narrowly scoped grant enabled the agent request, the owner
+approved deletion, all four lifecycle events were acknowledged, the grant was
+revoked, and a follow-up listing was empty. Dependency explanation returned
+the two installed model dependencies and one absent fixture dependency. A
+separate pending owner request was cancelled before execution: it finished as
+`cancelled`, its request, owner decision, and result were relay-acknowledged,
+and it had no execution event.
+
+**Validation status:** The initial Phase 7 acceptance checks are complete on
+the VM: CLI/MCP catalogue reads, owner-gated writes, denial and cancellation,
+pending approval across restart, exactly-once recovery behavior, expiry,
+duplicate and modified request handling, grant scope and self-approval
+rejection, local status fallback, signed lifecycle acknowledgements, and
+secret redaction were exercised. Read and write surfaces use the same
+catalogue; MCP exposes no shell or direct Sway tool, and the panel routes
+writes through owner approval. The reusable
+`vm/phase7-offline-inference.sh` check verifies embeddings and streamed chat
+while external network access is disabled. Host and VM workspace tests pass.
+A host application that separately gives an external agent shell access must
+enforce that boundary at its own process sandbox. Remaining M7 enhancements
+are explicitly optional or future work in the milestone notes (for example,
+voice input, batch update planning, server-initiated MCP SSE, broader grant
+scopes, and optional agent/policy daemons); they are not prerequisites for the
+initial Phase 7 baseline.
+
+### Phase 7.5: Inference Runtime Refactor — `llama.cpp` Supervisor
+
+**Goal:** Replace the loopback Ollama backend that M7.3 selected with a
+supervised `llama-server` child process, so Evermore owns the inference path
+end to end — model storage, signed artifact pairing, quantization, and
+lifecycle — while the `ai-inferd` Unix-socket contract that the panel, drawer,
+`ai-indexd`, and MCP already depend on stays stable. This is
+integration/refactor work: no new authority, no new daemon, and no cloud path.
+
+**Implementation status (2026-11-08):** M7.10–M7.13 are implemented.
+`evermore-common` defines the versioned `ModelManifest` (an adapter requires
+the operation-registry version it was trained against), store discovery via
+`EVERMORE_MODEL_DIRS` with user-root precedence, and protocol version 2.
+`evermore-inferd` scans `/var/lib/evermore/models` and
+`~/.local/share/evermore/models`, spawns one `llama-server` child per model on
+an ephemeral loopback port with a per-process API key, restarts after a crash,
+and serves `/v1/chat/completions` SSE and `/v1/embeddings` behind the unchanged
+socket contract. `UnloadModel` stops that model's child and `Health` reports
+`llama.cpp`. Signed npack import keeps the retained release, archive, and
+base/adapter hash verification, then publishes a manifest plus GGUFs into the
+model store instead of uploading to Ollama. `evermore-indexd` discovers a model
+that declares the `embeddings` capability instead of defaulting to an Ollama
+tag. VM validation with external networking disabled scanned two models,
+returned a 384-dimension embedding, streamed chat, blocked external egress,
+restarted a killed child, and unloaded it. Arch's package is `llama-cpp` (it
+provides `llama-server`), so packaging and the VM script target that name.
+Remaining work is M7.14 runtime adapter scale control, M7.15 grammar
+constraints, M7.16 conversion recipes and ISO pre-install, and M7.17 reinstall
+and acceptance polish. Existing disposable model fixtures must be republished
+with `capabilities` (or `EVERMORE_EMBED_MODEL` set) before `ai-indexd` can
+select them.
+
+**Why not Ollama:** Ollama's value proposition is model management for end
+users; Evermore is a distribution that must own the inference path, pair base
+models with signed adapters, and update both through `npack` with provenance.
+Ollama abstracts exactly the decisions Evermore needs control over: adapter
+support, quantization choice, storage layout, the conversion pipeline, and the
+update cadence. The removal of `ADAPTER` support is a concrete reminder that
+Ollama's roadmap is not Evermore's. `llama.cpp` is the reference implementation
+for LoRA adapters and GBNF grammars, Arch tracks it closely, and the
+distribution can depend on the packaged `llama.cpp` (plus its `-cuda`,
+`-vulkan`, or `-hip` variants) rather than building C++ inside a Rust build.
+
+**Architecture — supervisor, not embedder:**
+
+```
+panel / launcher / left drawer / ai-indexd / ai-agentd
+        │  Unix socket (stable ai-inferd protocol)
+        ▼
+    ai-inferd ──spawns──► llama-server (127.0.0.1:<ephemeral>)
+        │                   --model base.gguf --lora evermore.gguf
+        ├─ model-store scan + manifest validation
+        ├─ adapter pairing, process pool, request queue
+        └─ crash detection, restart/backoff, redaction boundary
+```
+
+The daemon spawns and supervises `llama-server`; it does not link `llama.cpp`.
+That keeps packaging on the Arch package, isolates model or driver faults from
+the daemon that every launcher query depends on, and gives Evermore
+`llama-server`'s OpenAI-compatible `/v1/chat/completions` streaming endpoint,
+`/v1/embeddings`, GBNF/JSON-schema constrained output, and the runtime LoRA API.
+Embedding via `llama-cpp-rs`, or switching to the pure-Rust `mistral.rs`,
+remains a back-pocket option only: tighter integration at the cost of build
+fragility is not a good trade for a distribution that ships to unknown
+hardware.
+
+**What Evermore now owns:**
+
+| Concern | Ollama's behaviour | What Evermore must build |
+| :--- | :--- | :--- |
+| **Model storage** | `~/.ollama/models`, content-addressed blobs | `/var/lib/evermore/models` for system models and `~/.local/share/evermore/models` for user models, merged by an `ai-inferd` scan |
+| **Model discovery** | `ollama pull` from a registry | Signed `npack` packages that place a GGUF plus a manifest in the model store |
+| **API surface** | `/api/chat`, `/api/generate` | `llama-server`'s OpenAI-compatible endpoints behind `ai-inferd`'s Unix socket |
+| **Versioning** | Tags and digests | `npack` package versions and signed manifests; the base + adapter pairing is a versioned artifact |
+| **Quantization** | Curated by Ollama | Chosen per artifact: `Q4_K_M` base, `F16` adapter, `Q8_0` for quality-over-size |
+| **Conversion** | Built in | `convert_hf_to_gguf.py` and `convert_lora_to_gguf.py` at build time |
+
+**Design decisions:**
+
+- **Subprocess supervisor.** Spawn `llama-server` on an ephemeral loopback
+  port; `ai-inferd` owns lifecycle, restart/backoff, and request multiplexing.
+  Keep `--ctx-size` conservative (8k–16k is ample for launcher and drawer use;
+  KV cache is the memory constraint on small devices).
+- **Process per model.** Each loaded base model gets its own `llama-server`
+  child, because chat and embedding models need different flags and CPU/GPU
+  selection becomes launch flags (`--n-gpu-layers`). A bounded pool with idle
+  eviction replaces Ollama's `/api/ps` unload; `UnloadModel` stops the
+  corresponding child. Model switching is a restart, not an in-process swap.
+- **Store roots.** System artifacts live under `/var/lib/evermore/models/` and
+  user artifacts under `~/.local/share/evermore/models/`. `ai-inferd` scans
+  both and merges them, with the user root taking precedence on name conflict.
+- **Manifest.** Each `npack` model package carries a versioned manifest: base
+  GGUF filename and hash, optional adapter GGUF filename and hash, context
+  size, quant, and the operation-registry version the adapter was trained
+  against. `ai-inferd` reads it on startup and refuses to pair an adapter with
+  a mismatched base or registry version.
+- **Signed artifacts only.** Every loadable model comes from a signed `npack`
+  release whose signature and hashes are retained, so provenance is checkable.
+  There is no unsigned local-GGUF path, and Ollama's content-addressed blobs
+  are not adopted because they cannot be tied back to a signed manifest; the
+  migration story is reinstall from `npack`.
+- **Consumers use the socket.** The panel, drawer, `ai-indexd`, and MCP speak
+  `ai-inferd`'s Unix socket, never `llama-server`'s loopback HTTP. If the
+  runtime is ever swapped, one daemon changes, not every consumer.
+- **Default pair.** The ISO pre-installs a `Q4_K_M` 1B–3B base plus the `F16`
+  Evermore adapter, both signed `npack` packages.
+- **Grammar-constrained output.** GBNF or JSON-schema constraints on chat
+  requests let `evermore-operationsd` and agent tooling require valid
+  operation-registry JSON. This shapes model output; it grants no authority.
+
+**Milestones:**
+
+- **M7.10 — Model store and manifest.** Add the versioned manifest schema to
+  `evermore-common` and extend `evermore-npack`'s `AiModelPayload` from
+  `{gguf_file, sha256}` to base/adapter artifact names and hashes, context
+  size, quant, and trained operation-registry version. Implement the dual-root
+  store scan with merge, validation, mismatch refusal, and unit tests.
+- **M7.11 — Supervisor lifecycle.** Spawn `llama-server`, allocate an ephemeral
+  loopback port, probe readiness, restart with backoff after a crash, reap
+  orphans on shutdown, bound the process pool, and evict idle children. Update
+  `packaging/systemd/evermore-inferd.service` (binary path, model roots,
+  context size) and declare the Arch `llama.cpp` dependency.
+- **M7.12 — Protocol translation.** Replace the Ollama HTTP client with
+  `llama-server`'s `/health`, `/props`, `/v1/chat/completions` SSE streaming,
+  and `/v1/embeddings`, mapping `Backend` to launch flags. Bump
+  `evermore_common::ai::PROTOCOL_VERSION` and update the panel, `ai-indexd`,
+  and MCP consumers; keep `Request`/`Event` semantics otherwise unchanged.
+- **M7.13 — Signed import without Ollama.** Keep the existing
+  release-signature, archive-hash, and GGUF-hash verification, but install the
+  verified artifacts into the model store with their manifest instead of
+  uploading blobs and calling `/api/create`. Derive model listing, digest,
+  size, and quant from the store scan; update the
+  `ai.model.install_signed_npack` description and make package removal delete
+  the paired artifacts.
+- **M7.14 — Adapter pairing and hot-swap.** Launch the base with `--lora` and
+  use `llama-server`'s `/lora-adapters` API to adjust adapter scale at runtime.
+  Enforce base-hash and registry-version pairing, expose adapter state through
+  the socket, and leave per-query-class adapters as future work.
+- **M7.15 — Grammar-constrained output.** Accept an optional GBNF grammar or
+  JSON schema on chat requests, exercise it against the operation catalogue's
+  JSON so proposals are always parseable, and keep it a model-output constraint
+  rather than a caller-controlled bypass.
+- **M7.16 — Quantization and packaging.** Define the per-artifact quant policy,
+  add `npack` recipes for base and adapter GGUFs, and put
+  `convert_hf_to_gguf.py` / `convert_lora_to_gguf.py` in build tooling beside
+  the operation registry so the adapter version tracks the registry version.
+  Pre-install the default pair in the ISO profile.
+- **M7.17 — Migration and acceptance.** Provide an explicit reinstall path for
+  existing installs, update `vm/phase7-offline-inference.sh` to launch
+  `llama-server` instead of `ollama serve`, and validate streamed chat,
+  embeddings, adapter hot-swap, crash restart, grammar-constrained output, and
+  mismatch refusal in the offline network namespace. Run the full workspace
+  check, test, format, and `git diff --check`.
+
+**Validation:** In the VM, with external networking disabled, install the
+signed base and adapter packages, stream chat and embeddings through the
+unchanged `ai-inferd` socket, change the adapter scale at runtime, kill
+`llama-server` mid-request and confirm the daemon restarts it without losing
+its own socket, request catalogue JSON under a grammar, and confirm a
+mismatched base/adapter manifest is refused. Confirm the panel and `ai-indexd`
+need no protocol changes beyond the version bump.
+
+**Build order:** Manifest and store scan first; supervisor and protocol
+translation next; signed import after that. Adapter hot-swap and grammar
+follow once baseline chat and embeddings pass. Packaging, ISO pre-install, and
+the reinstall path finish the phase.
+
+### Phase 8: Familiar Desktop Experience
+
+**Goal:** Turn the Nostr-aware system services into a conventional, keyboard-
+driven Sway desktop. Nostr remains infrastructure for identity, sync, software
+provenance, and optional cross-device features; it is not the desktop's visual
+theme. A user unfamiliar with Nostr should still recognize the launcher,
+notification inbox, settings, workspaces, and system tray. AI is an optional
+fallback: when deterministic search can answer a query, no model is invoked.
+
+**Implementation status (2026-11-08):** M8.1 has a tested Waybar preset for
+Sway workspaces 1–9, window title, network, audio, battery, clock, and tray.
+The launcher spike rejected `nwg-drawer` after the VM showed that its first
+printable key is consumed while focus moves from an app tile to search. Walker
+and Elephant's desktop-applications provider have been built from their
+published Arch AUR recipes and installed in the VM. Walker's app surface opens
+and its provider indexes the VM's desktop entries; the packaged Evermore
+config limits queries to desktop apps and disables generic shell-command
+search. A real Sway-hotkey focus and first-keystroke check is still in
+progress, so M8.2 is not complete. Walker is list-first, trading the original
+grid concept for history-aware ranking, pinning, and a shared provider model.
+No custom launcher rendering or layer-shell code has been added.
+
+**Product rules:** Keep the default Waybar panel conventional: workspaces,
+clock, tray, and available system status, with no npub, relay health, or trust
+indicators. Put identity and relay details under account/software-source
+settings. Keep the activity log in Recent Activity settings rather than making
+protocol activity a top-level desktop surface. Nostr mentions and DMs join
+ordinary desktop notifications; the inbox is not a Nostr feed. Reads can run
+immediately within their configured scopes; system writes continue through the
+Phase 7 operation catalogue, owner approval, and signed audit lifecycle.
+
+**Reuse-first implementation plan:** Use upstream desktop components for
+generic shell behavior, and add Evermore-specific code only where the product
+needs its identity, context, or operation semantics.
+
+- **Panel:** configure [Waybar](https://github.com/Alexays/Waybar) and its
+  existing Sway, clock, tray, audio, network, and battery modules. Do not write
+  a panel or status-module framework.
+- **Launcher:** use [Walker](https://github.com/abenz1267/walker) with
+  Elephant's desktop-applications provider. It provides a keyboard-driven
+  layer-shell list, app history, pinning, and an extensible provider interface.
+  Its Elephant service is an added runtime dependency; keep only the app
+  provider in the default set and remove the generic command-runner prefix.
+  The `nwg-drawer` app grid was rejected because its first typed character is
+  lost during search-focus handoff. Do not fork either project or ship two
+  launchers. Route system mutation through the catalogue. Keep
+  `evermore-panel --command-palette` as the safe Evermore action surface until
+  it can be integrated cleanly as a launcher provider/menu.
+- **Right inbox:** use
+  [SwayNotificationCenter](https://github.com/ErikReider/SwayNotificationCenter)
+  for D-Bus toasts, notification history, grouping, DND, and its layer-shell
+  control center. Have local and Nostr sources enter through the existing
+  `evermore-notifyd`/D-Bus path. Represent an approval notification as a
+  pointer to the pending operation and open the signed Evermore approval UI;
+  do not implement a second approval authority inside the notification
+  daemon. First check whether SwayNC's notification list and configurable
+  widgets can provide the desired inbox; build a custom inbox only for the
+  missing source/thread/triage behavior.
+- **AI session drawer:** reuse the current `evermore-panel` AI clients and
+  operation flow. Start as a normal floating eframe window positioned by Sway
+  rules so context, session, and approval behavior can be validated before
+  taking on layer-shell focus. If a true edge-anchored drawer proves necessary,
+  add one layer-shell integration to this client; do not build a general
+  widget toolkit. [Eww](https://elkowar.github.io/eww/eww.html) is suitable for
+  disposable layout prototypes, but its GTK/CSS layout and animation limits
+  make it a poor foundation for the stateful AI session and context tray.
+- **Drawers and motion:** Sway's layer-shell protocol already lets clients
+  anchor and overlay surfaces. Use an existing layer-shell client for generic
+  surfaces and reserve custom code for Evermore content. Begin with instant
+  show/hide and correct keyboard focus. If a slide is needed after usability
+  tests, animate the drawer client-side. Keep vanilla Sway as the supported
+  default; [SwayFX](https://github.com/wlrfx/swayfx) adds compositor-level
+  animations and layer effects but is a fork and remains an optional profile,
+  not a Phase 8 dependency.
+
+**Milestones:**
+
+- **M8.1 — Conventional Sway and Waybar baseline.** Configure upstream
+  [Waybar](https://github.com/Alexays/Waybar) rather than writing a panel.
+  Define the default Sway
+  keybindings, workspaces 1–9, Waybar layout, notification daemon, and user
+  services. Keep Nostr-specific status out of the default panel. Preserve the
+  existing VM configuration and provide a reproducible configuration/install
+  path for the target Arch desktop.
+- **M8.2 — Launcher v0, then v1.** Configure upstream Walker with Elephant's
+  desktop-applications provider for Super+Space. V0 shows installed apps on
+  empty query and supports first-keystroke filtering, arrow selection, Enter
+  launch, and Escape dismissal. Verify hotkey focus and launch from a clean
+  Sway session. V1 adds deterministic app/settings/file search and Tab
+  sub-actions through supported providers and menus. No chat or AI is needed.
+  Keep the shell-command provider disabled and retain the Evermore palette for
+  approved system actions. Only build a custom launcher surface if upstream
+  clients cannot meet the interaction and extension requirements without a
+  fork; do not keep two competing default launcher bindings.
+- **M8.3 — Right inbox drawer.** Configure SwayNC's existing control center
+  first as the glanceable, dismissible triage surface. Build a custom drawer
+  only if its supported widgets/actions cannot present the required data. The
+  inbox should group local notifications and pending owner approvals by source
+  and thread, with urgent items first. Reuse the notification data shown in
+  toasts; support open, dismiss, approve, reply, and mute actions only where
+  the source and operation catalogue permit them. Add Nostr mentions/replies
+  and DMs as another source through `evermore-notifyd`; keep the feed itself in
+  a Nostr client. Keep ordinary notifications chronological with a DND toggle;
+  optional trust grouping is off by default. Clipboard events remain opt-in.
+- **M8.4 — Context capture contract.** Add context objects with source,
+  resolution, scope (one turn or pinned), and refresh policy (snapshot or
+  refresh per turn). Resolve context through `ai-contextd`: extract, normalize,
+  redact, summarize when needed, then present. The UI tray must show what the
+  model actually receives, including truncation and secret-redaction notices,
+  with a way for the user to inspect the sanitized payload. Refuse paths marked
+  no-AI. Show token estimates and model-window budget; never silently drop
+  pinned context. This does not widen `ai-contextd`'s allowlist or grant a new
+  write path.
+- **M8.5 — Left AI session drawer.** Add a 380–420 px, summonable session
+  drawer with a 40 px collapsed rail, context tray, context-grounded suggested
+  actions, named/resumable local sessions, streamed responses, and inline
+  operation cards. Every mutation uses the existing Phase 7 request and
+  approval lifecycle. AI suggestions appear only after deterministic launcher
+  results and only for open-ended queries. Keep the drawer responsive while
+  inference runs; cancel a response independently of operation cancellation.
+  Build it against the Phase 7.5 runtime: the drawer talks only to
+  `ai-inferd`'s socket and does not depend on the backend's HTTP shape.
+- **M8.6 — Reliable context entry points and polish.** Support paste, internal
+  egui drag-and-drop, a capture hotkey, and an application “Send to AI” action.
+  External Wayland drag-and-drop is an enhancement, never a required path.
+  Start with focused-output placement and close on output focus change. Use
+  floating surfaces with zero exclusive zone by default; a pinned-drawer mode
+  may reserve space. Begin with instant visibility changes; if user testing
+  shows a slide animation is valuable, animate that client surface rather than
+  requiring SwayFX.
+- **M8.7 — Semantic and AI launcher fallback.** Add embedding-based search
+  without changing the deterministic result path. Keep exact/fuzzy first
+  results within a 16 ms target and semantic results within 50 ms. Only
+  genuinely open-ended queries may start inference; show its visually distinct
+  card below deterministic results, only if the first token arrives within
+  300 ms, and allow cancellation with a 3 s response budget. If local hardware
+  cannot meet the first-token target, omit the card. The launcher never opens
+  or persists a chat; conversation belongs to the left drawer. This consumes
+  `ai-indexd` and the Phase 7.5 inference service; the deterministic path must
+  never start either.
+
+**Validation:** In the Arch VM, verify keyboard focus and text entry on summon,
+empty-query app grid, deterministic search without starting inference, launch,
+settings sub-actions, Esc/focus-loss dismissal, and measured first-result
+latency. Verify the inbox unifies a local toast and pending approval without
+duplicating records, and that each action calls its owning service. For the AI
+drawer, test a file snapshot and refreshed context, secret redaction, no-AI
+path rejection, truncation/token-budget disclosures, pinned-context behavior,
+stream cancellation, and an approval-gated write. Confirm every surface works
+with unavailable inference and that disabling optional Nostr sources leaves a
+useful conventional desktop.
+
+**Build order:** Launcher v0 and the Waybar baseline first; right inbox with
+local notifications and approvals next; then context capture and the left
+session drawer; add Nostr inbox sources and semantic/AI launcher fallback only
+after deterministic paths and the context-grant display are validated. Layer-
+shell keyboard focus, exclusive-zone reflow, external drag-and-drop, and
+multi-output placement are known risks; validation tests focus early and
+defers external drag and persistent per-output drawers.
 
 ## Key Design Decisions and Risks
 
@@ -691,11 +1228,17 @@ A few decisions will shape the entire project and are worth resolving early:
 - **D-Bus vs. Unix socket for the signing interface.** A Unix socket is simpler and more portable across languages; D-Bus gives you standard service discovery and permission integration. The NanoClaw pattern uses a Unix socket with a read-only mount into containers, which is a clean security boundary. Start with a Unix socket and add a D-Bus wrapper later if integration with existing desktop services demands it.
 - **NIP-78 encryption and relay auth.** NIP-78 settings should be encrypted with NIP-44 and relays should require NIP-42 `AUTH` before serving `kind:30078` events. This is not optional for a production system—without it, settings are either public or served to the wrong clients.
 - **AI has no authority outside the operation executor.** Inference, context, search, policy advice, and MCP transports stay separate. Every AI-initiated mutation enters through the registered operation and approval path; a model or adapter never gets a shell or direct service bypass.
+- **Evermore owns the inference runtime.** `ai-inferd` supervises `llama-server` as a child process instead of embedding `llama.cpp` or delegating to Ollama. Models are signed `npack` artifacts placed in a defined store, and every consumer uses the `ai-inferd` socket rather than the runtime's loopback HTTP. This keeps packaging on the Arch package, isolates model or driver crashes from the daemon the launcher depends on, and leaves the runtime replaceable without changing consumers.
 - **Agent identities are never the owner's key.** Any AI/agentic integration (a local assistant, an MCP-connected coding agent, an autonomous process) gets its own Nostr keypair and an explicit, scoped grant — never the owner's real `nsec`, and never permission to approve its own privileged requests. This is the same split `imattau/nostrhost` already uses for its agent/owner model (see Phase 7); Evermore reuses it rather than re-deriving a weaker version from scratch.
 
-The roadmap remains dependency-ordered: complete Phase 4's cross-device
-acceptance check, then move through Phases 5 and 6 before starting Phase 7.
-When Phase 7 begins, specify the shared operation contract and prove local
-inference on Arch before adding Sway, egui, or MCP integrations. That keeps
-model viability and authority boundaries clear before AI can affect system
-state.
+Phase 7's initial implementation and VM acceptance are complete. The separate
+Phase 4 two-device acceptance run is still recorded as outstanding; keep it as
+a project-wide readiness gate where required by the dependency order. Phase 7
+future enhancements are listed in its milestone notes and do not block its
+initial baseline.
+
+Phase 7.5 is a planned refactor of the inference runtime, not a further Phase 7
+enhancement: it replaces the Ollama-compatible backend recorded above with a
+supervised `llama-server` while preserving the `ai-inferd` socket contract. It
+does not change Phase 7's acceptance evidence, but it must land before Phase
+8's AI drawer and semantic launcher fallback are considered complete.

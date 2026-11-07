@@ -108,6 +108,9 @@ packages:
   - mako
   - go
   - python-websockets
+  - llama-cpp
+  - bubblewrap
+  - iproute2
 
 write_files:
   - path: /etc/systemd/system/getty@tty1.service.d/autologin.conf

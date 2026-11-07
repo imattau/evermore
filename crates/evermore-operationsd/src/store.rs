@@ -20,6 +20,7 @@ pub enum Status {
     Running,
     Denied,
     Expired,
+    Cancelled,
     Succeeded,
     Failed,
     ExecutionUnknown,
@@ -39,6 +40,10 @@ pub struct OperationRecord {
     pub request_published: bool,
     #[serde(default)]
     pub approval_published: bool,
+    #[serde(default)]
+    pub execution_event: Option<Value>,
+    #[serde(default)]
+    pub execution_published: bool,
     #[serde(default)]
     pub result_event: Option<Value>,
     #[serde(default)]
@@ -89,10 +94,20 @@ pub struct OperationStore {
 pub enum RelayPhase {
     Request,
     Approval,
+    Execution,
     Result,
 }
 
 impl OperationStore {
+    /// Read one durable record without requiring the operation daemon or an
+    /// owner signer identity to be available. A still-pending request whose
+    /// deadline passed is reported expired; a Running record means the daemon
+    /// stopped after its execution claim and must never be blindly replayed.
+    pub fn read_status_offline(operation_id: &str) -> Result<OperationRecord, String> {
+        serde_json::from_value(operations::read_local_record(operation_id)?)
+            .map_err(|error| format!("invalid operation record in local journal: {error}"))
+    }
+
     pub fn open(owner_pubkey: PublicKey) -> Result<Self, String> {
         let path = data_path()?;
         let parent = path
@@ -173,7 +188,7 @@ impl OperationStore {
         {
             return Err(format!("'{name}' is not an approval-gated write operation"));
         }
-        operations::validate_input(name, &arguments)?;
+        let arguments = operations::canonicalize_input(name, &arguments)?;
 
         let operation_id = event.id.to_hex();
         let now = unix_time();
@@ -200,6 +215,8 @@ impl OperationStore {
             approval_event: None,
             request_published: false,
             approval_published: false,
+            execution_event: None,
+            execution_published: false,
             result_event: None,
             result_published: false,
             status: Status::Pending,
@@ -400,7 +417,8 @@ impl OperationStore {
         let next_status = match decision {
             "approve" => Status::Approved,
             "deny" => Status::Denied,
-            _ => return Err("approval decision must be approve or deny".to_string()),
+            "cancel" => Status::Cancelled,
+            _ => return Err("approval decision must be approve, deny, or cancel".to_string()),
         };
 
         let mut data = self
@@ -423,16 +441,20 @@ impl OperationStore {
             .operations
             .get_mut(&operation_id)
             .ok_or_else(|| "unknown operation_id".to_string())?;
-        if record.status != Status::Pending {
-            if record
-                .approval_event
-                .as_ref()
-                .and_then(|e| e.get("id"))
-                .and_then(Value::as_str)
-                == Some(&event.id.to_hex())
-            {
-                return Ok(record.clone());
+        if record
+            .approval_event
+            .as_ref()
+            .and_then(|event| event.get("id"))
+            .and_then(Value::as_str)
+            == Some(&event.id.to_hex())
+        {
+            return Ok(record.clone());
+        }
+        if decision == "cancel" {
+            if record.status != Status::Pending {
+                return Err("only a pending operation can be cancelled".into());
             }
+        } else if record.status != Status::Pending {
             return Err(format!("operation is already {:?}", record.status).to_lowercase());
         }
         if unix_time() >= record.expires_at {
@@ -537,6 +559,10 @@ impl OperationStore {
         Ok(data.operations.values().cloned().collect())
     }
 
+    pub fn owner_pubkey_hex(&self) -> String {
+        self.owner_pubkey.to_hex()
+    }
+
     pub fn pending_grant_events(&self) -> Result<Vec<PendingGrantEvent>, String> {
         let data = self
             .data
@@ -603,7 +629,33 @@ impl OperationStore {
         match phase {
             RelayPhase::Request => record.request_published = true,
             RelayPhase::Approval => record.approval_published = true,
+            RelayPhase::Execution => record.execution_published = true,
             RelayPhase::Result => record.result_published = true,
+        }
+        let updated = record.clone();
+        self.persist(&data)?;
+        Ok(updated)
+    }
+
+    pub fn save_execution_event(
+        &self,
+        operation_id: &str,
+        event: Value,
+    ) -> Result<OperationRecord, String> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| "operation store lock poisoned".to_string())?;
+        let record = data
+            .operations
+            .get_mut(operation_id)
+            .ok_or_else(|| "unknown operation_id".to_string())?;
+        if record.status != Status::Approved {
+            return Err("operation is no longer approved for execution".into());
+        }
+        if record.execution_event.is_none() {
+            record.execution_event = Some(event);
+            record.execution_published = false;
         }
         let updated = record.clone();
         self.persist(&data)?;

@@ -26,6 +26,43 @@ pub struct Manifest {
     /// install, if this package provides an executable.
     #[serde(default)]
     pub bin: Option<String>,
+    /// Optional signed local-model payload. The referenced GGUF is part of the
+    /// archive and its digest is covered transitively by the signed release.
+    #[serde(default)]
+    pub ai_model: Option<AiModelPayload>,
+    /// Direct package IDs required by this package. Resolution is reported
+    /// from the user's installed package set; the manifest never executes a
+    /// package-provided install command.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiModelPayload {
+    /// Base GGUF file, relative to the package root.
+    pub gguf_file: String,
+    pub sha256: String,
+    /// Optional LoRA adapter GGUF shipped in the same package.
+    #[serde(default)]
+    pub adapter_gguf_file: Option<String>,
+    #[serde(default)]
+    pub adapter_sha256: Option<String>,
+    /// Default adapter scale when the package is imported.
+    #[serde(default)]
+    pub adapter_scale: Option<f32>,
+    /// Preferred prompt context; `ai-inferd` clamps this to 512..=131072.
+    #[serde(default)]
+    pub context_size: Option<u32>,
+    /// Quantization label for display, e.g. `Q4_K_M` or `F16`.
+    #[serde(default)]
+    pub quant: Option<String>,
+    /// `chat` and/or `embeddings`; defaults to `chat` when absent.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Operation-registry version the adapter was trained against. Required
+    /// when an adapter is shipped.
+    #[serde(default)]
+    pub operation_registry_version: Option<String>,
 }
 
 /// A discovered package: the latest kind:32267 (software-application)

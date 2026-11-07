@@ -85,6 +85,7 @@ evermore/
     evermore-notifyd/           <- Phase 3: notification bridge
     evermore-blossom-fs/        <- Phase 4: Blossom FUSE mount / sync daemon
     evermore-npack/             <- Phase 5: package manager core
+    evermore-mcp/               <- Phase 7: MCP server exposing daemons to AI agents
   apps/
     evermore-panel/             <- egui control panel (tabs: identity, settings, notifications, packages)
   packaging/
@@ -182,6 +183,61 @@ evermore/
 - **M6.4** — Backup/recovery story for the `nsec`: NIP-49 `ncryptsec` export/import flow through the signing daemon, tested by deliberately wiping a VM's keyring and recovering from the exported backup.
 - **M6.5** — Decide and document the public release shape (ISO download, AUR packages for the daemons on stock Arch, or both) based on what Phase 5/6 actually proved out.
 
+### Phase 7: AI & Agentic AI Integration
+
+**Goal:** Let AI agents — a local assistant, an autonomous coding agent, any
+MCP-connected tool — act through Evermore's existing daemons safely, with
+the same scoped-permission and audit-trail discipline `imattau/nostrhost`
+already established for its own agent/owner split, rather than each agent
+integration inventing its own bespoke access path. This builds entirely on
+Phase 1's signer and Phase 2's relay; it adds a grant/scope layer on top,
+not a parallel system.
+
+**Milestones:**
+- **M7.1** — Agent identities are separate Nostr keypairs, never the owner's
+  `nsec`. A grant (which kinds, which settings domains an agent may touch)
+  is itself an addressable control-plane relay event
+  (`evermore:agent-grant:<agent-pubkey>`), signed by the owner identity —
+  mirrors nostrhost's scope-tier model: no agent identity ever holds
+  "administrator," because owner co-signature already covers the risk that
+  tier existed to gate.
+- **M7.2** — `evermore-signer` enforces grants at the socket boundary: an
+  agent's `sign_event`/`nip44_encrypt` requests are checked against its
+  grant *before* anything is signed, and anything out of scope is refused
+  outright, not merely logged. A delegated/agent identity is explicitly
+  barred from approving its own privileged request — approval of anything
+  beyond the base grant requires a separate event signed by the *owner*
+  identity (the self-approval delegation guard pattern) — closing exactly
+  the agent-self-approval path nostrhost had to close after the fact.
+- **M7.3** — `evermore-mcp`: an MCP server (Rust, reusing the same
+  Unix-socket clients already written for `evermore-panel`) exposing
+  read-mostly tools over Evermore's daemons to AI coding assistants and
+  agent runtimes — list identities (never secrets), read settings, list
+  recent notifications, query `npack`'s trust graph — plus one scoped
+  "propose an event" tool that routes through M7.2's grant check rather
+  than a raw signing passthrough.
+- **M7.4** — Every agent-initiated action rides the same request → approval
+  → execution → result audit chain nostrhost's `CONTROL-PLANE.md` already
+  established for Evermore's control-plane relay (regular, immutable
+  events) — an agent's actions get the same cryptographic provenance as a
+  human's, not a separate, unaudited path.
+- **M7.5** — `npack`: an agent may *propose* a package update via M7.3's
+  tool, but publishing still requires the publisher identity's own
+  signature — an agent can draft a package, never ship one.
+- **M7.6** *(optional, later)* — a chat-style Assistant tab in
+  `evermore-panel` that talks to a local model, whose own tool access is
+  itself just another agent grant under M7.1 — the panel gets no special
+  bypass of the scope/approval machinery everything else goes through.
+
+**Validation:** Issue a scoped grant to a throwaway agent identity (e.g.
+"may publish `kind:1` under `evermore:test` only"); confirm `evermore-signer`
+signs requests within that scope, refuses an out-of-scope request, and
+refuses an attempted self-approval; confirm the resulting events carry the
+same request/approval/execution/result audit-chain shape as Phase 2's
+human-initiated settings changes — an agent's footprint should be
+indistinguishable in form from a human's, just distinguishable in *who
+signed what*.
+
 ## Key Design Decisions and Risks
 
 A few decisions will shape the entire project and are worth resolving early:
@@ -191,5 +247,6 @@ A few decisions will shape the entire project and are worth resolving early:
 - **`smithay-egui` is not a shell.** It is explicitly "mainly intended for debug interfaces". Do **not** plan to build the entire desktop shell in egui. Use egui for the *applications and control panels* (settings, package manager, notification center) and rely on a conventional Wayland compositor (e.g., Sway, or a Smithay-based compositor that is not trying to be a full shell) for window management. This keeps the risk bounded.
 - **D-Bus vs. Unix socket for the signing interface.** A Unix socket is simpler and more portable across languages; D-Bus gives you standard service discovery and permission integration. The NanoClaw pattern uses a Unix socket with a read-only mount into containers, which is a clean security boundary. Start with a Unix socket and add a D-Bus wrapper later if integration with existing desktop services demands it.
 - **NIP-78 encryption and relay auth.** NIP-78 settings should be encrypted with NIP-44 and relays should require NIP-42 `AUTH` before serving `kind:30078` events. This is not optional for a production system—without it, settings are either public or served to the wrong clients.
+- **Agent identities are never the owner's key.** Any AI/agentic integration (a local assistant, an MCP-connected coding agent, an autonomous process) gets its own Nostr keypair and an explicit, scoped grant — never delegated access to the owner's real `nsec`, and never permitted to approve its own privileged requests. This is the same split `imattau/nostrhost` already uses for its agent/owner model (see Phase 7); Evermore reuses it rather than re-deriving a weaker version from scratch.
 
 The first concrete step is **M0.1**: scaffold the workspace. The first step that actually matters is **Phase 1**: get the signing daemon running on Arch and expose it to a trivial egui application. Once that interface is stable, every subsequent service—settings, notifications, Blossom, `npack`—can be built against it without re-solving key management. This is the smallest, most reusable foundation for the entire distribution.

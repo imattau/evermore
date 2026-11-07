@@ -314,10 +314,35 @@ implementation plan the way Phases 0-5 are.
     at all for day-to-day use — it becomes a NIP-46 *client* forwarding
     sign requests to whichever device holds the key, which is a
     materially different role from "the thing that holds the key in the
-    kernel keyring." Both roles likely need to coexist (local custody
-    for the fallback path below, remote-forwarding for the priority
-    path); reconciling that in `evermore-signer`'s design is new work,
-    not assumed to already fit.
+    kernel keyring."
+
+    **Resolved and implemented (2026-11-08):** `evermore-signer` now has
+    a per-identity `Backing` (`backing.rs`): `Local` (today's behavior,
+    unchanged — the default for every identity that predates this
+    concept) or `Remote { relay, remote_signer_pubkey }`. The backing
+    record is plain JSON on disk, not in the kernel keyring — a `Remote`
+    record holds no secret at all (that's the entire point) and needs to
+    survive reboots, which the session keyring does not. `pair NAME
+    --relay URL --remote-pubkey HEX` registers an identity as
+    remote-backed; `keygen`/`import` refuse a name that's already
+    remote-paired, so a local secret can never accidentally get created
+    for an identity meant to never have one on this device.
+    `load_keys` — the single choke point every `GetPublicKey`/
+    `SignEvent`/`Nip44Encrypt`/`Nip44Decrypt` request already went
+    through — checks the backing first and returns a clear, honest
+    `"remote signing is not implemented yet"` error for a `Remote`
+    identity, rather than silently falling through to "unknown
+    identity" or attempting to read a secret that was never stored.
+    This is deliberately *not* the NIP-46 protocol itself (connecting to
+    a relay, constructing/encrypting the request, matching the
+    response) — that's still real, separate, unbuilt work. What's
+    resolved here is the fork point both roles hang off: every existing
+    identity keeps working completely unchanged, and remote-backed
+    identities now fail loudly and specifically instead of silently or
+    confusingly. Live-tested on host and VM: pairing, the `keygen`/
+    `import` guard, re-pairing (relay/pubkey rotation), and an actual
+    signing request against a paired identity returning the expected
+    error over the real socket.
   - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
     a device/user with no paired phone, or no local-network path to a
     remote signer right now. Tap to unlock, fully offline, and the same

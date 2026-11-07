@@ -1,3 +1,4 @@
+mod backing;
 mod device_identity;
 mod keyring_store;
 mod server;
@@ -20,19 +21,28 @@ fn main() {
         Some("import") => import(args.get(2)),
         Some("list") => list(),
         Some("bootstrap-device") => bootstrap_device(&args[2..]),
+        Some("pair") => pair(args.get(2), &args[3..]),
+        Some("list-remote") => list_remote(),
         _ => {
             eprintln!(
-                "usage: evermore-signer <serve|keygen NAME|import NAME|list|bootstrap-device>\n\n\
+                "usage: evermore-signer <serve|keygen NAME|import NAME|list|bootstrap-device|pair|list-remote>\n\n\
                  serve [--device] [--state-dir PATH] [--socket PATH]\n\
                               run the signing daemon (foreground). --device\n\
                               loads the device-root identity instead of serving\n\
                               human identities, on its own socket.\n\
                  keygen NAME  generate a new identity, store it, print its npub\n\
                  import NAME  read an nsec (bech32 or hex) from stdin, store it\n\
-                 list         list identities currently in the session keyring\n\
+                 list         list local identities currently in the session keyring\n\
                  bootstrap-device [--state-dir PATH]\n\
                               generate the device-root identity if one doesn't\n\
-                              already exist; idempotent, prints its pubkey"
+                              already exist; idempotent, prints its pubkey\n\
+                 pair NAME --relay URL --remote-pubkey HEX\n\
+                              register NAME as backed by a remote NIP-46\n\
+                              signer -- no secret for it is ever stored here.\n\
+                              Remote signing itself is not implemented yet;\n\
+                              signing requests for a paired identity fail with\n\
+                              a clear error until it is.\n\
+                 list-remote  list identities paired to a remote signer"
             );
             std::process::exit(2);
         }
@@ -92,7 +102,56 @@ fn require_name(name: Option<&String>) -> Result<&str, String> {
             "'{name}' is reserved for the device-root identity -- use `bootstrap-device` instead"
         ));
     }
+    if matches!(backing::backing_for(name), backing::Backing::Remote { .. }) {
+        return Err(format!(
+            "'{name}' is paired to a remote NIP-46 signer -- a local secret must never be \
+             generated or imported for it (that's the entire point of pairing it)"
+        ));
+    }
     Ok(name)
+}
+
+fn pair(name: Option<&String>, args: &[String]) -> Result<(), String> {
+    let name = name
+        .map(String::as_str)
+        .ok_or_else(|| "missing identity name".to_string())?;
+    if name == device_identity::RESERVED_IDENTITY_NAME {
+        return Err(format!(
+            "'{name}' is reserved for the device-root identity -- it can never be remote-backed"
+        ));
+    }
+    let relay = flag_value(args, "--relay").ok_or("missing --relay URL")?;
+    let remote_pubkey = flag_value(args, "--remote-pubkey").ok_or("missing --remote-pubkey HEX")?;
+    if keyring_store::exists(name).map_err(|e| e.to_string())? {
+        return Err(format!(
+            "'{name}' already has a local secret in this session's keyring -- remove it first \
+             (there is no `remove` yet; restart the session) before pairing it to a remote signer"
+        ));
+    }
+    backing::pair_remote(name, &relay, &remote_pubkey)?;
+    println!("'{name}' is now paired to a remote NIP-46 signer");
+    println!("relay:         {relay}");
+    println!("remote pubkey: {remote_pubkey}");
+    Ok(())
+}
+
+fn list_remote() -> Result<(), String> {
+    let registered = backing::list_registered();
+    let mut names: Vec<&String> = registered.keys().collect();
+    names.sort();
+    if names.is_empty() {
+        println!("(no identities paired to a remote signer)");
+    }
+    for name in names {
+        if let backing::Backing::Remote {
+            relay,
+            remote_signer_pubkey,
+        } = &registered[name]
+        {
+            println!("{name}  relay={relay}  remote_pubkey={remote_signer_pubkey}");
+        }
+    }
+    Ok(())
 }
 
 fn keygen(name: Option<&String>) -> Result<(), String> {

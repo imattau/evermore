@@ -6,6 +6,7 @@ use evermore_common::{Request, Response};
 use nostr::prelude::*;
 use serde_json::json;
 
+use crate::backing::{self, Backing};
 use crate::keyring_store;
 
 pub fn run(socket_path: std::path::PathBuf) -> std::io::Result<()> {
@@ -60,7 +61,19 @@ fn handle_connection(stream: UnixStream) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Loads `identity`'s keys for signing/encryption, or `Ok(None)` if it
+/// doesn't exist. An identity paired to a remote NIP-46 signer (see
+/// `backing.rs`) never has a secret in this process's keyring at all --
+/// that's the design, not a bug -- so this returns a clear, specific
+/// error for one rather than falling through to "unknown identity" or
+/// trying to read a secret that was never meant to exist here.
 fn load_keys(identity: &str) -> Result<Option<Keys>, String> {
+    if let Backing::Remote { .. } = backing::backing_for(identity) {
+        return Err(format!(
+            "identity '{identity}' is paired to a remote NIP-46 signer -- \
+             remote signing is not implemented yet (see PROJECT_IDEA.md's Phase 5.5)"
+        ));
+    }
     let bytes = keyring_store::load(identity).map_err(|e| e.to_string())?;
     let Some(bytes) = bytes else {
         return Ok(None);

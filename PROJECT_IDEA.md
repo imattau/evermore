@@ -16,6 +16,58 @@ The core architectural principle is that **integration lives in headless daemons
 | **Files** | Local filesystem + network mounts | A **Blossom FUSE mount** or **GVFS backend** (e.g., Garland-style) that makes a Blossom server appear as a network drive authenticated by the Nostr key. |
 | **Packages** | Central repo + `pacman` | **`npack`** itself: signed `.npk` archives distributed via relays and Blossom, with user-defined trust policies and *no central repository*. |
 
+## The Local Control-Plane Relay
+
+In addition to the per-subsystem daemons above, Evermore adopts a pattern
+proven in the sibling project [`imattau/nostrhost`](https://github.com/imattau/nostrhost)
+(a Nostr-native YunoHost derivative): **a local Nostr relay as the internal
+control-plane bus**, not just as a login/sync transport.
+
+Instead of each daemon inventing its own D-Bus interface or ad-hoc socket
+protocol to talk to the others, the settings daemon, notification bridge,
+and `npack` trust/catalogue layer become **clients of one localhost-only
+relay**. They publish signed events and subscribe to the kinds they care
+about; a thin projector turns the event stream into whatever local read
+model each daemon needs. This replaces a growing pile of bespoke IPC
+surfaces with one bus, one auth model, and one audit trail.
+
+**What rides the relay vs. what stays off it** (mirroring NostrHost's split):
+
+| On the local relay | Stays local, off the event stream |
+| :--- | :--- |
+| Settings (NIP-78), trust/allow lists (NIP-51) | The signing daemon's Unix socket — the one privilege boundary that must never be reachable over the relay protocol |
+| Notification events, package/catalogue metadata | Live session state, anything ephemeral enough that durability would be waste |
+| Admin/trust changes (NIP-86 + NIP-42) | — |
+
+**Backend: khatru** (Go, MIT), the same choice NostrHost made after
+evaluating alternatives (see their `RELAY-SELECTION.md`) — chosen because it
+natively implements NIP-86 (relay management: allow/ban pubkeys and kinds)
+with NIP-98 auth built into the dispatch, plus NIP-77 negentropy and NIP-42.
+strfry is the fallback if a packaged, self-contained relay is needed for a
+distro-level install.
+
+**Governing principle — primitive-first:** before allocating an
+Evermore-specific event kind, map the requirement onto an existing NIP.
+Concretely:
+
+| Need | Primitive |
+| :--- | :--- |
+| Desktop settings sync | NIP-78 (`kind:30078`), exactly as in Phase 2 below |
+| Trusted publishers / relays / Blossom servers | NIP-51 lists |
+| Relay auth (who's asking) | NIP-42 |
+| Relay administration (allow/ban) | NIP-86, NIP-98-authenticated |
+| Notifications | NIP-17 / NIP-59 gift-wrapped DMs, same streams the notification bridge already subscribes to |
+| Package/release metadata | NIP-89 handlers, kind 32267 (software-application), kind 30063 (release-artifact sets) |
+
+Custom kinds are allocated only when a requirement has no standard primitive
+(following NIP-33's regular/replaceable/ephemeral/addressable ranges) —
+and only after that mapping exercise, not before.
+
+This also means: "NIP-86 administers the relay; Nostr events administer
+Evermore." The relay's own access control (who may read/write which kinds)
+is NIP-86, so there's no proprietary relay-management API layered on top —
+one less thing to design, build, and secure.
+
 ## Phased Roadmap: Integration-First
 
 The phases are ordered by dependency and risk. Each phase delivers a working, testable slice of the integrated system before moving on.
@@ -36,7 +88,11 @@ The phases are ordered by dependency and risk. Each phase delivers a working, te
 **Goal:** Desktop preferences that sync across machines via NIP-78, so "sign in once and your settings follow you" becomes real.
 
 **Concrete work:**
-- Build a **settings daemon** (systemd user service) that owns the NIP-78 sync loop. It reads local config changes and publishes encrypted `kind:30078` events with a `d` tag identifying the application or settings domain.
+- Stand up the **local control-plane relay** (khatru, localhost-only, from
+  "The Local Control-Plane Relay" above) as a systemd user service — this is
+  the first thing the settings daemon talks to, and later phases (Phase 3's
+  notification bridge, Phase 5's `npack` trust layer) reuse the same relay.
+- Build a **settings daemon** (systemd user service) that owns the NIP-78 sync loop. It reads local config changes and publishes encrypted `kind:30078` events with a `d` tag identifying the application or settings domain, to the local relay, which selectively bridges them to the user's external relays.
 - Define a minimal **desktop settings schema**: theme, keyboard layout, panel configuration, and—critically—**relay configuration** (which relays the system uses for settings, DMs, and package discovery).
 - Expose a **D-Bus interface** (or a local HTTP socket) so applications and system components can read and write settings through the daemon rather than managing their own config files.
 - Build an **egui Settings panel** that reads from and writes to this daemon, showing current relay choices and sync status.
@@ -48,7 +104,7 @@ The phases are ordered by dependency and risk. Each phase delivers a working, te
 **Goal:** Mentions, replies, reactions, zaps, and DMs arrive as native desktop notifications, indistinguishable in form from local application alerts.
 
 **Concrete work:**
-- Build a **notification bridge daemon** that subscribes to the user's Nostr streams for the relevant event kinds (mentions, replies, DMs via NIP-17 gift wrap). When an event arrives, it calls the standard `org.freedesktop.Notifications` D-Bus interface to show a desktop toast.
+- Build a **notification bridge daemon** that subscribes to the user's Nostr streams for the relevant event kinds (mentions, replies, DMs via NIP-17 gift wrap) — both external relays and the local control-plane relay from Phase 2, so system-local events (e.g. a finished build, a package update available) arrive through the same path as social notifications. When an event arrives, it calls the standard `org.freedesktop.Notifications` D-Bus interface to show a desktop toast.
 - Optionally, implement the **reverse direction**: a systemd user service that monitors local D-Bus notifications and forwards them into a Nostr chat stream (the pattern used in `spaces-os`).
 - Build an **egui notification center** that displays a merged timeline of local and Nostr notifications, with filters by source.
 
@@ -71,7 +127,7 @@ The phases are ordered by dependency and risk. Each phase delivers a working, te
 
 **Concrete work:**
 - Use **`archiso`** with the `baseline` profile to build a minimal ISO, including the kernel, Wayland compositor, Rust toolchain, and—critically—`npack` itself as a pre-installed system package.
-- Ship a **minimal default trust set** (the distribution's publisher key plus a few foundational packages) because a blank trust graph is not usable. Make this set editable in the Settings panel.
+- Ship a **minimal default trust set** (the distribution's publisher key plus a few foundational packages) because a blank trust graph is not usable. Represent it as NIP-51 lists on the local control-plane relay (from Phase 2), so trust edits are just events, and make the set editable in the Settings panel.
 - Build an **egui package manager frontend** that wraps `npack`, showing packages discovered through the user's trust graph and social follows, with install/update/remove actions.
 - Integrate **"Software Sources" into the Settings daemon**: a panel for managing trusted publishers, relays, and Blossom servers (the `npack` equivalent of repository configuration).
 

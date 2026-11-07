@@ -93,6 +93,12 @@ packages:
   - openssh
   - pkgconf
   - rustup
+  - rsync
+  - wayland
+  - wayland-protocols
+  - libxkbcommon
+  - mesa
+  - fontconfig
 
 runcmd:
   - systemctl enable --now sshd

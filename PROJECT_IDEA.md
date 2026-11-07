@@ -253,28 +253,54 @@ yet a committed implementation plan the way Phases 0-5 are.
   stay as Evermore's own NIP-78 app-data events via `evermore-settingsd`
   (already-established pattern), not get folded into `kind:0` — desktop
   theme has no business leaking into someone's public Nostr profile.
-- **Unlock is passphrase-free: a hardware factor via `systemd-homed`.**
-  No typed secret at the greeter. Primary factor is a FIDO2/U2F hardware
-  key (`systemd-homed-fido2` — tap to unlock, offline, and the same
-  physical key could plausibly double as a hardware Nostr signer later,
-  unifying "unlock my desktop" and "sign as me"); fingerprint
-  (`fprintd`/libfprint, also homed-integrated) is an acceptable
-  *additional* convenience factor, not a sole gate, since biometrics
-  can't be rotated the way a key can; a recovery key stays pure
-  break-glass, written down once, never used day-to-day. A
-  physical-presence-only auto-unlock (no factor at all) is explicitly
-  **not** the default — it's effectively no authentication — though it
-  could be offered as an opt-in low-security mode for dedicated
-  single-purpose hardware. This reuses `homed`'s own pluggable auth
-  factors rather than Evermore inventing a second secret: once `nsec`
-  lives inside the already-`homed`-encrypted home (see the identity-model
-  decision above), unlocking the account *is* unlocking the key — there
-  is no separate step. Trade-off worth naming honestly: this means
-  whoever unlocks the desktop also gets Nostr signing ability, with no
-  compartmentalization between the two; acceptable because the signer
-  daemon is still the only thing that ever sees the decrypted key at
-  runtime, but worth remembering once Phase 7's scoped-agent-grant model
-  is in the picture.
+- **Unlock priority: NIP-46 remote signer first, hardware key second,
+  passphrase only as a last-resort fallback.**
+  - *Priority 1 — NIP-46 ("Nostr Connect") remote signer.* Approve login
+    from a phone/companion signer app, the same way NIP-46 already works
+    for Nostr clients generally. This is the most Nostr-native option
+    available, needs no extra hardware purchase, and — importantly —
+    doesn't actually break offline-first: the approval round-trip can
+    travel over the same local, loopback control-plane relay (or a
+    local-network/Bluetooth-discovered session with the phone on the
+    same LAN), so "offline" here means "no wide-area internet required,"
+    not "no other device involved." This is a genuine architectural
+    question for Phase 1's signer, not just a UI choice: in this mode
+    `evermore-signer` plausibly never holds the raw `nsec` on the device
+    at all for day-to-day use — it becomes a NIP-46 *client* forwarding
+    sign requests to whichever device holds the key, which is a
+    materially different role from "the thing that holds the key in the
+    kernel keyring." Both roles likely need to coexist (local custody
+    for the fallback path below, remote-forwarding for the priority
+    path); reconciling that in `evermore-signer`'s design is new work,
+    not assumed to already fit.
+  - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
+    a device/user with no paired phone, or no local-network path to a
+    remote signer right now. Tap to unlock, fully offline, and the same
+    physical key could plausibly double as a hardware Nostr signer
+    later. Fingerprint (`fprintd`/libfprint) remains an optional
+    *additional* convenience layer alongside either priority option, not
+    a replacement for one — biometrics can't be rotated the way a key
+    can.
+  - *Fallback only — local passphrase.* A NIP-49 `ncryptsec`-encrypted
+    `nsec` held on the device, passphrase-decrypted into the session
+    keyring. Used only in genuine degraded conditions: first-run
+    bootstrap before any phone or hardware key is paired, or recovery
+    when neither priority option is reachable — not offered as a
+    parallel everyday choice at the greeter. This directly reuses M6.4's
+    planned backup/recovery format rather than inventing a second one.
+  - A physical-presence-only auto-unlock (no factor at all) is
+    explicitly **not** the default for any of this — it's effectively no
+    authentication — though it could be offered as an opt-in
+    low-security mode for dedicated single-purpose hardware.
+  - Trade-off worth naming honestly for the FIDO2/local-custody path:
+    once `nsec` lives inside the already-`homed`-encrypted home (see the
+    identity-model decision above), unlocking the account *is* unlocking
+    the key, with no compartmentalization between the two; acceptable
+    because the signer daemon is still the only thing that ever sees the
+    decrypted key at runtime, but worth remembering once Phase 7's
+    scoped-agent-grant model is in the picture. The NIP-46 path sidesteps
+    this trade-off differently — the key never touches the device at
+    all — at the cost of needing a second, reachable device to sign in.
 - **A device-root npub exists, generated on first run.** Mirrors
   NostrHost's own pattern directly (its roadmap calls this the "server
   npub" — a machine identity distinct from the human "owner npub" that

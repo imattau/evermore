@@ -45,6 +45,8 @@ var allowedKinds = struct {
 	30002: true, // NIP-51 categorized relay list
 	30301: true, // Evermore file index (Phase 4) -- custom kind: no existing NIP
 	// covers a per-directory addressable manifest of {filename: {sha256, size}}
+	32267: true, // Software application (Phase 5 npack) -- package metadata
+	30063: true, // Release artifact set (Phase 5 npack) -- version pointer + Blossom URL/hash
 }}
 
 func isKindAllowed(kind int) bool {

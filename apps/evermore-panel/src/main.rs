@@ -1,4 +1,5 @@
 mod notifications_client;
+mod npack_client;
 mod operations_client;
 mod settings_client;
 mod signer_client;
@@ -52,6 +53,14 @@ struct PanelApp {
     operations: Vec<Definition>,
     operations_error: Option<String>,
     operations_loaded: bool,
+    npack_identity: String,
+    npack_blossom_url: String,
+    npack_trust_input: String,
+    npack_installed: Vec<npack_client::InstalledPackage>,
+    npack_trusted: Vec<String>,
+    npack_available: Vec<npack_client::AvailablePackage>,
+    npack_error: Option<String>,
+    npack_loaded: bool,
 }
 
 impl PanelApp {
@@ -115,6 +124,30 @@ impl PanelApp {
                 self.operations.clear();
                 self.operations_error = Some(error);
             }
+        }
+    }
+
+    fn refresh_npack(&mut self) {
+        self.npack_loaded = true;
+        self.npack_error = None;
+
+        match npack_client::installed() {
+            Ok(installed) => self.npack_installed = installed,
+            Err(e) => self.npack_error = Some(e),
+        }
+
+        if self.npack_identity.trim().is_empty() {
+            self.npack_trusted.clear();
+            self.npack_available.clear();
+            return;
+        }
+        match npack_client::trusted(&self.npack_identity) {
+            Ok(trusted) => self.npack_trusted = trusted,
+            Err(e) => self.npack_error = Some(e),
+        }
+        match npack_client::available(&self.npack_identity) {
+            Ok(available) => self.npack_available = available,
+            Err(e) => self.npack_error = Some(e),
         }
     }
 }
@@ -295,8 +328,107 @@ impl eframe::App for PanelApp {
                 }
             }
             Tab::Packages => {
+                if !self.npack_loaded {
+                    self.refresh_npack();
+                }
                 ui.heading("Packages");
-                ui.label("npack integration lands in Phase 5.");
+                ui.horizontal(|ui| {
+                    ui.label("Identity:");
+                    if ui.text_edit_singleline(&mut self.npack_identity).changed() {
+                        self.npack_loaded = false;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Blossom URL:");
+                    ui.text_edit_singleline(&mut self.npack_blossom_url);
+                });
+                if ui.button("Refresh").clicked() {
+                    self.refresh_npack();
+                }
+                ui.add_space(8.0);
+
+                if let Some(err) = &self.npack_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                    ui.add_space(8.0);
+                }
+
+                ui.collapsing("Software Sources (trusted publishers)", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.npack_trust_input);
+                        if ui.button("Trust").clicked() && !self.npack_identity.trim().is_empty() {
+                            match npack_client::trust(
+                                &self.npack_identity,
+                                self.npack_trust_input.trim(),
+                            ) {
+                                Ok(()) => {
+                                    self.npack_trust_input.clear();
+                                    self.refresh_npack();
+                                }
+                                Err(e) => self.npack_error = Some(e),
+                            }
+                        }
+                    });
+                    for pubkey in self.npack_trusted.clone() {
+                        ui.horizontal(|ui| {
+                            ui.monospace(&pubkey);
+                            if ui.small_button("Untrust").clicked() {
+                                match npack_client::untrust(&self.npack_identity, &pubkey) {
+                                    Ok(()) => self.refresh_npack(),
+                                    Err(e) => self.npack_error = Some(e),
+                                }
+                            }
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+
+                ui.heading("Available");
+                if self.npack_available.is_empty() {
+                    ui.weak("(none -- set an identity and trust a publisher)");
+                }
+                for pkg in self.npack_available.clone() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&pkg.name).strong());
+                            ui.weak(format!("v{}", pkg.version.as_deref().unwrap_or("?")));
+                        });
+                        ui.weak(format!(
+                            "{}  (by {})",
+                            pkg.id,
+                            short_pubkey(&pkg.publisher_pubkey)
+                        ));
+                        ui.label(&pkg.description);
+                        if ui.button("Install").clicked() {
+                            match npack_client::install(
+                                &self.npack_identity,
+                                &self.npack_blossom_url,
+                                &pkg.id,
+                            ) {
+                                Ok(()) => self.refresh_npack(),
+                                Err(e) => self.npack_error = Some(e),
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                ui.add_space(8.0);
+
+                ui.heading("Installed");
+                if self.npack_installed.is_empty() {
+                    ui.weak("(nothing installed)");
+                }
+                for pkg in self.npack_installed.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} v{}", pkg.name, pkg.version));
+                        ui.weak(&pkg.id);
+                        if ui.small_button("Remove").clicked() {
+                            match npack_client::remove(&pkg.id) {
+                                Ok(()) => self.refresh_npack(),
+                                Err(e) => self.npack_error = Some(e),
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -307,6 +439,18 @@ fn source_label(source: Source) -> &'static str {
         Source::Local => "[local]",
         Source::Mention => "[mention]",
         Source::Dm => "[dm]",
+    }
+}
+
+fn short_pubkey(pubkey_hex: &str) -> String {
+    if pubkey_hex.len() > 12 {
+        format!(
+            "{}…{}",
+            &pubkey_hex[..6],
+            &pubkey_hex[pubkey_hex.len() - 6..]
+        )
+    } else {
+        pubkey_hex.to_string()
     }
 }
 

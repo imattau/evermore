@@ -168,15 +168,38 @@ two-VM acceptance run below remains the final cross-device check.
 
 **Goal:** A bootable Arch-based ISO where `npack` is the primary software distribution mechanism, bootstrapped with a minimal default trust set.
 
-**Milestones:**
-- **M5.1** — `evermore-npack` core: `.npk` archive format (likely a signed tarball — reuse an existing signed-archive crate rather than inventing one), publisher trust represented as **NIP-51 lists** on the local control-plane relay (`evermore:trusted-publishers`), not a bespoke trust-graph file.
-- **M5.2** — Package discovery via NIP-89 handlers + `kind:32267` (software-application) and `kind:30063` (release-artifact sets) events, fetched from the publishers in the user's trust list — no central index to query.
-- **M5.3** — Default trust seed: a hardcoded bootstrap list (the distribution's own publisher key + a handful of foundational packages) written into `evermore:trusted-publishers` on first boot, editable afterward — ships *as data*, not as a separate mechanism.
-- **M5.4** — Install/update/remove flow: resolve → fetch via Blossom (Phase 4's client) → verify signature against the trust list → unpack → register with systemd/the filesystem.
-- **M5.5** — `apps/evermore-panel`'s Packages tab: browse discovered packages (grouped by trusted publisher and, later, social follows), install/update/remove actions, and a "Software Sources" view that's really just `evermore-settingsd`'s `evermore:trusted-publishers` and `evermore:relays` domains surfaced as UI.
-- **M5.6** — `packaging/archiso/` profile based on `archiso`'s `baseline`: kernel, a Wayland compositor (plain Sway — see "Key Design Decisions" on not building the shell in egui), the pinned Rust toolchain, and all Phase 0-5 daemons pre-installed and enabled.
+**Implementation status (2026-11-08):** M5.1, M5.2, M5.4, and M5.5 are
+implemented as a stateless CLI (`evermore-npack`) plus a panel tab, not a
+fourth daemon -- package discovery and install don't need a live
+subscription or shared cached state the way settings/notifications do, so
+each command just queries the relay fresh. M5.3 (a real default trust
+seed) is deliberately **not** implemented yet, same reasoning as deferring
+Phase 2's default external-relay list: there is no real "Evermore
+distribution publisher" key to seed with until packages are actually being
+shipped, and inventing a placeholder one would just be something to rip
+out later. `trust`/`untrust` are real and tested; the mechanism is ready
+for a real seed whenever there's something legitimate to seed it with.
 
-**Validation:** Build the ISO (`mkarchiso`), boot it in a *fresh* VM (not the dev build VM — a clean target, built the same way `vm/create-vm.sh` builds the dev one), and install one new egui application end-to-end through `npack` using only the default trust set and the ISO's preconfigured relays.
+**Milestones:**
+- **M5.1** — `evermore-npack` core: `.npk` archive format (a gzipped tar with `manifest.json` at the root plus payload files, built with the `tar`/`flate2` crates rather than inventing a format), publisher trust represented as a **NIP-51 list** on the local control-plane relay (`evermore:trusted-publishers`, reusing the kind already on the relay's allowlist from Phase 2), not a bespoke trust-graph file.
+- **M5.2** — Package discovery via `kind:32267` (software-application) and `kind:30063` (release-artifact set) events, fetched from the publishers in the user's trust list only — no central index to query. Both are addressable (NIP-33) keyed by the package ID, so a publisher's latest release naturally replaces the previous pointer.
+- **M5.3** *(deferred — see status note above)* — Default trust seed.
+- **M5.4** — Install/update/remove flow: resolve the latest trusted release → fetch the archive via the Blossom client (Phase 4's pattern, reimplemented minimally here rather than shared, same per-crate-client convention the other daemons use) → **verify the downloaded bytes' SHA-256 against what the signed release event declared** (this is the actual trust check — refuses to install on any mismatch) → unpack → symlink the manifest's declared `bin` into `~/.local/bin/`. "Installed" state is just the filesystem under `$XDG_DATA_HOME/evermore/npack/<id>/` (a `current` symlink plus per-version directories) — no separate database to go stale.
+- **M5.5** — `apps/evermore-panel`'s Packages tab: identity/Blossom-URL fields, a trusted-publishers list with trust/untrust, available packages (from trusted publishers only) with Install, and installed packages with Remove. Shells out to `evermore-npack --json` rather than talking to a socket, since there's no daemon to talk to.
+- **M5.6** — `packaging/archiso/` profile based on `archiso`'s `baseline`: kernel, a Wayland compositor (plain Sway — see "Key Design Decisions" on not building the shell in egui), the pinned Rust toolchain, and all Phase 0-5 daemons pre-installed and enabled. Not started — a genuinely separate, large piece of work from the package-manager mechanics above.
+
+**Validation:** Build the ISO (`mkarchiso`), boot it in a *fresh* VM (not the dev build VM — a clean target, built the same way `vm/create-vm.sh` builds the dev one), and install one new egui application end-to-end through `npack` using only the default trust set and the ISO's preconfigured relays (blocked on M5.3/M5.6).
+
+Verified for real (not just "it compiles") on both host and the Arch VM:
+published a test package, confirmed it stays invisible to `available`
+until the publisher is trusted, confirmed it appears once trusted,
+installed it, actually ran the installed binary, confirmed `installed`
+and `remove` correctly round-trip through the filesystem-as-database (this
+caught a real bug -- `archive::extract` was parsing `manifest.json` into
+memory to return it but never writing it to disk, so every command after
+`install` in a fresh process couldn't find it; fixed before this was ever
+true). Also checked end-to-end through the panel's Packages tab, not just
+the CLI.
 
 ### Phase 6: Dogfood & Harden
 

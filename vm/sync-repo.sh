@@ -19,7 +19,13 @@ fi
 
 command -v rsync >/dev/null || { echo "rsync not found on host" >&2; exit 1; }
 
-rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
+# Deliberately NOT preserving source mtimes (no -t/-a): if the VM's clock
+# differs from the host's, a preserved mtime can land *before* cargo's last
+# build fingerprint on the guest, and cargo silently skips rebuilding a file
+# that actually changed. Letting rsync stamp "now" on the destination avoids
+# that; --checksum makes rsync's own change detection content-based instead
+# of relying on mtime+size, so edits still get synced correctly either way.
+rsync -rlpzc --delete -e "ssh ${SSH_OPTS[*]}" \
   --exclude target --exclude vm/.local --exclude .git \
   "$REPO_ROOT/" builder@127.0.0.1:~/evermore/
 

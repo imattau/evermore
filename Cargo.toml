@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/evermore-panel"]
+members = ["apps/evermore-panel", "crates/evermore-common", "crates/evermore-signer"]
 
 [workspace.package]
 edition = "2024"

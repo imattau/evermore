@@ -1,4 +1,7 @@
+mod signer_client;
+
 use eframe::egui;
+use signer_client::Identity;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -31,6 +34,25 @@ enum Tab {
 #[derive(Default)]
 struct PanelApp {
     tab: Tab,
+    identities: Vec<Identity>,
+    identity_error: Option<String>,
+    identities_loaded: bool,
+}
+
+impl PanelApp {
+    fn refresh_identities(&mut self) {
+        self.identities_loaded = true;
+        match signer_client::fetch_identities() {
+            Ok(identities) => {
+                self.identities = identities;
+                self.identity_error = None;
+            }
+            Err(e) => {
+                self.identities.clear();
+                self.identity_error = Some(e);
+            }
+        }
+    }
 }
 
 impl eframe::App for PanelApp {
@@ -50,10 +72,35 @@ impl eframe::App for PanelApp {
         ui.add_space(16.0);
         match self.tab {
             Tab::Identity => {
+                if !self.identities_loaded {
+                    self.refresh_identities();
+                }
                 ui.heading("Identity");
-                ui.label("No evermore-signer connection yet.");
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_identities();
+                    }
+                    ui.label(evermore_common::runtime_socket_path().display().to_string());
+                });
                 ui.add_space(8.0);
-                ui.label("This is where loaded identities and their npubs will show up once the signing daemon (Phase 1) is wired in.");
+
+                if let Some(err) = &self.identity_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                } else if self.identities.is_empty() {
+                    ui.label(
+                        "No identities loaded. Create one on the host with \
+                         `evermore-signer keygen <name>`, then Refresh.",
+                    );
+                } else {
+                    for identity in &self.identities {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new(&identity.name).strong());
+                            ui.monospace(&identity.npub);
+                            ui.weak(&identity.pubkey_hex);
+                        });
+                        ui.add_space(6.0);
+                    }
+                }
             }
             Tab::Settings => {
                 ui.heading("Settings");

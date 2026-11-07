@@ -1,0 +1,22 @@
+[Unit]
+Description=Evermore Nostr signing daemon
+Documentation=https://github.com/imattau/evermore
+
+[Service]
+Type=simple
+# Assumes `cargo install --path crates/evermore-signer` (or equivalent) has
+# put the binary on the user's cargo bin path. Revisit once packaging (npack
+# / an AUR package) exists -- Phase 5.
+ExecStart=%h/.cargo/bin/evermore-signer serve
+Restart=on-failure
+RestartSec=2
+
+# The daemon's whole job is to be the one process that touches secret key
+# material -- keep its own surface minimal.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -343,6 +343,53 @@ implementation plan the way Phases 0-5 are.
     `import` guard, re-pairing (relay/pubkey rotation), and an actual
     signing request against a paired identity returning the expected
     error over the real socket.
+
+    **The homed-side NIP-46 PKCS#11 shim (`evermore-pkcs11`, started
+    2026-11-08):** a real, working PKCS#11 v2.40 provider module exists
+    now, not a sketch — a `cdylib` loaded by `systemd-homed` via
+    `p11-kit`, exactly the way a hardware token would be. Its struct
+    layouts and function table were transcribed directly from
+    `/usr/include/p11-kit-1/p11-kit/pkcs11.h` on the VM (never from
+    memory — this ABI has zero tolerance for a wrong field order), and
+    `p11-kit list-modules` loads it and reports a correct token with no
+    errors. Reverse-engineered the *exact* record schema `homed` uses
+    for PKCS#11 enrollment by reading its own debug output, not
+    guessing: `pkcs11TokenUri` (pointing at the **public** key object —
+    homed never touches the private key at enrollment time, only at
+    unlock), `privileged.pkcs11EncryptedKey[].{uri,data,hashedPassword,
+    padding}`, and `secret.tokenPin`. Confirmed the real PKCS#11 call
+    sequence end to end: enrollment reads `CKA_MODULUS`/
+    `CKA_PUBLIC_EXPONENT` off the public key and calls
+    `C_GenerateRandom` to seed the kernel RNG; unlock logs in with the
+    PIN, searches for the matching private key by `CKA_CLASS`/`CKA_ID`,
+    and calls `C_DecryptInit`/`C_Decrypt` with `CKM_RSA_PKCS_OAEP`
+    (`homed` picks SHA-1 or SHA-256 per probe, so the mechanism
+    parameter's hash algorithm has to be honored, not hardcoded — caught
+    live, not in review). `C_Decrypt` does genuine RSA-OAEP math today
+    against a real, locally-generated-and-persisted RSA-2048 keypair
+    (same at-rest pattern as `device_identity.rs`: plaintext key
+    material, root-owned, 0600).
+
+    **What's proven vs. still blocked, both verified on the VM, not
+    assumed:** the ABI, module discovery, mechanism negotiation, and
+    enrollment-time object reads all work correctly against real
+    `homed`. The final create-verification step — `homed`'s own
+    immediate round-trip self-test, decrypting what it just encrypted —
+    currently fails with `"Selected PKCS#11 object is not a private
+    key, refusing"` at the `C_Decrypt` call, with a suspiciously short
+    (1-byte) ciphertext passed in. Crucially, **this exact failure
+    reproduces identically with real, unmodified SoftHSM** (a
+    battle-tested reference PKCS#11 implementation) in this same VM —
+    strong evidence this is an existing bug or incompatibility in this
+    specific Arch/`systemd 262` `homed` build's PKCS#11 verification
+    path, not a defect in this module. Not yet root-caused to a fix;
+    the next step is either a different systemd version to test against
+    or reading `systemd-homework`'s actual C source for this self-test.
+    The NIP-46 round-trip itself (connecting to a relay, encrypting a
+    signed request to the paired signer, matching the response) is
+    still entirely unbuilt — `C_Decrypt` does real RSA today with no
+    gate in front of it; that gate is the next concrete step once the
+    homed-side blocker above is resolved, not before.
   - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
     a device/user with no paired phone, or no local-network path to a
     remote signer right now. Tap to unlock, fully offline, and the same

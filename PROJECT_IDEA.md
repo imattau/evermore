@@ -249,19 +249,23 @@ were.
   login, which is a bad default for something that should work offline.
 - **Where profile data (kind:0) lives and how it gets here.** Display
   name/avatar/about map naturally onto the existing `kind:0` metadata
-  event — but `kind:0` is normally published to a user's real outbox
-  relays, not Evermore's local, non-federating control-plane relay
-  (Phase 2's relay is deliberately loopback-only). So first login with a
-  *new* pubkey on a *new* device needs an explicit one-time fetch: read
-  the pubkey's NIP-65 relay list, pull `kind:0` from those relays, and
-  mirror it into the local relay so the greeter/panel work offline
-  afterward. That outbound fetch-and-mirror capability does not exist
-  anywhere in the codebase yet — it is new work, not a read against
-  infrastructure that's already there. OS-level preferences (theme,
-  locale, window layout) should stay as Evermore's own NIP-78 app-data
-  events via `evermore-settingsd` (already-established pattern), not get
-  folded into `kind:0` — desktop theme has no business leaking into
-  someone's public Nostr profile.
+  event. First boot **must not assume network connectivity** — a
+  greeter can't block on reaching some outbox relay just to show a
+  name. So `kind:0` is offline-first: authored and signed locally (the
+  same way any other Evermore identity event is), stored on the local
+  control-plane relay, and usable by the greeter/panel immediately,
+  with no dependency on ever reaching the wider Nostr network.
+  Reconciling that local event with a "real" `kind:0` the user may have
+  already published elsewhere — and giving the local relay any ability
+  to reach external relays at all, to pull or push it — is explicitly
+  **out of scope for this phase**. Phase 2 deliberately keeps the
+  control-plane relay loopback-only; limited, deliberate external
+  connectivity for the local relay (to mirror `kind:0` or anything
+  else) is envisaged as its own later phase, not a Phase 5.5 dependency
+  or blocker. OS-level preferences (theme, locale, window layout) should
+  stay as Evermore's own NIP-78 app-data events via `evermore-settingsd`
+  (already-established pattern), not get folded into `kind:0` — desktop
+  theme has no business leaking into someone's public Nostr profile.
 - **Scope boundary with Phase 6.** M6.4 (`ncryptsec` export/recovery) and
   M6.3 (true cross-device validation) both become easy to validate for
   real once this phase exists, and arguably can't be *meaningfully*

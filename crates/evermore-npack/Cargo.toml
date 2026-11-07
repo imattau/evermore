@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 base64 = "0.23.1"
+evermore-common = { version = "0.1.0", path = "../evermore-common" }
 flate2 = "1.1.11"
 hex = "0.4.3"
 http = "1.5.0"

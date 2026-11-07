@@ -790,6 +790,7 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
         quant: payload.quant.clone().unwrap_or_default(),
         capabilities,
         operation_registry_version: payload.operation_registry_version.clone(),
+        training: payload.training.clone(),
         publisher: Some(release.pubkey.to_hex()),
     };
     model_manifest.validate()?;

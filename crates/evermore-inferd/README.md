@@ -88,14 +88,24 @@ Each installed model version is one directory:
   "context_size": 2048,
   "quant": "Q4_K_M",
   "capabilities": ["chat"],
-  "operation_registry_version": "2026-11-08"
+  "operation_registry_version": "2026-11-08",
+  "training": {
+    "base_model_sha256": "<64 hex>",
+    "dataset_sha256": "<64 hex>",
+    "config_sha256": "<64 hex>",
+    "eval_report_sha256": "<64 hex>",
+    "catalogue_fingerprint": "<64 hex>",
+    "contributed_traces": false
+  }
 }
 ```
 
 An adapter requires `operation_registry_version` — the registry version it was
 trained against — so the daemon refuses to pair it with an unrelated base. The
-scanner validates structure and path containment; content hashes are verified
-when a signed package is imported, not re-hashed on every start.
+optional `training` block records the base, dataset, config, eval report, and
+catalogue fingerprint; `tools/adapter-training/` produces it. The scanner
+validates structure and path containment; content hashes are verified when a
+signed package is imported, not re-hashed on every start.
 
 ## Signed npack import
 

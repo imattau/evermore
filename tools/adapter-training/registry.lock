@@ -1,0 +1,7 @@
+{
+  "catalogue_fingerprint": "68a86dfe86432ac5c91c43128ae76d2737d11f28777068a83bb63ef70a64de1f",
+  "adapter_package_id": "",
+  "adapter_version": "",
+  "eval_report_sha256": "",
+  "note": "Set the adapter and eval fields when the first trained adapter is published, then update catalogue_fingerprint in the same commit."
+}

@@ -1352,6 +1352,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "evermore-adapter-training"
+version = "0.1.0"
+dependencies = [
+ "evermore-common",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "evermore-blossom-fs"
 version = "0.1.0"
 dependencies = [
@@ -1374,8 +1385,10 @@ dependencies = [
 name = "evermore-common"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1443,6 +1456,7 @@ name = "evermore-npack"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "evermore-common",
  "flate2",
  "hex",
  "http",

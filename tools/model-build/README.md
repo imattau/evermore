@@ -67,9 +67,12 @@ tools/model-build/build-npk.sh evermore-model dist/evermore-model-1.0.0.npk
 ```
 
 The script verifies the declared SHA-256 values against the files and prints
-the archive hash. Sign the kind:30063 release event with that hash in its `x`
-tag using the publisher's normal `npack` flow. There is no central model
-registry: installation discovers the release through the publisher trust list.
+the archive hash. A package with an adapter must also declare
+`operation_registry_version` and an `ai_model.training` provenance block (base,
+dataset, config, catalogue fingerprint, optional eval report). Sign the
+kind:30063 release event with the archive hash in its `x` tag using the
+publisher's normal `npack` flow. There is no central model registry:
+installation discovers the release through the publisher trust list.
 
 ## Default ISO pair
 

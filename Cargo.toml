@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/evermore-panel", "crates/evermore-blossom-fs", "crates/evermore-common", "crates/evermore-contextd", "crates/evermore-enroll", "crates/evermore-indexd", "crates/evermore-inferd", "crates/evermore-mcp", "crates/evermore-notifyd", "crates/evermore-npack", "crates/evermore-operationsd", "crates/evermore-pkcs11", "crates/evermore-settingsd", "crates/evermore-signer", "crates/evermore-sway-ai-bridge"]
+members = ["apps/evermore-panel", "crates/evermore-blossom-fs", "crates/evermore-common", "crates/evermore-contextd", "crates/evermore-enroll", "crates/evermore-indexd", "crates/evermore-inferd", "crates/evermore-mcp", "crates/evermore-notifyd", "crates/evermore-npack", "crates/evermore-operationsd", "crates/evermore-pkcs11", "crates/evermore-settingsd", "crates/evermore-signer", "crates/evermore-sway-ai-bridge", "tools/adapter-training"]
 
 [workspace.package]
 edition = "2024"

@@ -567,6 +567,14 @@ pub mod operations {
         definitions
     }
 
+    /// Stable SHA-256 over the serialized catalogue. Used to bind a trained
+    /// adapter and its evaluation data to the exact operation registry.
+    pub fn catalog_fingerprint() -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&catalog()).expect("operation catalogue serializes");
+        hex::encode(Sha256::digest(&bytes))
+    }
+
     pub fn find(name: &str) -> Option<Definition> {
         catalog()
             .into_iter()
@@ -1066,6 +1074,46 @@ pub mod ai {
         pub scale: f32,
     }
 
+    /// Provenance for a trained LoRA adapter. Build tooling writes it into the
+    /// package; the store records it so an adapter is never detached from the
+    /// data, base model, and catalogue it was evaluated against.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TrainingProvenance {
+        pub base_model_sha256: String,
+        pub dataset_sha256: String,
+        pub config_sha256: String,
+        #[serde(default)]
+        pub eval_report_sha256: Option<String>,
+        pub catalogue_fingerprint: String,
+        #[serde(default)]
+        pub contributed_traces: bool,
+    }
+
+    impl TrainingProvenance {
+        fn validate(&self) -> Result<(), String> {
+            for (label, value) in [
+                ("base-model", &self.base_model_sha256),
+                ("dataset", &self.dataset_sha256),
+                ("training-config", &self.config_sha256),
+                ("catalogue-fingerprint", &self.catalogue_fingerprint),
+            ] {
+                if !is_sha256(value) {
+                    return Err(format!("training {label} SHA-256 is malformed"));
+                }
+            }
+            if let Some(report) = &self.eval_report_sha256
+                && !is_sha256(report)
+            {
+                return Err("training evaluation-report SHA-256 is malformed".into());
+            }
+            Ok(())
+        }
+    }
+
+    fn is_sha256(value: &str) -> bool {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
     /// The on-disk manifest written next to a base GGUF and its optional LoRA
     /// adapter. The base + adapter pair is the versioned artifact; adapters
     /// are bound to the operation-registry version they were trained against.
@@ -1088,6 +1136,8 @@ pub mod ai {
         pub capabilities: Vec<String>,
         #[serde(default)]
         pub operation_registry_version: Option<String>,
+        #[serde(default)]
+        pub training: Option<TrainingProvenance>,
         #[serde(default)]
         pub publisher: Option<String>,
     }
@@ -1150,6 +1200,9 @@ pub mod ai {
                 if capability != "chat" && capability != "embeddings" {
                     return Err(format!("unsupported model capability '{capability}'"));
                 }
+            }
+            if let Some(training) = &self.training {
+                training.validate()?;
             }
             Ok(())
         }
@@ -1367,6 +1420,7 @@ pub mod ai {
                 quant: "Q4_K_M".into(),
                 capabilities: vec!["chat".into()],
                 operation_registry_version: adapter.then(|| "2026-11-08".into()),
+                training: None,
                 publisher: None,
             }
         }
@@ -1387,6 +1441,22 @@ pub mod ai {
             let mut value = manifest(true);
             value.operation_registry_version = None;
             assert!(value.validate().unwrap_err().contains("operation-registry"));
+        }
+
+        #[test]
+        fn training_provenance_is_validated() {
+            let mut value = manifest(true);
+            value.training = Some(TrainingProvenance {
+                base_model_sha256: "a".repeat(64),
+                dataset_sha256: "b".repeat(64),
+                config_sha256: "c".repeat(64),
+                eval_report_sha256: Some("d".repeat(64)),
+                catalogue_fingerprint: "e".repeat(64),
+                contributed_traces: true,
+            });
+            value.validate().unwrap();
+            value.training.as_mut().unwrap().dataset_sha256 = "short".into();
+            assert!(value.validate().unwrap_err().contains("dataset"));
         }
 
         #[test]

@@ -60,6 +60,23 @@ if payload.get("adapter_gguf_file") or payload.get("adapter_sha256"):
     check("adapter_gguf_file", "adapter_sha256")
     if not payload.get("operation_registry_version"):
         raise SystemExit("an adapter package must declare operation_registry_version")
+    training = payload.get("training") or manifest.get("training")
+    if not training:
+        raise SystemExit("an adapter package must declare training provenance")
+    for key in (
+        "base_model_sha256",
+        "dataset_sha256",
+        "config_sha256",
+        "catalogue_fingerprint",
+    ):
+        value = training.get(key, "")
+        if len(value) != 64 or any(character not in "0123456789abcdefABCDEF" for character in value):
+            raise SystemExit(f"training.{key} must be a 64-character SHA-256")
+    report = training.get("eval_report_sha256")
+    if report and (
+        len(report) != 64 or any(character not in "0123456789abcdefABCDEF" for character in report)
+    ):
+        raise SystemExit("training.eval_report_sha256 must be a 64-character SHA-256")
 
 print(f"package {manifest['id']} {manifest['version']}")
 PY

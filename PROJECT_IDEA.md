@@ -91,6 +91,7 @@ evermore/
     evermore-panel/             <- egui control panel and desktop launcher/drawers
   tools/
     model-build/                <- Phase 7.5: GGUF/LoRA conversion and npack recipes
+    adapter-training/           <- Phase 7.5: catalogue-derived data, training, evaluation
   packaging/
     systemd/                    <- user unit files, one per daemon
     archiso/                    <- Phase 5 ISO profile
@@ -900,20 +901,21 @@ lifecycle — while the `ai-inferd` Unix-socket contract that the panel, drawer,
 `ai-indexd`, and MCP already depend on stays stable. This is
 integration/refactor work: no new authority, no new daemon, and no cloud path.
 
-**Implementation status (2026-11-08):** M7.10–M7.17 are implemented, with two
-artifact-dependent checks outstanding. `evermore-common` defines the versioned
-`ModelManifest` (an adapter requires the operation-registry version it was
-trained against), store discovery via `EVERMORE_MODEL_DIRS` with user-root
-precedence, and protocol version 2. `evermore-inferd` scans
-`/var/lib/evermore/models` and `~/.local/share/evermore/models`, spawns one
-`llama-server` child per model on an ephemeral loopback port with a per-process
-API key, restarts after a crash, and serves `/v1/chat/completions` SSE and
-`/v1/embeddings` behind the unchanged socket contract. `UnloadModel` stops that
-model's child and `Health` reports `llama.cpp`. Signed npack import keeps the
-retained release, archive, and base/adapter hash verification, then publishes a
-manifest plus GGUFs into the model store instead of uploading to Ollama, and
-`evermore-indexd` discovers a model that declares the `embeddings` capability
-instead of defaulting to an Ollama tag.
+**Implementation status (2026-11-08):** M7.10–M7.20 are implemented, with the
+first training run and ISO pre-install outstanding. `evermore-common` defines
+the versioned `ModelManifest` (an adapter requires the operation-registry
+version and training provenance it was built against), store discovery via
+`EVERMORE_MODEL_DIRS` with user-root precedence, and protocol version 2.
+`evermore-inferd` scans `/var/lib/evermore/models` and
+`~/.local/share/evermore/models`, spawns one `llama-server` child per model on
+an ephemeral loopback port with a per-process API key, restarts after a crash,
+and serves `/v1/chat/completions` SSE and `/v1/embeddings` behind the unchanged
+socket contract. `UnloadModel` stops that model's child and `Health` reports
+`llama.cpp`. Signed npack import keeps the retained release, archive, and
+base/adapter hash verification, then publishes a manifest plus GGUFs into the
+model store instead of uploading to Ollama, and `evermore-indexd` discovers a
+model that declares the `embeddings` capability instead of defaulting to an
+Ollama tag.
 
 M7.14 adds `ListAdapters`/`SetAdapterScale` over the socket, backed by
 `llama-server`'s `/lora-adapters` API; scale is runtime state and a restart
@@ -927,17 +929,30 @@ conversion (`F16`), and `.npk` assembly with hash verification. M7.17's offline
 check now also covers grammar-constrained chat, adapter-scale refusal on a
 model without an adapter, and skipping an invalid store manifest.
 
+M7.18 adds `tools/adapter-training/`, whose Rust generator reads
+`evermore_common::operations` directly and emits deterministic train/eval JSONL
+plus a manifest carrying the catalogue fingerprint; synthetic catalogue data is
+the default, and opt-in local traces are redacted recursively and hashed. The
+current catalogue produces 78 train and 49 eval records covering every
+operation. M7.19 adds a versioned PEFT training config and script plus an
+evaluator that reports parse rate, tool selection, schema validity, refusal
+accuracy, unexpected operations, and base-vs-adapter and scale sweeps against a
+local `llama-server`. M7.20 records training provenance in the model package
+(base, dataset, config, eval-report, catalogue fingerprint, trace contribution)
+and adds `registry.lock` with `check-registry.sh`; the lock currently pins the
+catalogue fingerprint with no adapter published yet, and
+`--require-adapter` fails until the release fields are filled.
+
 VM validation with external networking disabled scanned two models, returned a
 384-dimension embedding, streamed normal and grammar-constrained chat, blocked
 external egress, restarted a killed child, unloaded it, and verified signed
 import into the store. Arch's package is `llama-cpp` (it provides
-`llama-server`), so packaging and the VM script target that name. Two checks
-remain artifact-dependent: end-to-end adapter hot-swap needs a trained LoRA
-GGUF in the test set (flag construction, manifest pairing, and scale validation
-are covered), and the ISO default pair is not pre-installed until the Phase 5
-ISO profile exists. Existing disposable model fixtures must be republished with
-`capabilities` (or `EVERMORE_EMBED_MODEL` set) before `ai-indexd` can select
-them.
+`llama-server`), so packaging and the VM script target that name. Remaining
+work: run the training on a GPU host to produce the first adapter artifact, use
+it to exercise hot-swap end-to-end, and pre-install the default base + adapter
+pair once the Phase 5 ISO profile exists. Existing disposable model fixtures
+must be republished with `capabilities` (or `EVERMORE_EMBED_MODEL` set) before
+`ai-indexd` can select them.
 
 **Why not Ollama:** Ollama's value proposition is model management for end
 users; Evermore is a distribution that must own the inference path, pair base
@@ -1061,6 +1076,43 @@ hardware.
   mismatch refusal in the offline network namespace. Run the full workspace
   check, test, format, and `git diff --check`.
 
+**Adapter training and evaluation (build tooling, not runtime):** The LoRA is
+the part that makes operation and tool proposals accurate, so producing it is
+part of this phase rather than an external assumption. `ai-inferd` must never
+depend on this tooling: it only reads the signed artifact. Training hardware is
+opt-in and outside the ISO/build VM; the VM validates the resulting GGUF and
+package.
+
+- **M7.18 — Catalogue-derived training data.** Add `tools/adapter-training/`
+  with a Rust generator that reads `evermore_common::operations` directly, so
+  the dataset cannot drift from the catalogue. Emit deterministic JSONL for
+  each operation's name, description, access class, grant, approval class,
+  valid arguments, invalid variants, read vs. approval-required write
+  proposals, out-of-catalogue refusal cases, and multi-step traces. Synthetic
+  catalogue data is the default and needs no owner data. Opt-in local traces
+  are an explicit extension: a local export reads the operation journal,
+  applies the shared redaction boundary, writes a reviewable JSONL, and
+  records its hash; nothing is uploaded automatically. The dataset manifest
+  records the catalogue fingerprint, seed, split, counts, and whether
+  contributed traces were included.
+- **M7.19 — Training and evaluation harness.** Add a reproducible LoRA recipe
+  for a 1B–3B base: a versioned PEFT config (rank, alpha, dropout, learning
+  rate, epochs, seed) rather than shell history, plus an evaluator over a
+  held-out split. Report tool-selection accuracy, argument/schema validity,
+  refusal correctness, grammar conformance, proposals for non-existent
+  operations, and base-vs-adapter plus adapter-scale (0, 0.5, 1.0) comparisons.
+  Write a machine-readable eval report tied to the catalogue fingerprint and
+  dataset hash.
+- **M7.20 — Versioned adapter release and CI gate.** Record training
+  provenance in the model package: base-model hash, dataset hash,
+  training-config hash, eval-report hash, catalogue/registry version, and
+  whether opt-in traces were included. Pin the expected catalogue fingerprint
+  and adapter release in `tools/adapter-training/registry.lock`; a catalogue
+  change without a matching release fails the check with an explicit
+  "rebuild and re-evaluate the adapter" message. Publishing remains the normal
+  signed `npack` flow, and `ai-inferd` still refuses an adapter whose declared
+  registry version does not match its manifest.
+
 **Validation:** In the VM, with external networking disabled, install the
 signed base and adapter packages, stream chat and embeddings through the
 unchanged `ai-inferd` socket, change the adapter scale at runtime, kill
@@ -1070,9 +1122,11 @@ mismatched base/adapter manifest is refused. Confirm the panel and `ai-indexd`
 need no protocol changes beyond the version bump.
 
 **Build order:** Manifest and store scan first; supervisor and protocol
-translation next; signed import after that. Adapter hot-swap and grammar
-follow once baseline chat and embeddings pass. Packaging, ISO pre-install, and
-the reinstall path finish the phase.
+translation next; signed import after that. Adapter hot-swap and grammar follow
+once baseline chat and embeddings pass. Packaging, ISO pre-install, and the
+reinstall path close the runtime work. Adapter training starts from the
+catalogue generator and evaluation harness, then a training run, then the
+registry lock and signed package.
 
 ### Phase 8: Familiar Desktop Experience
 
@@ -1085,16 +1139,17 @@ fallback: when deterministic search can answer a query, no model is invoked.
 
 **Implementation status (2026-11-08):** M8.1 has a tested Waybar preset for
 Sway workspaces 1–9, window title, network, audio, battery, clock, and tray.
-The launcher spike rejected `nwg-drawer` after the VM showed that its first
-printable key is consumed during its search-focus handoff. Walker and
-Elephant's desktop-applications provider were also installed and tested, but
-Walker lost the first typed character in Sway both as a resident service and
-on-demand, even with exclusive layer-shell keyboard focus. Fuzzel 1.15.0 from
-Arch's official repository is now the active candidate: its drun mode searches
+The launcher spike rejected `nwg-drawer` after its upstream focus handoff
+showed that the first printable key is consumed while focus moves from an app
+tile to search. Walker and Elephant's desktop-applications provider were
+installed and the app index started successfully. Fuzzel 1.15.0 from Arch's
+official repository is now the active candidate: its drun mode searches
 installed applications without a generic command runner or separate provider
-service. The updated binding and Fuzzel preset are in place; final hotkey and
-launch validation is still pending. No custom launcher rendering or
-layer-shell code has been added.
+service. The Fuzzel surface and `xgps` filtering work when opened through
+Sway's executor. The VM's `wtype` helper cannot exercise compositor key
+bindings, so physical hotkey focus and Enter-to-launch checks are still
+pending. The updated binding and presets are in place; M8.2 is not complete.
+No custom launcher rendering or layer-shell code has been added.
 
 **Product rules:** Keep the default Waybar panel conventional: workspaces,
 clock, tray, and available system status, with no npub, relay health, or trust
@@ -1115,12 +1170,13 @@ needs its identity, context, or operation semantics.
 - **Launcher:** use [Fuzzel](https://codeberg.org/dnkl/fuzzel) in desktop-run
   mode for the initial keyboard-first app search. It supports native Wayland
   layer-shell, exclusive keyboard focus, fuzzy matching, icons, desktop-action
-  search, and recent-launch sorting without an extra daemon. `nwg-drawer` and
-  Walker were rejected after both lost the first typed character during Sway
-  focus handoff in the VM. Fuzzel has no generic shell-command mode when
-  invoked with `--show drun`. Keep system mutation in Evermore's catalogue and
-  retain `evermore-panel --command-palette` as the safe Evermore action surface
-  until it can be integrated cleanly as a launcher provider/menu.
+  search, and recent-launch sorting without an extra daemon. `nwg-drawer` was
+  rejected because its upstream focus handoff consumes the first printable
+  key. Walker remains a comparison candidate; the VM's `wtype` tool did not
+  provide a valid Sway-hotkey focus test. Fuzzel has no generic shell-command
+  mode when invoked with `--show drun`. Keep system mutation in Evermore's
+  catalogue and retain `evermore-panel --command-palette` as the safe Evermore
+  action surface until it can be integrated cleanly as a launcher provider/menu.
 - **Right inbox:** use
   [SwayNotificationCenter](https://github.com/ErikReider/SwayNotificationCenter)
   for D-Bus toasts, notification history, grouping, DND, and its layer-shell

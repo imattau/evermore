@@ -1,0 +1,13 @@
+{
+  "base_model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "rank": 16,
+  "alpha": 32,
+  "dropout": 0.05,
+  "learning_rate": 0.0002,
+  "epochs": 3,
+  "batch_size": 1,
+  "gradient_accumulation": 8,
+  "max_seq_length": 1024,
+  "seed": 7,
+  "bf16": true
+}

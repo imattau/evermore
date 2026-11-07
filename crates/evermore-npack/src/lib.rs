@@ -63,6 +63,9 @@ pub struct AiModelPayload {
     /// when an adapter is shipped.
     #[serde(default)]
     pub operation_registry_version: Option<String>,
+    /// Training provenance for a LoRA adapter.
+    #[serde(default)]
+    pub training: Option<evermore_common::ai::TrainingProvenance>,
 }
 
 /// A discovered package: the latest kind:32267 (software-application)

@@ -348,6 +348,7 @@ mod tests {
                 quant: "Q4_K_M".into(),
                 capabilities: capabilities.iter().map(|value| value.to_string()).collect(),
                 operation_registry_version: None,
+                training: None,
                 publisher: None,
             },
             base_path: PathBuf::from("/models/p7.model-1.0.0/base.gguf"),

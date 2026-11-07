@@ -12,6 +12,14 @@
     "context_size": 8192,
     "quant": "Q4_K_M",
     "capabilities": ["chat"],
-    "operation_registry_version": "2026-11-08"
+    "operation_registry_version": "2026-11-08",
+    "training": {
+      "base_model_sha256": "<64-character SHA-256 of the base model weights used for training>",
+      "dataset_sha256": "<64-character SHA-256 of the reviewed dataset inputs>",
+      "config_sha256": "<64-character SHA-256 of the training config>",
+      "eval_report_sha256": "<64-character SHA-256 of the eval report>",
+      "catalogue_fingerprint": "<from dataset-manifest.json>",
+      "contributed_traces": false
+    }
   }
 }

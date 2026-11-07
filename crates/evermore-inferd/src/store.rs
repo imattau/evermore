@@ -199,6 +199,7 @@ mod tests {
             quant: "Q4_K_M".into(),
             capabilities: vec!["chat".into()],
             operation_registry_version: None,
+            training: None,
             publisher: None,
         };
         std::fs::write(
@@ -265,6 +266,7 @@ mod tests {
             quant: String::new(),
             capabilities: vec![],
             operation_registry_version: None,
+            training: None,
             publisher: None,
         };
         std::fs::write(

@@ -71,7 +71,7 @@ manage_etc_hosts: true
 
 users:
   - name: builder
-    groups: [wheel]
+    groups: [wheel, seat, video, input]
     shell: /bin/bash
     sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     ssh_authorized_keys:
@@ -99,9 +99,36 @@ packages:
   - libxkbcommon
   - mesa
   - fontconfig
+  - sway
+  - foot
+  - seatd
+  - grim
+  - swaybg
+
+write_files:
+  - path: /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin builder --noclear %I \$TERM
 
 runcmd:
   - systemctl enable --now sshd
+  - systemctl enable --now seatd
+  # written here, not via write_files: /home/builder doesn't exist yet
+  # when write_files runs (it's created later, by the users module)
+  - |
+    cat > /home/builder/.bash_profile <<'PROFILE'
+    if [ -z "\$WAYLAND_DISPLAY" ] && [ "\$(tty)" = "/dev/tty1" ]; then
+      export WLR_BACKENDS=headless
+      export WLR_RENDERER=pixman
+      exec sway > /tmp/sway.log 2>&1
+    fi
+    PROFILE
+  - chown builder:builder /home/builder/.bash_profile
+  - systemctl daemon-reload
+  - systemctl restart getty@tty1.service
   - [su, builder, -c, "rustup default stable"]
   - touch /var/lib/cloud/evermore-provisioned
 EOF
@@ -131,6 +158,7 @@ for i in $(seq 1 90); do
   if (exec 3<>"/dev/tcp/127.0.0.1/${SSH_PORT}") 2>/dev/null; then
     exec 3>&- 3<&-
     echo "==> SSH is up. Run: $SCRIPT_DIR/connect.sh"
+    echo "==> Display: $SCRIPT_DIR/screenshot.sh (grabs a PNG of the Sway session)"
     exit 0
   fi
   sleep 2

@@ -21,6 +21,40 @@ separate from the host.
 - **Process management:** QEMU runs with `-daemonize`, a pidfile, and a Unix
   monitor socket (needs `socat` for graceful shutdown) — no systemd/libvirt
   daemon involved.
+- **Display:** the VM has no virtual GPU and no QEMU-level display output —
+  see "The display stack" below for why, and `vm/screenshot.sh` for how to
+  actually see what's on screen.
+
+## The display stack
+
+The target is a Wayland desktop (Sway), so the VM needs to actually run one,
+not just build headless daemons. Getting there took a few wrong turns worth
+recording so they're not repeated:
+
+- **`virtio-gpu-gl-pci` (GPU passthrough with 3D/virgl) doesn't work on this
+  host.** Its QEMU module fails to load (`undefined symbol: qemu_egl_display`)
+  — a packaging bug in this host's Ubuntu QEMU split, not something fixable
+  from inside a VM script.
+- **Plain `virtio-gpu-pci` (2D only) doesn't work either.** wlroots' DRM
+  backend requires a renderer that supports DMA-BUF import for KMS scanout;
+  neither the GL path (no 3D here) nor the pixman software renderer satisfy
+  that against a 2D-only virtio-gpu device.
+- **What works: Sway's `headless` backend + the `pixman` software renderer**,
+  with no virtual GPU device in the QEMU command line at all
+  (`WLR_BACKENDS=headless WLR_RENDERER=pixman`, set in `builder`'s
+  `.bash_profile`, which also autologins on tty1 and execs `sway`). This is
+  the same combination wlroots-based compositors use for their own headless
+  CI testing, so it's well-trodden ground, not a hack specific to this setup.
+- **`wayvnc` (the obvious way to get a live view) didn't pan out** — it
+  accepted connections and reported the right resolution, but only ever
+  served a flat grey frame regardless of what was actually on screen. Isolated
+  the bug to wayvnc itself by comparing against `grim` (same underlying
+  wlr-screencopy protocol, run locally inside the guest over SSH), which
+  captured the real composited output perfectly on the first try. Since an
+  on-demand screenshot is more useful than a live feed for scripted/AI-driven
+  verification anyway, the live-VNC path was dropped rather than debugged
+  further — `vm/screenshot.sh` does the same job (SSH in, run `grim`, scp the
+  PNG back) with no extra moving parts.
 
 ## Directory layout
 
@@ -30,7 +64,8 @@ vm/
   create-vm.sh        <- (re)download image, build cloud-init seed, boot the VM (committed)
   connect.sh          <- SSH into the running VM (committed)
   sync-repo.sh         <- rsync the working tree into the VM, optionally run a command (committed)
-  destroy-vm.sh        <- gracefully stop the VM, optionally wipe the disk (committed)
+  screenshot.sh         <- grab a PNG of the VM's Sway session via grim+SSH (committed)
+  destroy-vm.sh           <- gracefully stop the VM, optionally wipe the disk (committed)
   .gitignore           <- ignores everything under .local/
   .local/               <- NOT committed: generated keys, disk images, cloud-init seed, runtime state
     ssh/id_ed25519(.pub) <- dedicated keypair for this VM only
@@ -79,16 +114,26 @@ running `create-vm.sh`.
    vm/sync-repo.sh "cargo build --workspace"           # sync + build
    ```
    `target/` inside the VM is left alone across syncs (only the source tree
-   is rsynced), so repeated syncs get incremental rebuilds. Note: the VM has
-   no display, so GUI apps (`evermore-panel`) build there but can't be run
-   there — run those on the host for visual checks, use the VM to confirm the
-   headless daemons (signer, settings, notifications, npack) actually work.
+   is rsynced), so repeated syncs get incremental rebuilds.
 
-4. You're now `builder` with passwordless sudo inside a disposable Arch VM.
+4. The VM runs Sway automatically (headless + software rendering — see "The
+   display stack" above), so GUI apps can actually run there too, not just
+   build. To see what's on screen:
+   ```bash
+   vm/screenshot.sh                  # saves vm/.local/run/screenshot.png
+   ```
+   Launch an app against the VM's own Wayland session over SSH, e.g.:
+   ```bash
+   vm/connect.sh "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+     nohup ~/evermore/target/debug/evermore-panel >/tmp/panel.log 2>&1 & disown"
+   vm/screenshot.sh
+   ```
+
+5. You're now `builder` with passwordless sudo inside a disposable Arch VM.
    Clone/build Evermore components there, test `systemd --user` daemons, etc.
    without touching the host.
 
-5. When done:
+6. When done:
    ```bash
    vm/destroy-vm.sh         # gracefully powers off the VM, keeps the disk overlay
    vm/destroy-vm.sh --wipe  # also deletes the overlay disk (full reset to base image)

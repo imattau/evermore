@@ -209,35 +209,52 @@ daemons. Phase 6's M6.1 ("run it as a real daily session") is not
 meaningful until this exists — today there is no greeter, no enabled
 login session, and no connection between "which Unix user logged in" and
 "which `nsec` the signer should hold." This phase is **planning-stage**:
-the milestones below are open design questions, not settled
-implementation, and should be resolved (possibly by prototyping more than
-one option) before being treated as a committed plan the way Phases 0-5
-were.
+the identity model and profile-data approach below are now decided, but
+nothing has been implemented, prototyped, or verified against real
+`systemd-homed` behavior yet, and one open question (the greeter's unlock
+mechanism) remains genuinely unresolved. Treat this whole phase as not yet
+a committed implementation plan the way Phases 0-5 are.
 
-**Open design questions:**
+**Decided:**
 
-- **Unix identity model.** Two real options, not a spectrum:
-  - *(a) Shallow:* one fixed Unix account per device; a greeter/unlock
-    screen just decrypts an `nsec` into that session's kernel keyring
-    after an otherwise-ordinary login. Cheap, but it doesn't deliver
-    "your identity follows you between machines" — home directory,
-    settings, and local state are still pinned to that one device/account.
-  - *(b) Deep:* the Nostr pubkey **is** the identity; a Unix UID and home
-    directory are provisioned on first login for that pubkey, the way
-    enterprise SSO dynamically provisions accounts. `systemd-homed` looks
-    like the right foundation rather than a bespoke PAM+NSS module from
-    scratch — it already does pluggable identity records, portable
-    encrypted home directories, and existing greeter/PAM/NSS integration
-    (gdm/sddm already drive it); the work would be a homed storage/record
-    backend keyed by npub rather than reinventing account provisioning.
-    This is what actually matches the project's original pitch (see
-    "Session Identity" in the architecture table above, which already
-    names a Nostr PAM module as the intended mechanism) but is
-    substantially more systems-level work, and ties Evermore to
-    `systemd-homed`'s own maturity/limitations.
-  - Needs a decision, and probably a throwaway prototype of (b) against
-    homed before committing, since "does homed's pluggable-backend API
-    actually support this cleanly" is an open question, not a known fact.
+- **Unix identity model: the pubkey *is* the identity.** Not a fixed
+  Unix account that a greeter merely unlocks — a Unix UID and home
+  directory are provisioned on first login *for that pubkey*, the way
+  enterprise SSO dynamically provisions accounts. This is the option
+  that actually delivers "your identity follows you between machines";
+  a shallow design (one fixed account per device, greeter just decrypts
+  an `nsec` into the session keyring) was considered and rejected for
+  not doing that. `systemd-homed` is the intended foundation rather than
+  a bespoke PAM+NSS module from scratch — it already does pluggable
+  identity records, portable encrypted home directories, and existing
+  greeter/PAM/NSS integration (gdm/sddm already drive it); the real work
+  is a homed storage/record backend keyed by npub, not reinventing
+  account provisioning. This matches the project's original architecture
+  table, which already named a Nostr PAM module as the intended
+  session-identity mechanism. **Still open:** whether homed's
+  pluggable-backend API actually supports this cleanly is not a known
+  fact yet — a throwaway prototype against real homed is needed before
+  any of this is built for real.
+- **`kind:0` profile data is offline-first.** First boot must not assume
+  network connectivity — a greeter can't block on reaching some outbox
+  relay just to show a name. So `kind:0` is authored and signed locally
+  (the same way any other Evermore identity event is), stored on the
+  local control-plane relay, and usable by the greeter/panel
+  immediately, with no dependency on ever reaching the wider Nostr
+  network. Reconciling that local event with a "real" `kind:0` the user
+  may have already published elsewhere — and giving the local relay any
+  ability to reach external relays at all, to pull or push it — is
+  explicitly out of scope for this phase. Phase 2 deliberately keeps the
+  control-plane relay loopback-only; limited, deliberate external
+  connectivity for the local relay (to mirror `kind:0` or anything else)
+  is envisaged as its own later phase, not a Phase 5.5 dependency or
+  blocker. OS-level preferences (theme, locale, window layout) should
+  stay as Evermore's own NIP-78 app-data events via `evermore-settingsd`
+  (already-established pattern), not get folded into `kind:0` — desktop
+  theme has no business leaking into someone's public Nostr profile.
+
+**Still open:**
+
 - **Unlock mechanism at the greeter.** There is no remote party to
   challenge-response against at a local login screen, so this is not a
   NIP-42-style AUTH handshake. The practical v1 is password-manager-style:
@@ -247,25 +264,7 @@ were.
   unlock ("approve from your phone") is a plausible v2 *alternate* unlock
   method, not a v1 requirement — it adds a network dependency to every
   login, which is a bad default for something that should work offline.
-- **Where profile data (kind:0) lives and how it gets here.** Display
-  name/avatar/about map naturally onto the existing `kind:0` metadata
-  event. First boot **must not assume network connectivity** — a
-  greeter can't block on reaching some outbox relay just to show a
-  name. So `kind:0` is offline-first: authored and signed locally (the
-  same way any other Evermore identity event is), stored on the local
-  control-plane relay, and usable by the greeter/panel immediately,
-  with no dependency on ever reaching the wider Nostr network.
-  Reconciling that local event with a "real" `kind:0` the user may have
-  already published elsewhere — and giving the local relay any ability
-  to reach external relays at all, to pull or push it — is explicitly
-  **out of scope for this phase**. Phase 2 deliberately keeps the
-  control-plane relay loopback-only; limited, deliberate external
-  connectivity for the local relay (to mirror `kind:0` or anything
-  else) is envisaged as its own later phase, not a Phase 5.5 dependency
-  or blocker. OS-level preferences (theme, locale, window layout) should
-  stay as Evermore's own NIP-78 app-data events via `evermore-settingsd`
-  (already-established pattern), not get folded into `kind:0` — desktop
-  theme has no business leaking into someone's public Nostr profile.
+  Not yet decided, just a working recommendation.
 - **Scope boundary with Phase 6.** M6.4 (`ncryptsec` export/recovery) and
   M6.3 (true cross-device validation) both become easy to validate for
   real once this phase exists, and arguably can't be *meaningfully*

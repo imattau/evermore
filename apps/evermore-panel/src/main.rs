@@ -1,9 +1,11 @@
 mod notifications_client;
+mod operations_client;
 mod settings_client;
 mod signer_client;
 
 use eframe::egui;
 use evermore_common::notifications::{NotificationRecord, Source};
+use evermore_common::operations::Definition;
 use signer_client::Identity;
 
 fn main() -> eframe::Result {
@@ -31,6 +33,7 @@ enum Tab {
     Identity,
     Settings,
     Notifications,
+    Ai,
     Packages,
 }
 
@@ -46,6 +49,9 @@ struct PanelApp {
     notifications: Vec<NotificationRecord>,
     notifications_error: Option<String>,
     notifications_loaded: bool,
+    operations: Vec<Definition>,
+    operations_error: Option<String>,
+    operations_loaded: bool,
 }
 
 impl PanelApp {
@@ -97,6 +103,20 @@ impl PanelApp {
             }
         }
     }
+
+    fn refresh_operations(&mut self) {
+        self.operations_loaded = true;
+        match operations_client::fetch_catalog() {
+            Ok(operations) => {
+                self.operations = operations;
+                self.operations_error = None;
+            }
+            Err(error) => {
+                self.operations.clear();
+                self.operations_error = Some(error);
+            }
+        }
+    }
 }
 
 impl eframe::App for PanelApp {
@@ -108,6 +128,7 @@ impl eframe::App for PanelApp {
                 ui.selectable_value(&mut self.tab, Tab::Identity, "Identity");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
                 ui.selectable_value(&mut self.tab, Tab::Notifications, "Notifications");
+                ui.selectable_value(&mut self.tab, Tab::Ai, "AI");
                 ui.selectable_value(&mut self.tab, Tab::Packages, "Packages");
             });
             ui.add_space(6.0);
@@ -219,6 +240,58 @@ impl eframe::App for PanelApp {
                         });
                         ui.add_space(6.0);
                     }
+                }
+            }
+            Tab::Ai => {
+                if !self.operations_loaded {
+                    self.refresh_operations();
+                }
+                ui.heading("AI capabilities");
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_operations();
+                    }
+                    ui.label(
+                        evermore_common::operations::runtime_socket_path()
+                            .display()
+                            .to_string(),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    "Shared operation catalogue. Writes require owner approval; this panel is read-only so far.",
+                );
+                ui.add_space(8.0);
+
+                if let Some(error) = &self.operations_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                } else if self.operations.is_empty() {
+                    ui.label("No operations available. Start evermore-operationsd to load the catalogue.");
+                } else {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for operation in &self.operations {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&operation.name).strong());
+                                    ui.weak(match operation.access {
+                                        evermore_common::operations::Access::Read => "read",
+                                        evermore_common::operations::Access::Write => "write",
+                                    });
+                                    if operation.approval
+                                        == evermore_common::operations::Approval::Required
+                                    {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(230, 180, 90),
+                                            "approval required",
+                                        );
+                                    }
+                                });
+                                ui.label(&operation.description);
+                                ui.weak(format!("Grant: {}", operation.required_grants.join(", ")));
+                            });
+                            ui.add_space(6.0);
+                        }
+                    });
                 }
             }
             Tab::Packages => {

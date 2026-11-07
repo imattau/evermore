@@ -14,7 +14,9 @@ pub fn list_recent() -> Result<Vec<NotificationRecord>, String> {
     })?;
     let mut line = serde_json::to_string(&Request::ListRecent).map_err(|e| e.to_string())?;
     line.push('\n');
-    stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);

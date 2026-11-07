@@ -150,11 +150,17 @@ evermore/
 
 **Goal:** Make Blossom storage a first-class part of the file manager without replacing the local filesystem.
 
+**Implementation status (2026-11-07):** M4.1–M4.4 are implemented. The Arch
+VM smoke check built the daemon, mounted the FUSE view, synced files in both
+directions between the `~/Nostr` watcher and a separate mount client, and
+confirmed deletion propagation. This used two clients on one VM; the
+two-VM acceptance run below remains the final cross-device check.
+
 **Milestones:**
-- **M4.1** — `evermore-blossom-fs` implements the Blossom HTTP API client (upload/get/list/mirror) authorized via `evermore-signer`'s socket (NIP-98-style signed auth events, not a stored API key).
-- **M4.2** — First surface: a **sync daemon** for `~/Nostr/` (simpler than FUSE to start) using `notify`/inotify — new/changed files upload to Blossom and get indexed in a `kind:30000`-ish addressable "file index" event per directory, signed by the user's key.
-- **M4.3** — FUSE mount (`fuser` crate) as the second, richer surface once M4.2's upload/index logic is proven — mounts a Blossom server read/write at a configurable path, so it shows up as an ordinary filesystem location (a GVFS backend is the GNOME-specific equivalent, evaluated only if FUSE proves awkward for Nautilus/Files integration).
-- **M4.4** — File-manager integration: a "Publish to Nostr" Nautilus/Files extension (or a right-click script as a stopgap) that uploads the selected file via M4.1 and copies a `nostr:`/NIP-92 `imeta` reference to the clipboard.
+- **M4.1** — `evermore-blossom-fs` implements the Blossom HTTP API client (upload/get/list/mirror) authorized via `evermore-signer`'s socket (NIP-98-style signed auth events for upload/list and BUD-11 scoped authorization for BUD-04 mirroring; no stored API key).
+- **M4.2** — First surface: a **sync daemon** for `~/Nostr/` (simpler than FUSE to start) using `notify`/inotify — new/changed files upload to Blossom and get indexed in a `kind:30301` addressable file-index event per directory, signed by the user's key. Initial relay state is applied before local uploads; updates are ordered, and deletions propagate.
+- **M4.3** — FUSE mount (`fuser` crate) as the second, richer surface — mounts a Blossom-backed directory read/write at a configurable path, with a local cache and the same signed file index. `fuse3` provides the unprivileged mount helper.
+- **M4.4** — File-manager integration: a Nautilus right-click script that uploads the selected file via M4.1 and copies a NIP-92 `imeta` reference to the clipboard.
 
 **Validation:** Drop a file into `~/Nostr/` on one VM; from a second VM/identity pairing to the same key, confirm the file is retrievable (via the FUSE mount or a direct Blossom fetch) without manually copying anything.
 
@@ -185,58 +191,182 @@ evermore/
 
 ### Phase 7: AI & Agentic AI Integration
 
-**Goal:** Let AI agents — a local assistant, an autonomous coding agent, any
-MCP-connected tool — act through Evermore's existing daemons safely, with
-the same scoped-permission and audit-trail discipline `imattau/nostrhost`
-already established for its own agent/owner split, rather than each agent
-integration inventing its own bespoke access path. This builds entirely on
-Phase 1's signer and Phase 2's relay; it adds a grant/scope layer on top,
-not a parallel system.
+**Goal:** Make AI a system capability that any Evermore component can invoke,
+not a separate application with its own authority. Headless services own
+inference, context, search, and operation execution. Sway, the egui panel,
+`npack`, notifications, and MCP clients use the same operation catalogue,
+approval rules, and audit trail. This builds on Phase 1's signer and Phase 2's
+existing loopback control relay at `127.0.0.1:4869`; it does not introduce a
+second relay or grant any service the owner's raw `nsec`.
+
+**Implementation status (2026-11-07):** M7.1 has started in
+`evermore-common::operations` with versioned schemas, access classes, grants,
+approval metadata, and redaction policy for existing identity, notification,
+and settings capabilities. `evermore-operationsd catalog` serves these
+definitions over a private Unix socket and prints the same data as JSON; the
+panel's AI tab reads the same catalogue and shows the required grant and
+approval classification. The CLI routes catalogued reads to the existing
+signer, settings, and notification daemons, validates arguments from the
+catalogue, and redacts secret-shaped results. Initial M7.2 support accepts
+signed kind:1 requests and owner approvals, encrypts request content to the
+owner, persists lifecycle state, publishes acknowledged events on the
+existing local relay, and signs outcome events with a distinct service
+identity. It executes the approval-gated `settings.set` operation. Approval is
+bound to the signed request event ID and exact request payload. A persisted
+`running` state becomes `execution_unknown` after restart or an ambiguous
+daemon response to prevent blind replay. M7.5 adds owner-signed, expiring
+agent grants scoped to exact write operation names. Grant publication must be
+acknowledged by the local relay before use; revocation is immediate in local
+state and blocks queued requests, with signed relay publication retried in the
+background. The grant is checked at submission, approval, and execution.
+Only `settings.set` currently has an executor; broader write handlers and
+read-side MCP identity authorization remain open.
+
+**Service boundaries:**
+
+| Service | Responsibility | Authority |
+| :--- | :--- | :--- |
+| `ai-inferd` | Runs local models and streams inference responses; cloud inference is available only by explicit per-request opt-in. | Thinks; cannot execute system operations. |
+| `ai-contextd` | Provides selected session context such as focused window, workspace, settings, notifications, and package state. | Observes only; returns only data allowed by the user's context policy. |
+| `ai-indexd` | Builds a local semantic index for explicitly selected Nostr events, files, settings, and package metadata. | Searches only; private messages and file contents are not indexed without consent. |
+| `evermore-operationsd` | Owns the operation catalogue, authorization checks, approval state, execution, result redaction, and audit events. | The only path for AI-requested mutations; executes writes only after required approval. |
+| `ai-agentd` | Plans and coordinates multi-step tasks using inference, context, and registered operations. | Submits operation requests; cannot invoke shell commands or bypass the executor. |
+| `ai-policyd` | Supplies advisory risk and trust summaries to the human approval flow. | Advises only; cannot grant permissions or approve an operation. |
+| `evermore-mcp` | Adapts registered operations to MCP tools and transports. | Interface only; contains no policy or execution authority. |
+
+All AI-facing services bind to Unix sockets or loopback. They never listen on
+public interfaces by default. Model inputs and operation results pass through
+scope checks and secret redaction before reaching a model. The human approval
+surface may display fuller details than the model receives.
+
+**Lessons applied from NostrHost:** NostrHost's own README describes a
+pre-alpha whose remaining work is smoothing the full install → use → recover
+journey. Its control plane also keeps the human owner identity distinct from a
+server-generated identity, and treats administrative actions as signed,
+auditable actions. Apply those lessons by proving one complete, recoverable
+Evermore path before expanding the number of AI services: start with one
+catalogue-backed read and one approval-gated write, exercise denial, timeout,
+restart, and recovery, then add inference and broader integrations. Reuse
+Evermore's existing relay at `127.0.0.1:4869`; do not copy NostrHost's relay
+address or introduce another bus. Keep the human/session actor, agent actor,
+and service signer distinct, and derive the actor from authenticated transport
+or session credentials rather than a caller-supplied field.
+
+The companion `nostrhost-mcp` design makes a further useful boundary concrete:
+the adapter translates protocol and schemas, while the installed system owns
+authorization, approval, execution, and operation state. In Evermore, route
+all interfaces through `evermore-operationsd`; bind every approval to an
+immutable operation request (actor, operation name, canonical arguments, and
+request ID), and revalidate that binding and current grant when execution is
+claimed. Persist lifecycle state so `operation_id` status queries and recovery
+after a daemon restart do not depend on an MCP connection staying open. Keep a
+local adapter health/identity check available even when the relay or executor
+is unavailable, and make secret redaction a shared result boundary before
+content reaches any model. These are implementation requirements, not extra
+authority for the model or MCP client.
 
 **Milestones:**
-- **M7.1** — Agent identities are separate Nostr keypairs, never the owner's
-  `nsec`. A grant (which kinds, which settings domains an agent may touch)
-  is itself an addressable control-plane relay event
-  (`evermore:agent-grant:<agent-pubkey>`), signed by the owner identity —
-  mirrors nostrhost's scope-tier model: no agent identity ever holds
-  "administrator," because owner co-signature already covers the risk that
-  tier existed to gate.
-- **M7.2** — `evermore-signer` enforces grants at the socket boundary: an
-  agent's `sign_event`/`nip44_encrypt` requests are checked against its
-  grant *before* anything is signed, and anything out of scope is refused
-  outright, not merely logged. A delegated/agent identity is explicitly
-  barred from approving its own privileged request — approval of anything
-  beyond the base grant requires a separate event signed by the *owner*
-  identity (the self-approval delegation guard pattern) — closing exactly
-  the agent-self-approval path nostrhost had to close after the fact.
-- **M7.3** — `evermore-mcp`: an MCP server (Rust, reusing the same
-  Unix-socket clients already written for `evermore-panel`) exposing
-  read-mostly tools over Evermore's daemons to AI coding assistants and
-  agent runtimes — list identities (never secrets), read settings, list
-  recent notifications, query `npack`'s trust graph — plus one scoped
-  "propose an event" tool that routes through M7.2's grant check rather
-  than a raw signing passthrough.
-- **M7.4** — Every agent-initiated action rides the same request → approval
-  → execution → result audit chain nostrhost's `CONTROL-PLANE.md` already
-  established for Evermore's control-plane relay (regular, immutable
-  events) — an agent's actions get the same cryptographic provenance as a
-  human's, not a separate, unaudited path.
-- **M7.5** — `npack`: an agent may *propose* a package update via M7.3's
-  tool, but publishing still requires the publisher identity's own
-  signature — an agent can draft a package, never ship one.
-- **M7.6** *(optional, later)* — a chat-style Assistant tab in
-  `evermore-panel` that talks to a local model, whose own tool access is
-  itself just another agent grant under M7.1 — the panel gets no special
-  bypass of the scope/approval machinery everything else goes through.
 
-**Validation:** Issue a scoped grant to a throwaway agent identity (e.g.
-"may publish `kind:1` under `evermore:test` only"); confirm `evermore-signer`
-signs requests within that scope, refuses an out-of-scope request, and
-refuses an attempted self-approval; confirm the resulting events carry the
-same request/approval/execution/result audit-chain shape as Phase 2's
-human-initiated settings changes — an agent's footprint should be
-indistinguishable in form from a human's, just distinguishable in *who
-signed what*.
+- **M7.1 — One operation catalogue.** Define each operation once with its
+  name, JSON input/output schema, read or write classification, required
+  grant, approval requirement, and result-redaction rules. Generate the CLI,
+  egui controls, and MCP tool schemas from this catalogue so those surfaces
+  cannot drift into different permissions or behavior. Add canonical argument
+  normalization and a stable operation version so an approval is bound to the
+  exact request that the user reviewed.
+- **M7.2 — Signed operation control plane.** Add `evermore-operationsd` as
+  the executor for local operations such as settings writes, package actions,
+  and Sway IPC. Requests carry a Nostr actor identity and are correlated to
+  approval, execution, and result events on the existing local relay. Adopt
+  `kind:2200` request and `2201`/`2203`/`2204`/`2205` lifecycle pattern only
+  after mapping the need against standard NIPs and checking kind assignments;
+  add the chosen kinds to the relay's NIP-86 allowlist. Store
+  the lifecycle as regular, immutable events. The agent signs its request,
+  the owner signs approval, and the executor signs
+  execution/result events; event IDs and `operation_id` correlate the chain.
+  Local reads may execute immediately.
+  Writes return an `approval_required` state with an `operation_id` until
+  approved through the egui panel, an owner-controlled NIP-46 bunker, or an
+  administrator CLI. Persist explicit `pending`, `approved`, `denied`,
+  `running`, `succeeded`, `failed`, `expired`, and `cancelled` states; use
+  idempotent request handling and a single execution claim so retries,
+  duplicate events, or daemon restarts cannot replay a write. Approval itself
+  only changes eligibility; the executor reloads and rechecks the operation,
+  grant, and approval before making a side effect. Expose `operation_id` status
+  through CLI, egui, and MCP.
+- **M7.3 — Local inference service.** Build `ai-inferd` with a stable Unix
+  socket API, model management, streaming responses, and CPU/GPU backend
+  selection. Prove an offline local-model path first. Models are installed
+  and verified as signed `npack` artifacts; a small optional first-run model
+  can provide offline capability without forcing a large model into every
+  ISO. Benchmark a backend such as llama.cpp, Candle, or an Ollama-compatible
+  service behind the stable interface. Cloud providers require explicit
+  per-request consent and disclose what context will leave the device.
+- **M7.4 — Context and semantic search.** Build read-only `ai-contextd` and
+  `ai-indexd` interfaces. Start with compositor state, settings, notification
+  metadata, package metadata, and user-selected `~/Nostr` files. Keep indexing
+  local by default. Require explicit opt-in and scopes before indexing DM
+  contents, private files, or other sensitive data. Context subscriptions
+  must not become an alternate write path.
+- **M7.5 — Scoped agent and approval enforcement.** Agent identities are
+  separate Nostr keypairs, never the owner's key. Owner-signed grants constrain
+  exact operation names, expire within 365 days, and require relay
+  acknowledgement before use. `evermore-operationsd` checks the grant at
+  request submission, approval, and execution; only the owner can approve, so
+  an agent cannot approve its own request. Revocation takes effect locally
+  immediately, prevents queued work from executing, and publishes a signed
+  revocation with background retry. The initial implementation is complete
+  for the current write executor. Addressable grant events, kind/domain-level
+  scopes, signer-side enforcement, and broader write executors remain open.
+- **M7.6 — Thin MCP adapter.** Implement `evermore-mcp` as a transport and
+  schema adapter over the operation catalogue and core daemons. It exposes
+  read tools and scoped operation requests, never raw signing or shell
+  passthrough. MCP is an interface, not an authority boundary. For any HTTP
+  transport, authenticate and bind the caller's Nostr identity before
+  dispatch; local stdio transports must bind to the owning user session.
+  Provide stdio first and optional loopback Streamable HTTP for clients that
+  need it; reject non-loopback binding by default. Make `mcp_status` report
+  adapter reachability and recognized caller identity without depending on
+  the operation relay/executor, and expose `op_status(operation_id)` for
+  durable approval and execution results. The adapter has no root privilege,
+  policy implementation, or direct execution path.
+- **M7.7 — Sway and egui integration.** Add a `sway-ai-bridge` that reports
+  selected window and workspace changes to `ai-contextd`. Read operations
+  such as listing windows are available through the catalogue; workspace,
+  focus, and launch changes go through approval-gated operations, never
+  direct model-issued `swaymsg`. Add contextual help and operation proposals
+  to existing egui panels, with a system-wide hotkey command palette as the
+  shared interaction surface. Local speech-to-text voice input may be added
+  later through the same inference and operation path.
+- **M7.8 — Existing services use the same operations.** Add `npack` update
+  proposals, settings changes, notification triage, and Blossom file search
+  as catalogue operations. Support trust-graph-grounded package discovery
+  (for example, finding a screenshot tool from a followed publisher) and
+  dependency explanations. An agent may draft a package update but
+  publishing still requires the publisher identity's own signature.
+  Notifications and package trust assessments from `ai-policyd` are
+  explanations for the user, not automatic policy decisions.
+- **M7.9 — Activity log and optional agent collaboration.** Render the
+  request → approval → execution → result event chain in an egui Activity
+  Log. Each event records actor, operation, request correlation, approval,
+  and outcome. Keep the audit local by default; allow encrypted export to a
+  user-selected relay only when configured. Later, scoped sub-agents may use
+  their own Nostr keys or owner-mediated NIP-46 signing, with no shared owner
+  secret and no self-approval.
+
+**Validation:** First prove a vertical slice in the VM: invoke a read
+operation from CLI and MCP using the same generated schema; submit a write;
+verify it stays pending until a distinct owner approves; deny another write;
+restart the executor while an approval is pending; then approve and verify
+the operation completes once. Check expiry, duplicate submission, stale or
+modified arguments, out-of-scope requests, and self-approval are refused or
+handled deterministically. Confirm the signed lifecycle chain reconstructs
+from persisted state after restart, `operation_id` remains queryable, local
+status works while the executor is stopped, and secrets are redacted before
+model-visible results. Then preload a verified test model, disconnect the
+network, and prove the local inference path. Finally verify the agent cannot
+reach privileged operations through MCP, shell, Sway, or an egui panel outside
+the catalogue.
 
 ## Key Design Decisions and Risks
 
@@ -247,6 +377,12 @@ A few decisions will shape the entire project and are worth resolving early:
 - **`smithay-egui` is not a shell.** It is explicitly "mainly intended for debug interfaces". Do **not** plan to build the entire desktop shell in egui. Use egui for the *applications and control panels* (settings, package manager, notification center) and rely on a conventional Wayland compositor (e.g., Sway, or a Smithay-based compositor that is not trying to be a full shell) for window management. This keeps the risk bounded.
 - **D-Bus vs. Unix socket for the signing interface.** A Unix socket is simpler and more portable across languages; D-Bus gives you standard service discovery and permission integration. The NanoClaw pattern uses a Unix socket with a read-only mount into containers, which is a clean security boundary. Start with a Unix socket and add a D-Bus wrapper later if integration with existing desktop services demands it.
 - **NIP-78 encryption and relay auth.** NIP-78 settings should be encrypted with NIP-44 and relays should require NIP-42 `AUTH` before serving `kind:30078` events. This is not optional for a production system—without it, settings are either public or served to the wrong clients.
-- **Agent identities are never the owner's key.** Any AI/agentic integration (a local assistant, an MCP-connected coding agent, an autonomous process) gets its own Nostr keypair and an explicit, scoped grant — never delegated access to the owner's real `nsec`, and never permitted to approve its own privileged requests. This is the same split `imattau/nostrhost` already uses for its agent/owner model (see Phase 7); Evermore reuses it rather than re-deriving a weaker version from scratch.
+- **AI has no authority outside the operation executor.** Inference, context, search, policy advice, and MCP transports stay separate. Every AI-initiated mutation enters through the registered operation and approval path; a model or adapter never gets a shell or direct service bypass.
+- **Agent identities are never the owner's key.** Any AI/agentic integration (a local assistant, an MCP-connected coding agent, an autonomous process) gets its own Nostr keypair and an explicit, scoped grant — never the owner's real `nsec`, and never permission to approve its own privileged requests. This is the same split `imattau/nostrhost` already uses for its agent/owner model (see Phase 7); Evermore reuses it rather than re-deriving a weaker version from scratch.
 
-The first concrete step is **M0.1**: scaffold the workspace. The first step that actually matters is **Phase 1**: get the signing daemon running on Arch and expose it to a trivial egui application. Once that interface is stable, every subsequent service—settings, notifications, Blossom, `npack`—can be built against it without re-solving key management. This is the smallest, most reusable foundation for the entire distribution.
+The roadmap remains dependency-ordered: complete Phase 4's cross-device
+acceptance check, then move through Phases 5 and 6 before starting Phase 7.
+When Phase 7 begins, specify the shared operation contract and prove local
+inference on Arch before adding Sway, egui, or MCP integrations. That keeps
+model viability and authority boundaries clear before AI can affect system
+state.

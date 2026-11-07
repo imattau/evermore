@@ -1,0 +1,22 @@
+[Unit]
+Description=Evermore operation control plane for owner identity %i
+Documentation=https://github.com/imattau/evermore
+After=evermore-signer.service evermore-relay.service evermore-settingsd@%i.service
+Wants=evermore-signer.service evermore-relay.service evermore-settingsd@%i.service
+
+[Service]
+Type=simple
+# The owner identity is used only to verify signed approval events. Agent
+# requests are identified from their verified Nostr event pubkey.
+ExecStart=%h/.cargo/bin/evermore-operationsd serve --owner-identity %i --service-identity %i-operations
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/evermore
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

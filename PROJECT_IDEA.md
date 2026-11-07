@@ -209,11 +209,12 @@ daemons. Phase 6's M6.1 ("run it as a real daily session") is not
 meaningful until this exists — today there is no greeter, no enabled
 login session, and no connection between "which Unix user logged in" and
 "which `nsec` the signer should hold." This phase is **planning-stage**:
-the identity model and profile-data approach below are now decided, but
-nothing has been implemented, prototyped, or verified against real
-`systemd-homed` behavior yet, and one open question (the greeter's unlock
-mechanism) remains genuinely unresolved. Treat this whole phase as not yet
-a committed implementation plan the way Phases 0-5 are.
+the identity model, unlock mechanism, profile-data approach, and
+device-root identity below are now decided, but nothing has been
+implemented, prototyped, or verified against real `systemd-homed`
+behavior yet, and this phase's relationship to Phase 7's owner/service
+identities remains genuinely unresolved. Treat this whole phase as not
+yet a committed implementation plan the way Phases 0-5 are.
 
 **Decided:**
 
@@ -252,19 +253,58 @@ a committed implementation plan the way Phases 0-5 are.
   stay as Evermore's own NIP-78 app-data events via `evermore-settingsd`
   (already-established pattern), not get folded into `kind:0` — desktop
   theme has no business leaking into someone's public Nostr profile.
+- **Unlock is passphrase-free: a hardware factor via `systemd-homed`.**
+  No typed secret at the greeter. Primary factor is a FIDO2/U2F hardware
+  key (`systemd-homed-fido2` — tap to unlock, offline, and the same
+  physical key could plausibly double as a hardware Nostr signer later,
+  unifying "unlock my desktop" and "sign as me"); fingerprint
+  (`fprintd`/libfprint, also homed-integrated) is an acceptable
+  *additional* convenience factor, not a sole gate, since biometrics
+  can't be rotated the way a key can; a recovery key stays pure
+  break-glass, written down once, never used day-to-day. A
+  physical-presence-only auto-unlock (no factor at all) is explicitly
+  **not** the default — it's effectively no authentication — though it
+  could be offered as an opt-in low-security mode for dedicated
+  single-purpose hardware. This reuses `homed`'s own pluggable auth
+  factors rather than Evermore inventing a second secret: once `nsec`
+  lives inside the already-`homed`-encrypted home (see the identity-model
+  decision above), unlocking the account *is* unlocking the key — there
+  is no separate step. Trade-off worth naming honestly: this means
+  whoever unlocks the desktop also gets Nostr signing ability, with no
+  compartmentalization between the two; acceptable because the signer
+  daemon is still the only thing that ever sees the decrypted key at
+  runtime, but worth remembering once Phase 7's scoped-agent-grant model
+  is in the picture.
+- **A device-root npub exists, generated on first run.** Mirrors
+  NostrHost's own pattern directly (its roadmap calls this the "server
+  npub" — a machine identity distinct from the human "owner npub" that
+  gives approvals/co-signatures). Evermore needs the same split: "the
+  pubkey is the identity" above describes a *human* logging in, but a
+  device has state that belongs to no single human and exists before any
+  human has logged in at all. The device-root npub is generated
+  automatically at first boot, with no human interaction — the Nostr-
+  native equivalent of a machine-id existing before any user account
+  does. Its `nsec` lives with the device itself (the signer running in a
+  system context), never inside a human's `homed`-encrypted home, and it
+  never appears in the greeter's user picker — it is not a login
+  identity. What it owns: device-level settings no single user should
+  have to own, and — concretely — npack's default trust seed (M5.3,
+  still deferred): the device root signs a starter trust list baked into
+  the install image, which every human user provisioned on that device
+  inherits as a floor and can extend, rather than a hardcoded
+  distribution key baked into every binary.
 
 **Still open:**
 
-- **Unlock mechanism at the greeter.** There is no remote party to
-  challenge-response against at a local login screen, so this is not a
-  NIP-42-style AUTH handshake. The practical v1 is password-manager-style:
-  a local passphrase decrypts a stored NIP-49 `ncryptsec` blob into the
-  session keyring — which directly reuses M6.4's planned backup/recovery
-  format rather than inventing a second one. A NIP-46 remote-signer
-  unlock ("approve from your phone") is a plausible v2 *alternate* unlock
-  method, not a v1 requirement — it adds a network dependency to every
-  login, which is a bad default for something that should work offline.
-  Not yet decided, just a working recommendation.
+- **Relationship to Phase 7's owner/service-identity split.**
+  `evermore-operationsd` already distinguishes an owner identity
+  (approves) from a service identity (executes/attests) in VM testing
+  (`--owner-identity vm-owner --service-identity vm-service`). Does
+  "owner identity" just mean "the first human user npub provisioned on
+  this device," and should the service identity be derived from or
+  signed under the device-root npub rather than being its own
+  free-floating generated key? Not resolved — needs deciding once both
+  this phase and Phase 7 are further along, not guessed at now.
 - **Scope boundary with Phase 6.** M6.4 (`ncryptsec` export/recovery) and
   M6.3 (true cross-device validation) both become easy to validate for
   real once this phase exists, and arguably can't be *meaningfully*

@@ -43,6 +43,8 @@ var allowedKinds = struct {
 	10006: true, // NIP-51 blocked relays
 	30000: true, // NIP-51 categorized people list
 	30002: true, // NIP-51 categorized relay list
+	30301: true, // Evermore file index (Phase 4) -- custom kind: no existing NIP
+	// covers a per-directory addressable manifest of {filename: {sha256, size}}
 }}
 
 func isKindAllowed(kind int) bool {

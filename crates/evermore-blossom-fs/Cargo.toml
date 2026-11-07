@@ -1,0 +1,17 @@
+[package]
+name = "evermore-blossom-fs"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+evermore-common = { version = "0.1.0", path = "../evermore-common" }
+hex = "0.4.3"
+http = "1.5.0"
+nostr = "0.45.7"
+notify = "8.2.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tungstenite = "0.30.0"
+ureq = "3.5.1"

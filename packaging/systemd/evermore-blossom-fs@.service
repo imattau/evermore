@@ -1,0 +1,26 @@
+[Unit]
+Description=Evermore Blossom filesystem sync (~/Nostr/)
+Documentation=https://github.com/imattau/evermore
+After=evermore-signer.service evermore-relay.service
+Wants=evermore-signer.service evermore-relay.service
+
+[Service]
+Type=simple
+# Per-identity instance: `systemctl --user enable evermore-blossom-fs@personal`.
+# %i is the identity name; BLOSSOM_URL must point at a real Blossom server
+# the user has configured (there is no default -- see PROJECT_IDEA.md's
+# system-concerns table: Blossom servers are external infrastructure
+# Evermore points at, not something it ships).
+Environment=BLOSSOM_URL=
+ExecStart=%h/.cargo/bin/evermore-blossom-fs --identity %i --blossom-url ${BLOSSOM_URL}
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Nostr
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

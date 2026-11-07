@@ -35,12 +35,22 @@ impl SignerClient {
         content: String,
         tags: Vec<Vec<String>>,
     ) -> Result<Event, String> {
+        self.sign_event_at(kind, content, tags, None)
+    }
+
+    pub fn sign_event_at(
+        &self,
+        kind: u16,
+        content: String,
+        tags: Vec<Vec<String>>,
+        created_at: Option<u64>,
+    ) -> Result<Event, String> {
         let data = self.call(Request::SignEvent {
             identity: self.identity.clone(),
             kind,
             content,
             tags,
-            created_at: None,
+            created_at,
         })?;
         serde_json::from_value(data).map_err(|e| e.to_string())
     }
@@ -55,7 +65,9 @@ impl SignerClient {
         })?;
         let mut line = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         line.push('\n');
-        stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        stream
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
 
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);

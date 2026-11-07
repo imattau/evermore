@@ -26,10 +26,11 @@ impl RelayClient {
         own_pubkey_hex: String,
         on_event: impl Fn(Event) + Send + 'static,
     ) -> Result<Self, String> {
-        let (ws, _response) =
-            tungstenite::connect(url).map_err(|e| format!("couldn't connect to relay at {url}: {e}"))?;
+        let (ws, _response) = tungstenite::connect(url)
+            .map_err(|e| format!("couldn't connect to relay at {url}: {e}"))?;
 
         let (tx, rx) = mpsc::channel::<String>();
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
 
         let sub = serde_json::json!([
             "REQ",
@@ -39,7 +40,10 @@ impl RelayClient {
         tx.send(sub.to_string())
             .map_err(|_| "relay connection thread died before subscribing".to_string())?;
 
-        thread::spawn(move || run_loop(ws, rx, on_event));
+        thread::spawn(move || run_loop(ws, rx, on_event, ready_tx));
+        ready_rx
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|e| format!("timed out waiting for the relay's initial file index: {e}"))?;
 
         Ok(Self { outgoing: tx })
     }
@@ -52,21 +56,52 @@ impl RelayClient {
     }
 }
 
-fn run_loop(mut ws: WebSocket<MaybeTlsStream<TcpStream>>, outgoing: mpsc::Receiver<String>, on_event: impl Fn(Event)) {
-    if let MaybeTlsStream::Plain(tcp) = ws.get_ref() {
-        let _ = tcp.set_read_timeout(Some(Duration::from_millis(200)));
+fn run_loop(
+    mut ws: WebSocket<MaybeTlsStream<TcpStream>>,
+    outgoing: mpsc::Receiver<String>,
+    on_event: impl Fn(Event),
+    ready: Sender<()>,
+) {
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(tcp) => {
+            let _ = tcp.set_read_timeout(Some(Duration::from_millis(200)));
+        }
+        MaybeTlsStream::Rustls(stream) => {
+            let _ = stream
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(200)));
+        }
+        #[allow(unreachable_patterns)]
+        _ => {}
     }
 
     loop {
         match ws.read() {
-            Ok(Message::Text(text)) => handle_message(&text, &on_event),
+            Ok(Message::Text(text)) => {
+                if serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get(0)
+                            .and_then(|item| item.as_str())
+                            .map(|kind| kind == "EOSE")
+                    })
+                    .unwrap_or(false)
+                {
+                    let _ = ready.send(());
+                }
+                handle_message(&text, &on_event)
+            }
             Ok(Message::Close(_)) => {
                 eprintln!("evermore-blossom-fs: relay closed the connection");
                 break;
             }
             Ok(_) => {}
             Err(tungstenite::Error::Io(e))
-                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
             Err(e) => {
                 eprintln!("evermore-blossom-fs: relay connection error: {e}");
                 break;

@@ -89,6 +89,7 @@ package_upgrade: false
 
 packages:
   - base-devel
+  - fuse3
   - git
   - openssh
   - pkgconf

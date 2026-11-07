@@ -201,6 +201,75 @@ memory to return it but never writing it to disk, so every command after
 true). Also checked end-to-end through the panel's Packages tab, not just
 the CLI.
 
+### Phase 5.5: Identity-Native Login
+
+**Goal:** Make signing in to an Evermore machine mean unlocking a Nostr
+identity, not just unlocking a Unix account that happens to run Evermore's
+daemons. Phase 6's M6.1 ("run it as a real daily session") is not
+meaningful until this exists — today there is no greeter, no enabled
+login session, and no connection between "which Unix user logged in" and
+"which `nsec` the signer should hold." This phase is **planning-stage**:
+the milestones below are open design questions, not settled
+implementation, and should be resolved (possibly by prototyping more than
+one option) before being treated as a committed plan the way Phases 0-5
+were.
+
+**Open design questions:**
+
+- **Unix identity model.** Two real options, not a spectrum:
+  - *(a) Shallow:* one fixed Unix account per device; a greeter/unlock
+    screen just decrypts an `nsec` into that session's kernel keyring
+    after an otherwise-ordinary login. Cheap, but it doesn't deliver
+    "your identity follows you between machines" — home directory,
+    settings, and local state are still pinned to that one device/account.
+  - *(b) Deep:* the Nostr pubkey **is** the identity; a Unix UID and home
+    directory are provisioned on first login for that pubkey, the way
+    enterprise SSO dynamically provisions accounts. `systemd-homed` looks
+    like the right foundation rather than a bespoke PAM+NSS module from
+    scratch — it already does pluggable identity records, portable
+    encrypted home directories, and existing greeter/PAM/NSS integration
+    (gdm/sddm already drive it); the work would be a homed storage/record
+    backend keyed by npub rather than reinventing account provisioning.
+    This is what actually matches the project's original pitch (see
+    "Session Identity" in the architecture table above, which already
+    names a Nostr PAM module as the intended mechanism) but is
+    substantially more systems-level work, and ties Evermore to
+    `systemd-homed`'s own maturity/limitations.
+  - Needs a decision, and probably a throwaway prototype of (b) against
+    homed before committing, since "does homed's pluggable-backend API
+    actually support this cleanly" is an open question, not a known fact.
+- **Unlock mechanism at the greeter.** There is no remote party to
+  challenge-response against at a local login screen, so this is not a
+  NIP-42-style AUTH handshake. The practical v1 is password-manager-style:
+  a local passphrase decrypts a stored NIP-49 `ncryptsec` blob into the
+  session keyring — which directly reuses M6.4's planned backup/recovery
+  format rather than inventing a second one. A NIP-46 remote-signer
+  unlock ("approve from your phone") is a plausible v2 *alternate* unlock
+  method, not a v1 requirement — it adds a network dependency to every
+  login, which is a bad default for something that should work offline.
+- **Where profile data (kind:0) lives and how it gets here.** Display
+  name/avatar/about map naturally onto the existing `kind:0` metadata
+  event — but `kind:0` is normally published to a user's real outbox
+  relays, not Evermore's local, non-federating control-plane relay
+  (Phase 2's relay is deliberately loopback-only). So first login with a
+  *new* pubkey on a *new* device needs an explicit one-time fetch: read
+  the pubkey's NIP-65 relay list, pull `kind:0` from those relays, and
+  mirror it into the local relay so the greeter/panel work offline
+  afterward. That outbound fetch-and-mirror capability does not exist
+  anywhere in the codebase yet — it is new work, not a read against
+  infrastructure that's already there. OS-level preferences (theme,
+  locale, window layout) should stay as Evermore's own NIP-78 app-data
+  events via `evermore-settingsd` (already-established pattern), not get
+  folded into `kind:0` — desktop theme has no business leaking into
+  someone's public Nostr profile.
+- **Scope boundary with Phase 6.** M6.4 (`ncryptsec` export/recovery) and
+  M6.3 (true cross-device validation) both become easy to validate for
+  real once this phase exists, and arguably can't be *meaningfully*
+  validated without it (M6.3 in particular is currently untestable: there
+  is no login flow for "the same identity" to follow across two
+  machines). This phase should land before Phase 6 milestones are
+  attempted, not alongside them.
+
 ### Phase 6: Dogfood & Harden
 
 **Goal:** Stop treating this as a demo and start running it as a daily system on at least one real machine, finding the rough edges Phases 0-5's narrow validations didn't surface.

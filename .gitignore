@@ -1,2 +1,5 @@
 /target/
 **/target/
+
+# Go build output (relay/ is a separate Go module, not in the Cargo workspace)
+relay/evermore-relay-supervisor

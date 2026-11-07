@@ -210,11 +210,14 @@ meaningful until this exists — today there is no greeter, no enabled
 login session, and no connection between "which Unix user logged in" and
 "which `nsec` the signer should hold." This phase is **planning-stage**:
 the identity model, unlock mechanism, profile-data approach, and
-device-root identity below are now decided, but nothing has been
-implemented, prototyped, or verified against real `systemd-homed`
-behavior yet, and this phase's relationship to Phase 7's owner/service
-identities remains genuinely unresolved. Treat this whole phase as not
-yet a committed implementation plan the way Phases 0-5 are.
+device-root identity below are now decided, and the core assumption
+behind the identity model (that `homed`'s record format can actually
+carry a pubkey as identity metadata) has been verified for real against
+a running VM, not just assumed — but no production code exists yet, the
+NIP-46 unlock path needs new PKCS#11-shim work that doesn't exist, and
+this phase's relationship to Phase 7's owner/service identities remains
+genuinely unresolved. Treat this whole phase as not yet a committed
+implementation plan the way Phases 0-5 are.
 
 **Decided:**
 
@@ -232,10 +235,52 @@ yet a committed implementation plan the way Phases 0-5 are.
   is a homed storage/record backend keyed by npub, not reinventing
   account provisioning. This matches the project's original architecture
   table, which already named a Nostr PAM module as the intended
-  session-identity mechanism. **Still open:** whether homed's
-  pluggable-backend API actually supports this cleanly is not a known
-  fact yet — a throwaway prototype against real homed is needed before
-  any of this is built for real.
+  session-identity mechanism.
+
+  **Verified for real on the VM (2026-11-07), not just read about:**
+  `systemd 262` with `homed` already running and `+FIDO2 +P11KIT +TPM2`
+  compiled in. Fed `homectl create -I record.json` a fully custom JSON
+  identity with an arbitrary top-level `"evermore": {"npub": ..., "pubkeyHex":
+  ...}` block alongside the standard fields. It round-tripped exactly —
+  `homectl inspect` returned it verbatim, it's covered by homed's own
+  local Ed25519 record signature (`"signedLocally":true`), and it's
+  present both in `/var/lib/systemd/home/*.identity` outside the home
+  and in `~/.identity` *inside* the mounted home once activated. Created
+  the account, unlocked it, activated it, confirmed the home directory
+  actually mounted with real skeleton files — the full loop works, not
+  just `create` succeeding. So: **yes, homed's JSON record is a real,
+  working place to carry a pubkey as identity metadata; no "pluggable
+  backend API" had to be invented — the record format is already
+  arbitrary-extensible.**
+
+  What this *doesn't* give us for free: homed's own authentication is
+  fixed to exactly four built-in factors — password, PKCS#11, FIDO2,
+  recovery key — there is no way to teach homed itself to verify a
+  Nostr signature or a NIP-46 approval directly. Priority 2 (FIDO2) maps
+  directly onto `--fido2-device`/`--fido2-with-user-presence` etc. with
+  zero new crypto work (not hardware-tested here — no FIDO2 device was
+  attached to the VM — but the flags are real, documented, and the
+  binary has FIDO2 compiled in). The fallback passphrase maps directly
+  onto homed's native password support, also free. **Priority 1
+  (NIP-46) has no native slot** — the concrete path that fits homed's
+  existing extension points is writing a small PKCS#11-compliant
+  provider library that proxies `--pkcs11-token-uri=` requests to a
+  NIP-46 round-trip with the paired phone, rather than talking to a
+  real hardware token; that provider does not exist yet and is new
+  work, not assumed-easy glue.
+
+  One operational finding worth recording so it doesn't get rediscovered
+  the hard way: `homectl` the CLI drives secrets through systemd's
+  interactive `ask-password` agent protocol even when a password hash is
+  supplied in the identity JSON (it still needs the *plaintext* to derive
+  the key that encrypts the record's `secret` section) — `sudo`'s default
+  environment stripping silently swallowed a `NEWPASSWORD` env var during
+  this prototype, and non-interactive callers must answer pending
+  requests via `systemd-reply-password <id> <socket> <<< secret` or avoid
+  the CLI entirely. Evermore's own first-run enrollment code should talk
+  to homed's actual IPC (`io.systemd.Home` over varlink) directly rather
+  than shelling out to `homectl`, to avoid this exact class of
+  interactive-prompt friction in an automated flow.
 - **`kind:0` profile data is offline-first.** First boot must not assume
   network connectivity — a greeter can't block on reaching some outbox
   relay just to show a name. So `kind:0` is authored and signed locally

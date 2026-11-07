@@ -900,28 +900,44 @@ lifecycle — while the `ai-inferd` Unix-socket contract that the panel, drawer,
 `ai-indexd`, and MCP already depend on stays stable. This is
 integration/refactor work: no new authority, no new daemon, and no cloud path.
 
-**Implementation status (2026-11-08):** M7.10–M7.13 are implemented.
-`evermore-common` defines the versioned `ModelManifest` (an adapter requires
-the operation-registry version it was trained against), store discovery via
-`EVERMORE_MODEL_DIRS` with user-root precedence, and protocol version 2.
-`evermore-inferd` scans `/var/lib/evermore/models` and
-`~/.local/share/evermore/models`, spawns one `llama-server` child per model on
-an ephemeral loopback port with a per-process API key, restarts after a crash,
-and serves `/v1/chat/completions` SSE and `/v1/embeddings` behind the unchanged
-socket contract. `UnloadModel` stops that model's child and `Health` reports
-`llama.cpp`. Signed npack import keeps the retained release, archive, and
-base/adapter hash verification, then publishes a manifest plus GGUFs into the
-model store instead of uploading to Ollama. `evermore-indexd` discovers a model
-that declares the `embeddings` capability instead of defaulting to an Ollama
-tag. VM validation with external networking disabled scanned two models,
-returned a 384-dimension embedding, streamed chat, blocked external egress,
-restarted a killed child, and unloaded it. Arch's package is `llama-cpp` (it
-provides `llama-server`), so packaging and the VM script target that name.
-Remaining work is M7.14 runtime adapter scale control, M7.15 grammar
-constraints, M7.16 conversion recipes and ISO pre-install, and M7.17 reinstall
-and acceptance polish. Existing disposable model fixtures must be republished
-with `capabilities` (or `EVERMORE_EMBED_MODEL` set) before `ai-indexd` can
-select them.
+**Implementation status (2026-11-08):** M7.10–M7.17 are implemented, with two
+artifact-dependent checks outstanding. `evermore-common` defines the versioned
+`ModelManifest` (an adapter requires the operation-registry version it was
+trained against), store discovery via `EVERMORE_MODEL_DIRS` with user-root
+precedence, and protocol version 2. `evermore-inferd` scans
+`/var/lib/evermore/models` and `~/.local/share/evermore/models`, spawns one
+`llama-server` child per model on an ephemeral loopback port with a per-process
+API key, restarts after a crash, and serves `/v1/chat/completions` SSE and
+`/v1/embeddings` behind the unchanged socket contract. `UnloadModel` stops that
+model's child and `Health` reports `llama.cpp`. Signed npack import keeps the
+retained release, archive, and base/adapter hash verification, then publishes a
+manifest plus GGUFs into the model store instead of uploading to Ollama, and
+`evermore-indexd` discovers a model that declares the `embeddings` capability
+instead of defaulting to an Ollama tag.
+
+M7.14 adds `ListAdapters`/`SetAdapterScale` over the socket, backed by
+`llama-server`'s `/lora-adapters` API; scale is runtime state and a restart
+returns to the manifest's scale. M7.15 accepts an optional GBNF grammar on chat
+requests (64 KiB cap, no NUL bytes), and the offline check forces an exact
+operation-registry JSON object. This `llama-server` build (Arch `llama-cpp`
+0.6.0) rejects `json_schema`/`response_format` with a sampler error, so callers
+convert a schema to GBNF rather than sending one directly. M7.16 adds
+`tools/model-build/` recipes for base conversion (`Q4_K_M` default), adapter
+conversion (`F16`), and `.npk` assembly with hash verification. M7.17's offline
+check now also covers grammar-constrained chat, adapter-scale refusal on a
+model without an adapter, and skipping an invalid store manifest.
+
+VM validation with external networking disabled scanned two models, returned a
+384-dimension embedding, streamed normal and grammar-constrained chat, blocked
+external egress, restarted a killed child, unloaded it, and verified signed
+import into the store. Arch's package is `llama-cpp` (it provides
+`llama-server`), so packaging and the VM script target that name. Two checks
+remain artifact-dependent: end-to-end adapter hot-swap needs a trained LoRA
+GGUF in the test set (flag construction, manifest pairing, and scale validation
+are covered), and the ISO default pair is not pre-installed until the Phase 5
+ISO profile exists. Existing disposable model fixtures must be republished with
+`capabilities` (or `EVERMORE_EMBED_MODEL` set) before `ai-indexd` can select
+them.
 
 **Why not Ollama:** Ollama's value proposition is model management for end
 users; Evermore is a distribution that must own the inference path, pair base
@@ -1070,15 +1086,15 @@ fallback: when deterministic search can answer a query, no model is invoked.
 **Implementation status (2026-11-08):** M8.1 has a tested Waybar preset for
 Sway workspaces 1–9, window title, network, audio, battery, clock, and tray.
 The launcher spike rejected `nwg-drawer` after the VM showed that its first
-printable key is consumed while focus moves from an app tile to search. Walker
-and Elephant's desktop-applications provider have been built from their
-published Arch AUR recipes and installed in the VM. Walker's app surface opens
-and its provider indexes the VM's desktop entries; the packaged Evermore
-config limits queries to desktop apps and disables generic shell-command
-search. A real Sway-hotkey focus and first-keystroke check is still in
-progress, so M8.2 is not complete. Walker is list-first, trading the original
-grid concept for history-aware ranking, pinning, and a shared provider model.
-No custom launcher rendering or layer-shell code has been added.
+printable key is consumed during its search-focus handoff. Walker and
+Elephant's desktop-applications provider were also installed and tested, but
+Walker lost the first typed character in Sway both as a resident service and
+on-demand, even with exclusive layer-shell keyboard focus. Fuzzel 1.15.0 from
+Arch's official repository is now the active candidate: its drun mode searches
+installed applications without a generic command runner or separate provider
+service. The updated binding and Fuzzel preset are in place; final hotkey and
+launch validation is still pending. No custom launcher rendering or
+layer-shell code has been added.
 
 **Product rules:** Keep the default Waybar panel conventional: workspaces,
 clock, tray, and available system status, with no npub, relay health, or trust
@@ -1096,16 +1112,15 @@ needs its identity, context, or operation semantics.
 - **Panel:** configure [Waybar](https://github.com/Alexays/Waybar) and its
   existing Sway, clock, tray, audio, network, and battery modules. Do not write
   a panel or status-module framework.
-- **Launcher:** use [Walker](https://github.com/abenz1267/walker) with
-  Elephant's desktop-applications provider. It provides a keyboard-driven
-  layer-shell list, app history, pinning, and an extensible provider interface.
-  Its Elephant service is an added runtime dependency; keep only the app
-  provider in the default set and remove the generic command-runner prefix.
-  The `nwg-drawer` app grid was rejected because its first typed character is
-  lost during search-focus handoff. Do not fork either project or ship two
-  launchers. Route system mutation through the catalogue. Keep
-  `evermore-panel --command-palette` as the safe Evermore action surface until
-  it can be integrated cleanly as a launcher provider/menu.
+- **Launcher:** use [Fuzzel](https://codeberg.org/dnkl/fuzzel) in desktop-run
+  mode for the initial keyboard-first app search. It supports native Wayland
+  layer-shell, exclusive keyboard focus, fuzzy matching, icons, desktop-action
+  search, and recent-launch sorting without an extra daemon. `nwg-drawer` and
+  Walker were rejected after both lost the first typed character during Sway
+  focus handoff in the VM. Fuzzel has no generic shell-command mode when
+  invoked with `--show drun`. Keep system mutation in Evermore's catalogue and
+  retain `evermore-panel --command-palette` as the safe Evermore action surface
+  until it can be integrated cleanly as a launcher provider/menu.
 - **Right inbox:** use
   [SwayNotificationCenter](https://github.com/ErikReider/SwayNotificationCenter)
   for D-Bus toasts, notification history, grouping, DND, and its layer-shell
@@ -1142,16 +1157,16 @@ needs its identity, context, or operation semantics.
   services. Keep Nostr-specific status out of the default panel. Preserve the
   existing VM configuration and provide a reproducible configuration/install
   path for the target Arch desktop.
-- **M8.2 — Launcher v0, then v1.** Configure upstream Walker with Elephant's
-  desktop-applications provider for Super+Space. V0 shows installed apps on
-  empty query and supports first-keystroke filtering, arrow selection, Enter
-  launch, and Escape dismissal. Verify hotkey focus and launch from a clean
-  Sway session. V1 adds deterministic app/settings/file search and Tab
-  sub-actions through supported providers and menus. No chat or AI is needed.
-  Keep the shell-command provider disabled and retain the Evermore palette for
-  approved system actions. Only build a custom launcher surface if upstream
-  clients cannot meet the interaction and extension requirements without a
-  fork; do not keep two competing default launcher bindings.
+- **M8.2 — Launcher v0, then v1.** Configure upstream Fuzzel in drun mode for
+  Super+Space. V0 shows installed apps on empty query and supports
+  first-keystroke filtering, arrow selection, Enter launch, and Escape
+  dismissal. Verify hotkey focus and launch from a clean Sway session. V1 adds
+  deterministic settings/file search and desktop actions through supported
+  launcher modes or a provider only if the extra integration is useful. No
+  chat or AI is needed. Keep system actions in the Evermore palette. Only
+  build a custom launcher surface if upstream clients cannot meet the
+  interaction and extension requirements without a fork; do not keep two
+  competing default launcher bindings.
 - **M8.3 — Right inbox drawer.** Configure SwayNC's existing control center
   first as the glanceable, dismissible triage surface. Build a custom drawer
   only if its supported widgets/actions cannot present the required data. The
@@ -1237,8 +1252,10 @@ a project-wide readiness gate where required by the dependency order. Phase 7
 future enhancements are listed in its milestone notes and do not block its
 initial baseline.
 
-Phase 7.5 is a planned refactor of the inference runtime, not a further Phase 7
+Phase 7.5 is a refactor of the inference runtime, not a further Phase 7
 enhancement: it replaces the Ollama-compatible backend recorded above with a
-supervised `llama-server` while preserving the `ai-inferd` socket contract. It
-does not change Phase 7's acceptance evidence, but it must land before Phase
-8's AI drawer and semantic launcher fallback are considered complete.
+supervised `llama-server` while preserving the `ai-inferd` socket contract. Its
+runtime, packaging, and VM checks are implemented; end-to-end adapter hot-swap
+and the ISO default pair remain artifact-dependent (see its status note). It
+does not change Phase 7's acceptance evidence, but it must complete before
+Phase 8's AI drawer and semantic launcher fallback are considered complete.

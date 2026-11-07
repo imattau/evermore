@@ -25,6 +25,9 @@ WORKDIR="$(mktemp -d /tmp/evermore-p7-offline.XXXXXX)"
 cleanup() { sudo -n rm -rf -- "$WORKDIR"; }
 trap cleanup EXIT
 cp -a "$SOURCE_MODELS" "$WORKDIR/models"
+# An invalid manifest must be skipped without hiding the valid models.
+mkdir -p "$WORKDIR/models/.broken"
+printf '{"manifest_version":1}' >"$WORKDIR/models/.broken/manifest.json"
 
 cat >"$WORKDIR/inside.sh" <<'INNER'
 #!/usr/bin/env bash
@@ -81,6 +84,12 @@ def request(path, payload, timeout=90):
     client.connect(path)
     client.sendall(json.dumps(payload).encode() + bytes([10]))
     return client
+
+def one_shot(path, payload, timeout=90):
+    client = request(path, payload, timeout)
+    event = json.loads(client.makefile().readline())
+    client.close()
+    return event
 
 path = sys.argv[1]
 
@@ -150,6 +159,54 @@ if sys.argv[3]:
     client.close()
     assert completed and tokens, "chat stream did not produce tokens and complete"
     print("LOCAL_STREAMED_CHAT_OK", "tokens=" + str(len(tokens)), "text=" + "".join(tokens))
+
+    # GBNF must force exactly one operation-registry-shaped proposal.
+    request_id = "phase7-grammar-chat"
+    grammar = 'root ::= "{\\"operation\\":\\"settings.get\\",\\"arguments\\":{}}"'
+    client = request(path, {
+        "method": "chat",
+        "params": {
+            "request_id": request_id,
+            "model": sys.argv[3],
+            "messages": [{"role": "user", "content": "Emit the operation request."}],
+            "backend": "cpu",
+            "max_tokens": 32,
+            "temperature": 0,
+            "grammar": grammar,
+        },
+    }, timeout=180)
+    stream = client.makefile()
+    tokens = []
+    while True:
+        line = stream.readline()
+        if not line:
+            raise AssertionError("grammar chat stream ended early")
+        event = json.loads(line)
+        if event.get("request_id") != request_id:
+            raise AssertionError(event)
+        if event.get("event") == "token":
+            tokens.append(event.get("text", ""))
+        elif event.get("event") == "completed":
+            break
+        elif event.get("event") == "error":
+            raise AssertionError(event)
+    client.close()
+    content = "".join(tokens)
+    proposal = json.loads(content)
+    assert proposal == {"operation": "settings.get", "arguments": {}}, content
+    print("GRAMMAR_CHAT_OK", content)
+
+adapters = one_shot(path, {"method": "list_adapters", "params": {"model": sys.argv[2]}})
+assert adapters.get("event") == "adapters", adapters
+assert adapters.get("adapters") == [], adapters
+print("NO_ADAPTER_OK")
+
+refused = one_shot(
+    path, {"method": "set_adapter_scale", "params": {"model": sys.argv[2], "scale": 0.5}}
+)
+assert refused.get("event") == "error", refused
+assert "no signed LoRA adapter" in refused.get("message", ""), refused
+print("ADAPTER_SCALE_REFUSED_OK")
 
 external = socket.socket()
 external.settimeout(3)

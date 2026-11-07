@@ -1241,11 +1241,27 @@ pub mod ai {
         pub operation_registry_version: Option<String>,
     }
 
+    /// Runtime state of a LoRA adapter loaded by a model's `llama-server`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AdapterState {
+        pub id: u32,
+        pub name: String,
+        pub scale: f32,
+        pub loaded: bool,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "method", content = "params", rename_all = "snake_case")]
     pub enum Request {
         Health,
         ListModels,
+        ListAdapters {
+            model: String,
+        },
+        SetAdapterScale {
+            model: String,
+            scale: f32,
+        },
         Chat {
             request_id: String,
             model: String,
@@ -1256,6 +1272,10 @@ pub mod ai {
             max_tokens: Option<u32>,
             #[serde(default)]
             temperature: Option<f32>,
+            /// Optional GBNF grammar constraining generated text. Used by
+            /// operation-proposal callers that need parseable JSON.
+            #[serde(default)]
+            grammar: Option<String>,
         },
         Embed {
             request_id: String,
@@ -1280,6 +1300,10 @@ pub mod ai {
         },
         Models {
             models: Vec<Model>,
+        },
+        Adapters {
+            model: String,
+            adapters: Vec<AdapterState>,
         },
         ModelInstalled {
             package_id: String,
@@ -1389,6 +1413,45 @@ pub mod ai {
             assert_eq!(roots.len(), 2);
             assert_eq!(roots[0], PathBuf::from("/system/models"));
             assert!(parse_model_store_roots("").is_empty());
+        }
+
+        #[test]
+        fn chat_grammar_is_optional_on_the_wire() {
+            let legacy: Request = serde_json::from_value(serde_json::json!({
+                "method": "chat",
+                "params": {
+                    "request_id": "r",
+                    "model": "evermore/m:1",
+                    "messages": [{ "role": "user", "content": "hi" }]
+                }
+            }))
+            .unwrap();
+            match legacy {
+                Request::Chat {
+                    grammar, backend, ..
+                } => {
+                    assert!(grammar.is_none());
+                    assert_eq!(backend, Backend::Auto);
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+
+            let with_grammar: Request = serde_json::from_value(serde_json::json!({
+                "method": "chat",
+                "params": {
+                    "request_id": "r",
+                    "model": "evermore/m:1",
+                    "messages": [{ "role": "user", "content": "hi" }],
+                    "grammar": "root ::= \"{}\""
+                }
+            }))
+            .unwrap();
+            match with_grammar {
+                Request::Chat { grammar, .. } => {
+                    assert_eq!(grammar.as_deref(), Some("root ::= \"{}\""));
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
         }
     }
 }

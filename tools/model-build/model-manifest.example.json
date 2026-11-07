@@ -1,0 +1,17 @@
+{
+  "id": "evermore.example.model",
+  "name": "Evermore Example Model",
+  "version": "1.0.0",
+  "description": "Example base model plus operation adapter",
+  "ai_model": {
+    "gguf_file": "base.gguf",
+    "sha256": "<64-character SHA-256 of base.gguf>",
+    "adapter_gguf_file": "adapter.gguf",
+    "adapter_sha256": "<64-character SHA-256 of adapter.gguf>",
+    "adapter_scale": 1.0,
+    "context_size": 8192,
+    "quant": "Q4_K_M",
+    "capabilities": ["chat"],
+    "operation_registry_version": "2026-11-08"
+  }
+}

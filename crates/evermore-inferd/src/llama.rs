@@ -87,6 +87,23 @@ impl Pool {
         Ok(endpoint)
     }
 
+    /// Returns the endpoint only if the model's child is already running.
+    /// Used by read-only adapter inspection so listing does not start a model.
+    pub fn endpoint(&self, name: &str) -> Option<Endpoint> {
+        let mut running = self.running.lock().ok()?;
+        let alive = {
+            let entry = running.get_mut(name)?;
+            entry.child.try_wait().ok().flatten().is_none()
+        };
+        if !alive {
+            if let Some(mut entry) = running.remove(name) {
+                let _ = entry.child.wait();
+            }
+            return None;
+        }
+        running.get(name).map(|entry| entry.endpoint.clone())
+    }
+
     pub fn unload(&self, name: &str) -> bool {
         let Ok(mut running) = self.running.lock() else {
             return false;

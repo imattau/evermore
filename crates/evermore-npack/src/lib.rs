@@ -107,3 +107,51 @@ pub fn bin_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home).join(".local").join("bin")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_payload_parses_base_and_adapter_fields() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id": "evermore.example.model",
+            "name": "Example",
+            "version": "1.0.0",
+            "ai_model": {
+                "gguf_file": "base.gguf",
+                "sha256": "a".repeat(64),
+                "adapter_gguf_file": "adapter.gguf",
+                "adapter_sha256": "b".repeat(64),
+                "adapter_scale": 0.75,
+                "context_size": 8192,
+                "quant": "Q4_K_M",
+                "capabilities": ["chat"],
+                "operation_registry_version": "2026-11-08"
+            }
+        }))
+        .unwrap();
+        let payload = manifest.ai_model.unwrap();
+        assert_eq!(payload.adapter_scale, Some(0.75));
+        assert_eq!(payload.capabilities, vec!["chat"]);
+        assert_eq!(
+            payload.operation_registry_version.as_deref(),
+            Some("2026-11-08")
+        );
+    }
+
+    #[test]
+    fn legacy_model_payload_still_parses() {
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id": "legacy.model",
+            "name": "Legacy",
+            "version": "1.0.0",
+            "ai_model": { "gguf_file": "model.gguf", "sha256": "c".repeat(64) }
+        }))
+        .unwrap();
+        let payload = manifest.ai_model.unwrap();
+        assert!(payload.adapter_gguf_file.is_none());
+        assert!(payload.capabilities.is_empty());
+        assert!(payload.context_size.is_none());
+    }
+}

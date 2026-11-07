@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use evermore_common::ai::{
-    self, Backend, Event, Message, ModelAdapter, ModelArtifact, ModelManifest, Role,
+    self, AdapterState, Backend, Event, Message, ModelAdapter, ModelArtifact, ModelManifest, Role,
 };
 use serde_json::{Value, json};
 
@@ -133,6 +133,14 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
         let (request_id, result): (Option<String>, Result<Option<Event>, String>) = match request {
             ai::Request::Health => (None, health(config)),
             ai::Request::ListModels => (None, list_models(config)),
+            ai::Request::ListAdapters { model } => {
+                let result = list_adapters(config, &model).map(Some);
+                (None, result)
+            }
+            ai::Request::SetAdapterScale { model, scale } => {
+                let result = set_adapter_scale(config, &model, scale).map(Some);
+                (None, result)
+            }
             ai::Request::UnloadModel { model } => {
                 let result = unload_model(config, &model).map(Some);
                 (None, result)
@@ -156,10 +164,16 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
                 backend,
                 max_tokens,
                 temperature,
+                grammar,
             } => {
-                if let Err(error) =
-                    validate_chat(&request_id, &model, &messages, max_tokens, temperature)
-                {
+                if let Err(error) = validate_chat(
+                    &request_id,
+                    &model,
+                    &messages,
+                    max_tokens,
+                    temperature,
+                    grammar.as_deref(),
+                ) {
                     (Some(request_id), Err(error))
                 } else {
                     let result = chat(
@@ -171,6 +185,7 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
                         backend,
                         max_tokens,
                         temperature,
+                        grammar.as_deref(),
                     )
                     .map(|()| None);
                     (Some(request_id), result)
@@ -231,6 +246,116 @@ fn unload_model(config: &Config, model: &str) -> Result<Event, String> {
     })
 }
 
+fn list_adapters(config: &Config, model: &str) -> Result<Event, String> {
+    validate_model_name(model)?;
+    let installed = store::find(&config.model_roots, model)?;
+    let Some(declared) = installed.manifest.adapter.as_ref() else {
+        return Ok(Event::Adapters {
+            model: model.to_string(),
+            adapters: Vec::new(),
+        });
+    };
+    if let Some(endpoint) = config.pool.endpoint(model) {
+        let adapters = runtime_adapters(&endpoint)?;
+        if adapters.is_empty() {
+            return Err(format!(
+                "llama-server did not load the adapter declared by model '{model}'"
+            ));
+        }
+        return Ok(Event::Adapters {
+            model: model.to_string(),
+            adapters,
+        });
+    }
+    Ok(Event::Adapters {
+        model: model.to_string(),
+        adapters: vec![AdapterState {
+            id: 0,
+            name: declared.file.clone(),
+            scale: declared.scale,
+            loaded: false,
+        }],
+    })
+}
+
+fn set_adapter_scale(config: &Config, model: &str, scale: f32) -> Result<Event, String> {
+    validate_model_name(model)?;
+    validate_adapter_scale(scale)?;
+    let installed = store::find(&config.model_roots, model)?;
+    if installed.manifest.adapter.is_none() {
+        return Err(format!("model '{model}' has no signed LoRA adapter"));
+    }
+    let endpoint = config.pool.ensure(&installed, Backend::Auto)?;
+    let mut response = http::open_response(
+        endpoint.addr,
+        Some(&endpoint.api_key),
+        "POST",
+        "/lora-adapters",
+        Some(&json!([{ "id": 0, "scale": scale }])),
+    )?;
+    if !(200..300).contains(&response.status) {
+        let mut text = String::new();
+        response
+            .body
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "llama-server rejected the adapter scale (HTTP {}): {text}",
+            response.status
+        ));
+    }
+    let adapters = runtime_adapters(&endpoint)?;
+    if adapters.is_empty() {
+        return Err(format!(
+            "llama-server did not report the adapter for model '{model}'"
+        ));
+    }
+    Ok(Event::Adapters {
+        model: model.to_string(),
+        adapters,
+    })
+}
+
+fn validate_adapter_scale(scale: f32) -> Result<(), String> {
+    if !scale.is_finite() || !(0.0..=4.0).contains(&scale) {
+        return Err("adapter scale must be between 0 and 4".into());
+    }
+    Ok(())
+}
+
+fn runtime_adapters(endpoint: &llama::Endpoint) -> Result<Vec<AdapterState>, String> {
+    let response = http::request_json(
+        endpoint.addr,
+        Some(&endpoint.api_key),
+        "GET",
+        "/lora-adapters",
+        None,
+    )?;
+    let items = response
+        .as_array()
+        .ok_or_else(|| "llama-server returned an invalid adapter list".to_string())?;
+    Ok(items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            let path = item.get("path").and_then(Value::as_str).unwrap_or_default();
+            AdapterState {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(position as u64) as u32,
+                name: Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "adapter".into()),
+                scale: item.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                loaded: true,
+            }
+        })
+        .collect())
+}
+
 fn validate_model_name(model: &str) -> Result<(), String> {
     if model.is_empty() || model.len() > 256 || model.chars().any(char::is_whitespace) {
         return Err("model must be an installed model name".into());
@@ -247,6 +372,7 @@ fn validate_chat(
     messages: &[Message],
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    grammar: Option<&str>,
 ) -> Result<(), String> {
     if request_id.is_empty() || request_id.len() > 128 {
         return Err("request_id must contain between 1 and 128 characters".into());
@@ -270,6 +396,22 @@ fn validate_chat(
     }
     if temperature.is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value)) {
         return Err("temperature must be between 0 and 2".into());
+    }
+    if let Some(grammar) = grammar {
+        validate_grammar(grammar)?;
+    }
+    Ok(())
+}
+
+fn validate_grammar(grammar: &str) -> Result<(), String> {
+    if grammar.trim().is_empty() {
+        return Err("grammar must not be empty".into());
+    }
+    if grammar.len() > 64 * 1024 {
+        return Err("grammar must be at most 64 KiB".into());
+    }
+    if grammar.contains('\0') {
+        return Err("grammar must not contain NUL bytes".into());
     }
     Ok(())
 }
@@ -356,6 +498,7 @@ fn chat(
     backend: Backend,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
+    grammar: Option<&str>,
 ) -> Result<(), String> {
     let installed = store::find(&config.model_roots, model)?;
     if !installed.manifest.supports("chat") {
@@ -398,6 +541,9 @@ fn chat(
     }
     if let Some(temperature) = temperature {
         body.insert("temperature".into(), json!(temperature));
+    }
+    if let Some(grammar) = grammar {
+        body.insert("grammar".into(), json!(grammar));
     }
 
     let started = Instant::now();
@@ -758,4 +904,45 @@ fn write_event(writer: &mut impl Write, event: &Event) -> Result<(), String> {
     serde_json::to_writer(&mut *writer, event).map_err(|error| error.to_string())?;
     writer.write_all(b"\n").map_err(|error| error.to_string())?;
     writer.flush().map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grammar_limits_are_enforced() {
+        validate_grammar("root ::= \"ok\"").unwrap();
+        assert!(validate_grammar("   ").is_err());
+        assert!(validate_grammar("root\0 ::= \"x\"").is_err());
+        assert!(validate_grammar(&"a".repeat(64 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn adapter_scale_limits_are_enforced() {
+        validate_adapter_scale(0.0).unwrap();
+        validate_adapter_scale(1.0).unwrap();
+        validate_adapter_scale(4.0).unwrap();
+        assert!(validate_adapter_scale(-0.1).is_err());
+        assert!(validate_adapter_scale(4.1).is_err());
+        assert!(validate_adapter_scale(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn chat_accepts_an_optional_grammar() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: "emit an operation".into(),
+        }];
+        validate_chat(
+            "req",
+            "evermore/m:1",
+            &messages,
+            Some(16),
+            Some(0.0),
+            Some("root ::= \"{}\""),
+        )
+        .unwrap();
+        assert!(validate_chat("req", "evermore/m:1", &messages, Some(16), Some(0.0), None).is_ok());
+    }
 }

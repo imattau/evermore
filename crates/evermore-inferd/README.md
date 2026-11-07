@@ -32,14 +32,30 @@ Other settings: `EVERMORE_LLAMA_SERVER_BIN` (default `llama-server`),
 ## Socket protocol
 
 Clients use `evermore_common::ai::{Request, Event}` at protocol version 2.
-Requests support health, listing installed models, unloading a model, signed
-package import, embeddings, and streaming chat. Chat events include `started`,
-`token`, and `completed`; a request ID correlates every event.
+Requests support health, listing installed models, unloading a model, adapter
+inspection and scale changes, signed package import, embeddings, and streaming
+chat. Chat events include `started`, `token`, and `completed`; a request ID
+correlates every event.
 
 `Backend::Cpu` launches the child with `--n-gpu-layers 0`, `Gpu` with
 `--n-gpu-layers all`, and `Auto` leaves placement to `llama.cpp`. A request for
 a different backend restarts that model's child. `UnloadModel` stops the child;
 it does not delete anything from the store.
+
+## Adapters and grammars
+
+When a manifest declares an adapter, the child is launched with `--lora` (or
+`--lora-scaled` for a non-default scale). `ListAdapters` reports the declared
+adapter with `loaded: false` until the model runs; `SetAdapterScale` starts the
+child if needed and posts to `llama-server`'s `/lora-adapters` API. A scale is
+runtime state only: restarting or unloading the model returns it to the
+manifest's `scale`.
+
+`Chat` accepts an optional GBNF `grammar` (64 KiB maximum), used for
+operation-registry JSON proposals. This build of `llama-server` (Arch
+`llama-cpp` 0.6.0) rejects `json_schema` and `response_format` with a sampler
+initialization error, so callers should convert a JSON schema to GBNF before
+calling. A grammar constrains model output; it grants no authority.
 
 There is no pull, push, remote provider, or cloud-consent API. `:cloud` model
 names are rejected.

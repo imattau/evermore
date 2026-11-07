@@ -97,6 +97,7 @@ fn chat_worker(
         backend,
         max_tokens: Some(512),
         temperature: Some(0.7),
+        grammar: None,
     };
     writeln!(
         stream,

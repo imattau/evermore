@@ -1,7 +1,9 @@
+mod notifications_client;
 mod settings_client;
 mod signer_client;
 
 use eframe::egui;
+use evermore_common::notifications::{NotificationRecord, Source};
 use signer_client::Identity;
 
 fn main() -> eframe::Result {
@@ -41,6 +43,9 @@ struct PanelApp {
     theme_domain: serde_json::Map<String, serde_json::Value>,
     settings_error: Option<String>,
     settings_loaded: bool,
+    notifications: Vec<NotificationRecord>,
+    notifications_error: Option<String>,
+    notifications_loaded: bool,
 }
 
 impl PanelApp {
@@ -76,6 +81,20 @@ impl PanelApp {
         match settings_client::set("theme", "mode", serde_json::Value::String(mode.to_string())) {
             Ok(()) => self.refresh_theme(),
             Err(e) => self.settings_error = Some(e),
+        }
+    }
+
+    fn refresh_notifications(&mut self) {
+        self.notifications_loaded = true;
+        match notifications_client::list_recent() {
+            Ok(records) => {
+                self.notifications = records;
+                self.notifications_error = None;
+            }
+            Err(e) => {
+                self.notifications.clear();
+                self.notifications_error = Some(e);
+            }
         }
     }
 }
@@ -169,14 +188,52 @@ impl eframe::App for PanelApp {
                 });
             }
             Tab::Notifications => {
+                if !self.notifications_loaded {
+                    self.refresh_notifications();
+                }
                 ui.heading("Notifications");
-                ui.label("Nostr + local event feed lands in Phase 3.");
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_notifications();
+                    }
+                    ui.label(
+                        evermore_common::notifications::runtime_socket_path()
+                            .display()
+                            .to_string(),
+                    );
+                });
+                ui.add_space(8.0);
+
+                if let Some(err) = &self.notifications_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                } else if self.notifications.is_empty() {
+                    ui.label("No notifications yet.");
+                } else {
+                    for n in &self.notifications {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(source_label(n.source)).strong());
+                                ui.weak(&n.title);
+                            });
+                            ui.label(&n.body);
+                        });
+                        ui.add_space(6.0);
+                    }
+                }
             }
             Tab::Packages => {
                 ui.heading("Packages");
                 ui.label("npack integration lands in Phase 5.");
             }
         }
+    }
+}
+
+fn source_label(source: Source) -> &'static str {
+    match source {
+        Source::Local => "[local]",
+        Source::Mention => "[mention]",
+        Source::Dm => "[dm]",
     }
 }
 

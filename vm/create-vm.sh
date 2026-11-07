@@ -104,7 +104,9 @@ packages:
   - seatd
   - grim
   - swaybg
+  - mako
   - go
+  - python-websockets
 
 write_files:
   - path: /etc/systemd/system/getty@tty1.service.d/autologin.conf
@@ -128,6 +130,10 @@ runcmd:
     fi
     PROFILE
   - chown builder:builder /home/builder/.bash_profile
+  - |
+    mkdir -p /home/builder/.config/sway
+    { cat /etc/sway/config; echo 'exec mako'; } > /home/builder/.config/sway/config
+    chown -R builder:builder /home/builder/.config
   - systemctl daemon-reload
   - systemctl restart getty@tty1.service
   - [su, builder, -c, "rustup default stable"]

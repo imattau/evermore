@@ -1,0 +1,21 @@
+[Unit]
+Description=Evermore notification daemon (Nostr mentions/DMs + local events -> desktop toasts)
+Documentation=https://github.com/imattau/evermore
+After=evermore-signer.service evermore-relay.service evermore-settingsd@%i.service
+Wants=evermore-signer.service evermore-relay.service
+
+[Service]
+Type=simple
+# Per-identity instance, same convention as evermore-settingsd@.service:
+# `systemctl --user enable evermore-notifyd@personal`.
+ExecStart=%h/.cargo/bin/evermore-notifyd --identity %i
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

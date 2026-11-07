@@ -125,3 +125,67 @@ pub mod settings {
         }
     }
 }
+
+/// Wire protocol for `evermore-notifyd` and its clients (the panel's
+/// Notification Center). Same framing as the other two sockets.
+pub mod notifications {
+    use serde::{Deserialize, Serialize};
+
+    pub const SOCKET_RELATIVE_PATH: &str = "evermore/notifyd.sock";
+
+    pub fn runtime_socket_path() -> std::path::PathBuf {
+        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+    }
+
+    /// Where a notification came from -- shown in the panel so the merged
+    /// timeline (PROJECT_IDEA.md's Phase 3 goal) can be filtered by source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Source {
+        /// A local-relay event tagged ["t","evermore-notify"] -- a daemon
+        /// on this machine announcing something (e.g. an update available).
+        Local,
+        /// A public mention/reply (kind:1 with a `p` tag for us) from an
+        /// external relay.
+        Mention,
+        /// A NIP-17 gift-wrapped DM, unwrapped.
+        Dm,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct NotificationRecord {
+        pub source: Source,
+        pub title: String,
+        pub body: String,
+        pub received_at: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "method", content = "params", rename_all = "snake_case")]
+    pub enum Request {
+        /// Most-recent-first, capped at whatever the daemon keeps in memory.
+        ListRecent,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    pub enum Response {
+        Ok { data: serde_json::Value },
+        Err { message: String },
+    }
+
+    impl Response {
+        pub fn ok(data: impl Serialize) -> Self {
+            Response::Ok {
+                data: serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
+            }
+        }
+
+        pub fn err(message: impl Into<String>) -> Self {
+            Response::Err {
+                message: message.into(),
+            }
+        }
+    }
+}

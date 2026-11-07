@@ -33,6 +33,7 @@ var allowedKinds = struct {
 	set map[int]bool
 }{set: map[int]bool{
 	0:     true, // profile metadata
+	1:     true, // text note -- also doubles as the local notify event (Phase 3: ["t","evermore-notify"])
 	3:     true, // contacts/follows
 	5:     true, // deletion request
 	1059:  true, // NIP-17/59 gift wrap (DMs, notifications)

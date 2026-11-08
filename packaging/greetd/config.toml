@@ -1,0 +1,21 @@
+# Evermore's greetd config: replaces the stock agreety/tuigreet
+# frontend with evermore-greeter, a graphical picker (kind:0-derived
+# name + avatar per identity) run inside `cage`, a minimal kiosk
+# Wayland compositor -- the same pattern gtkgreet uses, chosen so
+# evermore-greeter can be an ordinary eframe/egui app like the rest of
+# this project's UI, not a bespoke renderer.
+#
+# Install to /etc/greetd/config.toml (overwrites the stock config
+# greetd's own package installs -- back that up first if you want it
+# back). Requires the `cage` package and `evermore-greeter` on PATH.
+#
+# -s: allow VT switching (so e.g. Ctrl+Alt+F2 still works from the
+# greeter, standard practice, not Evermore-specific).
+# -d: no client-side decorations -- evermore-greeter draws its own
+# chrome; cage's would just double up.
+[terminal]
+vt = 1
+
+[default_session]
+command = "cage -s -d -- evermore-greeter"
+user = "greeter"

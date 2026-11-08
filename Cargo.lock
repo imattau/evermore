@@ -1421,6 +1421,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "evermore-greeter"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image",
+ "serde",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
 name = "evermore-indexd"
 version = "0.1.0"
 dependencies = [
@@ -1544,6 +1556,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2203,6 +2216,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -1,0 +1,12 @@
+[package]
+name = "evermore-greeter"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+zbus = "5.19.0"

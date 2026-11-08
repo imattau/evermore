@@ -1,6 +1,7 @@
 mod backing;
 mod device_identity;
 mod keyring_store;
+mod profile;
 mod server;
 
 use nostr::prelude::*;
@@ -23,9 +24,10 @@ fn main() {
         Some("bootstrap-device") => bootstrap_device(&args[2..]),
         Some("pair") => pair(args.get(2), &args[3..]),
         Some("list-remote") => list_remote(),
+        Some("set-profile") => set_profile(args.get(2), &args[3..]),
         _ => {
             eprintln!(
-                "usage: evermore-signer <serve|keygen NAME|import NAME|list|bootstrap-device|pair|list-remote>\n\n\
+                "usage: evermore-signer <serve|keygen NAME|import NAME|list|bootstrap-device|pair|list-remote|set-profile>\n\n\
                  serve [--device] [--state-dir PATH] [--socket PATH]\n\
                               run the signing daemon (foreground). --device\n\
                               loads the device-root identity instead of serving\n\
@@ -42,7 +44,13 @@ fn main() {
                               Remote signing itself is not implemented yet;\n\
                               signing requests for a paired identity fail with\n\
                               a clear error until it is.\n\
-                 list-remote  list identities paired to a remote signer"
+                 list-remote  list identities paired to a remote signer\n\
+                 set-profile NAME --display-name NAME [--avatar PATH]\n\
+                              set this identity's display name/avatar: writes\n\
+                              the pre-login cache evermore-greeter reads\n\
+                              (/var/lib/evermore-profiles/<pubkey-hex>/) and\n\
+                              best-effort publishes a kind:0 event to the\n\
+                              local relay. --avatar must be .png/.jpg/.jpeg."
             );
             std::process::exit(2);
         }
@@ -63,6 +71,10 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 
 fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
+}
+
+fn require_flag(args: &[String], flag: &str) -> Result<String, String> {
+    flag_value(args, flag).ok_or_else(|| format!("missing {flag}"))
 }
 
 fn state_dir_arg(args: &[String]) -> PathBuf {
@@ -151,6 +163,26 @@ fn list_remote() -> Result<(), String> {
             println!("{name}  relay={relay}  remote_pubkey={remote_signer_pubkey}");
         }
     }
+    Ok(())
+}
+
+fn set_profile(name: Option<&String>, args: &[String]) -> Result<(), String> {
+    let name = name
+        .map(String::as_str)
+        .ok_or_else(|| "missing identity name".to_string())?;
+    let display_name = require_flag(args, "--display-name")?;
+    let avatar = flag_value(args, "--avatar").map(PathBuf::from);
+
+    let bytes = keyring_store::load(name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!("unknown identity '{name}' (no secret in this session's keyring)")
+        })?;
+    let secret_key = SecretKey::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let keys = Keys::new(secret_key);
+
+    profile::set_profile(&keys, &display_name, avatar.as_deref())?;
+    println!("profile set for '{name}' ({})", keys.public_key().to_hex());
     Ok(())
 }
 

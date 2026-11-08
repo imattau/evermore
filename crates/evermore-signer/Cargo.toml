@@ -9,6 +9,7 @@ linux-keyutils = "0.2.5"
 nostr = { version = "0.45.7", features = ["nip44", "os-rng"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tungstenite = "0.30.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"

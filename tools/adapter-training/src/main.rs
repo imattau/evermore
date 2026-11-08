@@ -438,6 +438,7 @@ fn sample(schema: &Value, depth: usize) -> Value {
                 .map(|value| value as usize);
             let mut value = match schema.get("format").and_then(Value::as_str) {
                 Some("sha256") => "a".repeat(64),
+                Some("hex_pubkey") => "b".repeat(64),
                 _ => "example".to_string(),
             };
             while value.len() < minimum {

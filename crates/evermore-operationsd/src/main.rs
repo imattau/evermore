@@ -1,4 +1,5 @@
 mod calendar;
+mod npackd_client;
 mod store;
 
 use std::io::{BufRead, BufReader, Write};
@@ -550,27 +551,16 @@ fn execute_approved(
             }
         }
         "packages.remove" => {
-            let package_id = record.arguments["package_id"]
+            let publisher = record.arguments["publisher"]
                 .as_str()
                 .expect("validated string");
-            let output = Command::new("evermore-npack")
-                .arg("remove")
-                .arg(package_id)
-                .output();
-            match output {
-                Ok(output) if output.status.success() => store.finish_execution(
-                    operation_id,
-                    Ok(serde_json::json!({"package_id": package_id, "removed": true})),
-                ),
-                Ok(output) => store.finish_execution(
-                    operation_id,
-                    Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
-                ),
-                Err(error) => store.finish_execution(
-                    operation_id,
-                    Err(format!("couldn't start evermore-npack: {error}")),
-                ),
-            }
+            let name = record.arguments["name"].as_str().expect("validated string");
+            let result = npackd_client::call(
+                "Remove",
+                serde_json::json!({"package": format!("{publisher}/{name}"), "user": true}),
+            )
+            .map(|_| serde_json::json!({"publisher": publisher, "name": name, "removed": true}));
+            store.finish_execution(operation_id, result)
         }
         "ai.model.install_signed_npack" => {
             let request = evermore_common::ai::Request::InstallNpackModel {
@@ -627,46 +617,60 @@ fn execute_approved(
             store.finish_execution(operation_id, result)
         }
         "packages.install_pinned" => {
-            let Some(blossom_url) = std::env::var_os("EVERMORE_BLOSSOM_URL") else {
-                return store.finish_execution(
-                    operation_id,
-                    Err("EVERMORE_BLOSSOM_URL is required for package installation".into()),
-                );
-            };
-            let owner_identity = OWNER_IDENTITY
-                .get()
-                .ok_or("owner identity is unavailable")?;
-            let output = Command::new("evermore-npack")
-                .arg("install")
-                .arg(
-                    record.arguments["package_id"]
-                        .as_str()
-                        .expect("validated string"),
-                )
-                .arg("--version")
-                .arg(
-                    record.arguments["version"]
-                        .as_str()
-                        .expect("validated string"),
-                )
-                .arg("--sha256")
-                .arg(
-                    record.arguments["sha256"]
-                        .as_str()
-                        .expect("validated string"),
-                )
-                .arg("--identity")
-                .arg(owner_identity)
-                .arg("--blossom-url")
-                .arg(blossom_url)
-                .output();
-            match output {
-                Ok(output) if output.status.success() => store.finish_execution(operation_id, Ok(serde_json::json!({
-                    "package_id": record.arguments["package_id"], "version": record.arguments["version"], "sha256": record.arguments["sha256"]
-                }))),
-                Ok(output) => store.finish_execution(operation_id, Err(String::from_utf8_lossy(&output.stderr).trim().to_string())),
-                Err(error) => store.finish_execution(operation_id, Err(format!("couldn't start evermore-npack: {error}"))),
-            }
+            let publisher = record.arguments["publisher"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
+            let name = record.arguments["name"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
+            let version = record.arguments["version"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
+            let sha256 = record.arguments["sha256"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
+            let reference = format!("{publisher}/{name}");
+            // npack's own `requirement` only pins a version, not a hash
+            // (it has no sha256-pin parameter) -- verify the installed
+            // record's sha256 ourselves and roll back on a mismatch, so
+            // this still only takes effect when the exact bytes approved
+            // match what npack actually verified and installed.
+            let result: Result<serde_json::Value, String> = npackd_client::call_typed::<
+                npackd_client::InstalledPackage,
+            >(
+                "Install",
+                serde_json::json!({
+                    "package": reference,
+                    "requirement": format!("={version}"),
+                    "user": true,
+                }),
+            )
+            .and_then(|installed| {
+                if installed.sha256.eq_ignore_ascii_case(&sha256) {
+                    Ok(serde_json::json!({
+                        "publisher": publisher, "name": name, "version": version, "sha256": sha256
+                    }))
+                } else {
+                    let rollback_error = format!(
+                        "installed {reference} v{version} hash {} did not match the approved {sha256} -- removed it",
+                        installed.sha256
+                    );
+                    match npackd_client::call(
+                        "Remove",
+                        serde_json::json!({"package": reference, "user": true}),
+                    ) {
+                        Ok(_) => Err(rollback_error),
+                        Err(remove_error) => Err(format!(
+                            "{rollback_error}; removing it afterwards also failed: {remove_error}"
+                        )),
+                    }
+                }
+            });
+            store.finish_execution(operation_id, result)
         }
         "settings.set" => {
             let request = evermore_common::settings::Request::Set {
@@ -2298,73 +2302,49 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
                 evermore_common::notifications::Response::Err { message } => return Err(message),
             }
         }
-        "packages.list_installed" => {
-            let output = Command::new("evermore-npack")
-                .args(["installed", "--json"])
-                .output()
-                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-            }
-            serde_json::from_slice(&output.stdout)
-                .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?
-        }
+        "packages.list_installed" => serde_json::to_value(npackd_client::list_installed()?)
+            .map_err(|error| error.to_string())?,
         "packages.list_available" => {
-            let owner_identity = OWNER_IDENTITY
-                .get()
-                .ok_or("owner identity is unavailable")?;
-            let relay = std::env::var("EVERMORE_RELAY_URL")
-                .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
-            let output = Command::new("evermore-npack")
-                .args([
-                    "available",
-                    "--identity",
-                    owner_identity,
-                    "--relay",
-                    &relay,
-                    "--json",
-                ])
-                .output()
-                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-            }
-            serde_json::from_slice(&output.stdout)
-                .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?
+            npackd_client::call("Search", serde_json::json!({"query": ""}))?
+        }
+        "packages.resolve" => {
+            let publisher = arguments["publisher"].as_str().expect("validated string");
+            let name = arguments["name"].as_str().expect("validated string");
+            npackd_client::call(
+                "GetPackage",
+                serde_json::json!({"package": format!("{publisher}/{name}"), "user": true}),
+            )?
         }
         "packages.explain_dependencies" => {
-            let output = Command::new("evermore-npack")
-                .args(["installed", "--json"])
-                .output()
-                .map_err(|error| format!("couldn't start evermore-npack: {error}"))?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-            }
-            let manifests: Vec<evermore_npack::Manifest> =
-                serde_json::from_slice(&output.stdout)
-                    .map_err(|error| format!("invalid evermore-npack JSON response: {error}"))?;
-            let package_id = arguments["package_id"].as_str().expect("validated string");
-            let package = manifests
+            let publisher = arguments["publisher"].as_str().expect("validated string");
+            let name = arguments["name"].as_str().expect("validated string");
+            let installed = npackd_client::list_installed()?;
+            let package = installed
                 .iter()
-                .find(|manifest| manifest.id == package_id)
-                .ok_or_else(|| format!("package '{package_id}' is not installed"))?;
+                .find(|pkg| pkg.publisher == publisher && pkg.name == name)
+                .ok_or_else(|| format!("package '{publisher}/{name}' is not installed"))?;
             let dependencies: Vec<Value> = package
                 .dependencies
                 .iter()
-                .map(|dependency_id| {
-                    let dependency = manifests
-                        .iter()
-                        .find(|manifest| manifest.id == *dependency_id);
+                .map(|dependency| {
+                    let found = installed.iter().find(|candidate| {
+                        candidate.name == dependency.name
+                            && dependency
+                                .publisher
+                                .as_deref()
+                                .is_none_or(|publisher| candidate.publisher == publisher)
+                    });
                     serde_json::json!({
-                        "package_id": dependency_id,
-                        "installed": dependency.is_some(),
-                        "name": dependency.map(|manifest| manifest.name.as_str()),
-                        "version": dependency.map(|manifest| manifest.version.as_str())
+                        "name": dependency.name,
+                        "publisher": dependency.publisher,
+                        "requirement": dependency.requirement,
+                        "installed": found.is_some(),
+                        "installed_version": found.map(|candidate| candidate.version.as_str())
                     })
                 })
                 .collect();
             serde_json::json!({
-                "package_id": package.id,
+                "publisher": package.publisher,
                 "name": package.name,
                 "version": package.version,
                 "dependencies": dependencies

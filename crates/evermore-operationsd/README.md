@@ -33,11 +33,19 @@ evermore-operationsd invoke settings.get '{"domain":"theme","key":"mode"}'
 
 Read calls route to the existing daemons. Arguments are validated against the
 shared catalogue and model-visible results pass through its redaction policy.
-`packages.list_installed` reads local manifests, while
-`packages.list_available` asks `npack` for the latest versions and archive
-hashes from the owner's trusted publisher list. These reads support package
-comparison and discovery; install proposals still bind to the exact version
-and SHA-256 and require owner approval.
+`packages.*` talks to `npackd` -- https://github.com/imattau/npack's own
+package-manager daemon over its JSON-RPC Unix socket, not a reimplementation
+in this repo -- identifying packages by `publisher`/`name` rather than a
+single id. `packages.list_installed` lists what's installed;
+`packages.list_available` browses the catalogue of the owner's trusted
+publishers, which does not carry a SHA-256; `packages.resolve` gets one
+package's exact current version and hash immediately before proposing
+`packages.install_pinned`, which still binds to that exact version and
+SHA-256 and requires owner approval (a mismatch between what npack actually
+installs and the approved hash is removed again, not left installed).
+`ai.model.install_signed_npack` is unrelated to these: it stays on
+`evermore-npack`'s own id scheme, since it imports a GGUF/LoRA model from a
+package manifest field `npack` has no equivalent for.
 
 ## Approval-gated writes
 

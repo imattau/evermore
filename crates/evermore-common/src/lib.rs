@@ -352,21 +352,25 @@ pub mod operations {
             ),
             definition(
                 "packages.install_pinned",
-                "Propose installation or update to one exact package version from a trusted, signed npack release. The archive hash must match before the current package version changes.",
+                "Propose installation or update to one exact package version from a trusted, signed npack release (publisher/name, as reported by packages.list_available). The archive hash must match before the current package version changes; a mismatch is removed again rather than left installed.",
                 Access::Write,
                 "packages.write",
                 Approval::Required,
                 object_schema(
                     json!({
-                        "package_id": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" },
+                        "publisher": { "type": "string", "format": "hex_pubkey" },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" },
                         "version": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" },
                         "sha256": { "type": "string", "format": "sha256" }
                     }),
-                    &["package_id", "version", "sha256"],
+                    &["publisher", "name", "version", "sha256"],
                 ),
                 object_schema(
-                    json!({ "package_id": { "type": "string" }, "version": { "type": "string" }, "sha256": { "type": "string" } }),
-                    &["package_id", "version", "sha256"],
+                    json!({
+                        "publisher": { "type": "string" }, "name": { "type": "string" },
+                        "version": { "type": "string" }, "sha256": { "type": "string" }
+                    }),
+                    &["publisher", "name", "version", "sha256"],
                 ),
                 Redaction::None,
             ),
@@ -385,27 +389,31 @@ pub mod operations {
             ),
             definition(
                 "packages.list_available",
-                "Discover the latest package versions and archive hashes from publishers in the owner's trusted-publisher list. Use these values to explain updates; installation still requires an exact owner-approved proposal.",
+                "Discover the latest package versions from publishers in the owner's trusted-publisher list, via npack's catalogue. Use these values to explain updates; installation still requires an exact owner-approved proposal (packages.install_pinned needs publisher/name/version plus a hash, which this listing does not include -- resolve those immediately before proposing, not from a cached copy).",
                 Access::Read,
                 "packages.read",
                 Approval::None,
                 object_schema(json!({}), &[]),
                 json!({
                     "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "description": { "type": "string" },
-                            "publisher_pubkey": { "type": "string" },
-                            "version": { "type": ["string", "null"] },
-                            "sha256": { "type": ["string", "null"] }
-                        },
-                        "required": ["id", "name", "description", "publisher_pubkey", "version", "sha256"],
-                        "additionalProperties": false
-                    }
+                    "items": { "type": "object" }
                 }),
+                Redaction::SecretShapedValues,
+            ),
+            definition(
+                "packages.resolve",
+                "Resolve one package's current trusted release (publisher/name, as reported by packages.list_available or packages.list_installed) to its exact version and SHA-256, immediately before proposing packages.install_pinned -- the catalogue listing alone doesn't carry a hash.",
+                Access::Read,
+                "packages.read",
+                Approval::None,
+                object_schema(
+                    json!({
+                        "publisher": { "type": "string", "format": "hex_pubkey" },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" }
+                    }),
+                    &["publisher", "name"],
+                ),
+                json!({ "type": "object" }),
                 Redaction::SecretShapedValues,
             ),
             definition(
@@ -436,17 +444,20 @@ pub mod operations {
             ),
             definition(
                 "packages.explain_dependencies",
-                "Explain a package's declared direct dependencies and whether each is installed.",
+                "Explain an installed package's declared direct dependencies and whether each is installed.",
                 Access::Read,
                 "packages.read",
                 Approval::None,
                 object_schema(
-                    json!({ "package_id": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" } }),
-                    &["package_id"],
+                    json!({
+                        "publisher": { "type": "string", "format": "hex_pubkey" },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" }
+                    }),
+                    &["publisher", "name"],
                 ),
                 object_schema(
                     json!({
-                        "package_id": { "type": "string" },
+                        "publisher": { "type": "string" },
                         "name": { "type": "string" },
                         "version": { "type": "string" },
                         "dependencies": {
@@ -454,33 +465,37 @@ pub mod operations {
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "package_id": { "type": "string" },
+                                    "name": { "type": "string" },
+                                    "publisher": { "type": ["string", "null"] },
+                                    "requirement": { "type": "string" },
                                     "installed": { "type": "boolean" },
-                                    "name": { "type": ["string", "null"] },
-                                    "version": { "type": ["string", "null"] }
+                                    "installed_version": { "type": ["string", "null"] }
                                 },
-                                "required": ["package_id", "installed", "name", "version"],
+                                "required": ["name", "publisher", "requirement", "installed", "installed_version"],
                                 "additionalProperties": false
                             }
                         }
                     }),
-                    &["package_id", "name", "version", "dependencies"],
+                    &["publisher", "name", "version", "dependencies"],
                 ),
                 Redaction::None,
             ),
             definition(
                 "packages.remove",
-                "Propose removal of one installed npack package and its package-managed executable link. Requires owner approval.",
+                "Propose removal of one installed npack package (publisher/name) and its package-managed executable link. Requires owner approval.",
                 Access::Write,
                 "packages.write",
                 Approval::Required,
                 object_schema(
-                    json!({ "package_id": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" } }),
-                    &["package_id"],
+                    json!({
+                        "publisher": { "type": "string", "format": "hex_pubkey" },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" }
+                    }),
+                    &["publisher", "name"],
                 ),
                 object_schema(
-                    json!({ "package_id": { "type": "string" }, "removed": { "type": "boolean" } }),
-                    &["package_id", "removed"],
+                    json!({ "publisher": { "type": "string" }, "name": { "type": "string" }, "removed": { "type": "boolean" } }),
+                    &["publisher", "name", "removed"],
                 ),
                 Redaction::None,
             ),
@@ -936,6 +951,16 @@ pub mod operations {
                 && (text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()))
             {
                 return Err(format!("{path} must be a 64-character hexadecimal SHA-256"));
+            }
+            if schema.get("format").and_then(Value::as_str) == Some("hex_pubkey")
+                && (text.len() != 64
+                    || !text
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+            {
+                return Err(format!(
+                    "{path} must be a 64-character lowercase hexadecimal public key"
+                ));
             }
             if schema.get("format").and_then(Value::as_str) == Some("path_component")
                 && (text == "."

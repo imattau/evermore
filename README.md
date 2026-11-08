@@ -1,5 +1,9 @@
 # Evermore
 
+<p align="center">
+  <img src="assets/evermore-header.svg" alt="Evermore: a familiar Linux desktop with a more personal foundation, represented by a Linux penguin in a Nostr-inspired constellation." width="1200" />
+</p>
+
 **A familiar Linux desktop, with a more personal and connected foundation.**
 
 Evermore is an open-source project exploring how a desktop can put you in

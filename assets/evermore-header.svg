@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">Evermore</title>
+  <desc id="desc">Evermore, a familiar Linux desktop with a more personal and connected foundation. A penguin sits within a Nostr-inspired constellation against a graphite and blue aurora.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0E1014"/>
+      <stop offset=".55" stop-color="#14171D"/>
+      <stop offset="1" stop-color="#1A1E25"/>
+    </linearGradient>
+    <radialGradient id="aurora" cx="82%" cy="35%" r="58%">
+      <stop offset="0" stop-color="#6EA8FE" stop-opacity=".22"/>
+      <stop offset=".48" stop-color="#6EA8FE" stop-opacity=".07"/>
+      <stop offset="1" stop-color="#6EA8FE" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="340" fill="url(#background)"/>
+  <rect width="1200" height="340" fill="url(#aurora)"/>
+  <path d="M0 313c210-19 355-10 540-27s359-48 660-36v90H0z" fill="#1A1E25" opacity=".56"/>
+  <path d="M0 313c225-16 360-5 550-23s372-36 650-25" fill="none" stroke="#6EA8FE" stroke-opacity=".14" stroke-width="1.5"/>
+  <path d="M0 327c226-10 393 2 590-17s371-25 610-17" fill="none" stroke="#8BB7FF" stroke-opacity=".09" stroke-width="1"/>
+
+  <g transform="translate(74 91) scale(1.22)">
+    <circle cx="64" cy="64" r="63" fill="#14171D" fill-opacity=".35"/>
+    <g fill="none" stroke="#6EA8FE" stroke-linecap="round" stroke-width="2.5" opacity=".76">
+      <path d="M64 64 64 10M64 64 103 25M64 64 118 64M64 64 103 103M64 64 64 118M64 64 25 103M64 64 10 64M64 64 25 25"/>
+      <path d="m25 25 39-15 39 15 15 39-15 39-39 15-39-15L10 64z" opacity=".5"/>
+    </g>
+    <g fill="#8BB7FF">
+      <circle cx="64" cy="10" r="3.5"/><circle cx="103" cy="25" r="3.5"/>
+      <circle cx="118" cy="64" r="3.5"/><circle cx="103" cy="103" r="3.5"/>
+      <circle cx="64" cy="118" r="3.5"/><circle cx="25" cy="103" r="3.5"/>
+      <circle cx="10" cy="64" r="3.5"/><circle cx="25" cy="25" r="3.5"/>
+    </g>
+    <g>
+      <ellipse cx="64" cy="67" rx="27" ry="37" fill="#0E1014" stroke="#A7B0BF" stroke-opacity=".35" stroke-width="1.5"/>
+      <ellipse cx="64" cy="76" rx="17" ry="23" fill="#E6E9EF"/>
+      <ellipse cx="64" cy="43" rx="20" ry="19" fill="#0E1014"/>
+      <circle cx="57" cy="42" r="2.8" fill="#E6E9EF"/><circle cx="71" cy="42" r="2.8" fill="#E6E9EF"/>
+      <path d="m59 48 5-2 5 2-5 5z" fill="#E5B567"/>
+      <path d="M48 98q-6 0-8 5 7 4 17 1M80 98q6 0 8 5-7 4-17 1" fill="none" stroke="#E5B567" stroke-linecap="round" stroke-width="4"/>
+      <path d="M51 61q13-7 26 0" fill="none" stroke="#6EA8FE" stroke-linecap="round" stroke-width="2" opacity=".85"/>
+      <circle cx="51" cy="61" r="2" fill="#8BB7FF"/><circle cx="77" cy="61" r="2" fill="#8BB7FF"/>
+    </g>
+  </g>
+
+  <g font-family="Inter, 'Segoe UI', sans-serif">
+    <text x="270" y="142" fill="#E6E9EF" font-size="56" font-weight="600">Evermore</text>
+    <path d="M272 165h54" stroke="#6EA8FE" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="334" cy="165" r="2.5" fill="#E5B567"/>
+    <text x="270" y="205" fill="#E6E9EF" font-size="21" font-weight="500">A familiar Linux desktop, with a more personal foundation.</text>
+    <text x="272" y="245" fill="#A7B0BF" font-size="15">OPEN SOURCE  ·  NOSTR-NATIVE  ·  IN DEVELOPMENT</text>
+  </g>
+
+  <g transform="translate(1010 169)" fill="none" stroke="#8BB7FF" stroke-linecap="round">
+    <path d="M0 0 68-79M0 0 105-31M0 0 112 15M0 0 69 73M0 0 12 99M0 0-54 74M0 0-99 29M0 0-79-54" stroke-width="1.4" stroke-opacity=".34"/>
+    <path d="m-79-54 68-25 116 48 7 46-43 58-57 26-54-25-37-45z" stroke-opacity=".18" stroke-width="1"/>
+    <g fill="#8BB7FF" stroke="none">
+      <circle cx="68" cy="-79" r="3"/><circle cx="105" cy="-31" r="2.4"/><circle cx="112" cy="15" r="3.2"/>
+      <circle cx="69" cy="73" r="2.4"/><circle cx="12" cy="99" r="3"/><circle cx="-54" cy="74" r="2.4"/>
+      <circle cx="-99" cy="29" r="3"/><circle cx="-79" cy="-54" r="2.5"/>
+    </g>
+    <circle cx="0" cy="0" r="5" fill="#E5B567" fill-opacity=".9" stroke="none"/>
+  </g>
+  <circle cx="1090" cy="69" r="1.5" fill="#E6E9EF" opacity=".55"/>
+  <circle cx="1142" cy="236" r="1.5" fill="#E6E9EF" opacity=".38"/>
+  <circle cx="1032" cy="285" r="1" fill="#E5B567" opacity=".55"/>
+</svg>

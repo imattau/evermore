@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Evermore mark</title>
+  <desc id="desc">A Linux penguin at the heart of an eight-point Nostr-inspired constellation.</desc>
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#6EA8FE" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#6EA8FE" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="64" cy="64" r="63" fill="url(#glow)"/>
+  <g fill="none" stroke="#6EA8FE" stroke-linecap="round" stroke-width="2.5" opacity=".76">
+    <path d="M64 64 64 10M64 64 103 25M64 64 118 64M64 64 103 103M64 64 64 118M64 64 25 103M64 64 10 64M64 64 25 25"/>
+    <path d="m25 25 39-15 39 15 15 39-15 39-39 15-39-15L10 64z" opacity=".5"/>
+  </g>
+  <g fill="#8BB7FF">
+    <circle cx="64" cy="10" r="3.5"/><circle cx="103" cy="25" r="3.5"/>
+    <circle cx="118" cy="64" r="3.5"/><circle cx="103" cy="103" r="3.5"/>
+    <circle cx="64" cy="118" r="3.5"/><circle cx="25" cy="103" r="3.5"/>
+    <circle cx="10" cy="64" r="3.5"/><circle cx="25" cy="25" r="3.5"/>
+  </g>
+  <g>
+    <ellipse cx="64" cy="67" rx="27" ry="37" fill="#0E1014" stroke="#A7B0BF" stroke-opacity=".35" stroke-width="1.5"/>
+    <ellipse cx="64" cy="76" rx="17" ry="23" fill="#E6E9EF"/>
+    <ellipse cx="64" cy="43" rx="20" ry="19" fill="#0E1014"/>
+    <circle cx="57" cy="42" r="2.8" fill="#E6E9EF"/>
+    <circle cx="71" cy="42" r="2.8" fill="#E6E9EF"/>
+    <path d="m59 48 5-2 5 2-5 5z" fill="#E5B567"/>
+    <path d="M48 98q-6 0-8 5 7 4 17 1M80 98q6 0 8 5-7 4-17 1" fill="none" stroke="#E5B567" stroke-linecap="round" stroke-width="4"/>
+    <path d="M51 61q13-7 26 0" fill="none" stroke="#6EA8FE" stroke-linecap="round" stroke-width="2" opacity=".85"/>
+    <circle cx="51" cy="61" r="2" fill="#8BB7FF"/>
+    <circle cx="77" cy="61" r="2" fill="#8BB7FF"/>
+  </g>
+</svg>

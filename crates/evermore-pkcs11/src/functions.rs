@@ -13,22 +13,6 @@ use std::slice;
 
 const SLOT_ID: CK_SLOT_ID = 1;
 
-/// Temporary diagnostic logging to a plain file -- `eprintln!` doesn't
-/// reliably reach the journal from inside `systemd-homework`'s
-/// subprocess, so this sidesteps that ambiguity entirely while tracking
-/// down the exact PKCS#11 call sequence homed makes. Not meant to ship;
-/// remove once the NIP-46 gate itself has its own logging story.
-fn dbg_log(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/evermore-pkcs11-debug.log")
-    {
-        let _ = writeln!(f, "{msg}");
-    }
-}
-
 /// Writes `src` into the caller-provided `(out_ptr, out_len)` buffer
 /// following the standard PKCS#11 "query, then fill" convention: a NULL
 /// `out_ptr` just reports the required length; a non-NULL one must
@@ -310,20 +294,6 @@ pub extern "C" fn c_find_objects_init(
     } else {
         unsafe { template_class(template, count) }
     };
-    dbg_log(&format!(
-        "FindObjectsInit: template_count={count} class={class:?}"
-    ));
-    if !template.is_null() {
-        unsafe {
-            let attrs = slice::from_raw_parts(template, count as usize);
-            for attr in attrs {
-                dbg_log(&format!(
-                    "  attr type=0x{:x} value_len={}",
-                    attr.attribute_type, attr.value_len
-                ));
-            }
-        }
-    }
     let results = match class {
         Some(c) if c == CKO_PUBLIC_KEY => vec![PUBLIC_KEY_HANDLE],
         Some(c) if c == CKO_PRIVATE_KEY => vec![PRIVATE_KEY_HANDLE],
@@ -352,9 +322,6 @@ pub extern "C" fn c_find_objects(
     };
     let n = (max_count as usize).min(s.find_results.len());
     let returned: Vec<u64> = s.find_results.drain(..n).collect();
-    dbg_log(&format!(
-        "FindObjects: max_count={max_count} returning={returned:?}"
-    ));
     unsafe {
         for (i, handle) in returned.into_iter().enumerate() {
             *object_list.add(i) = handle;
@@ -374,7 +341,6 @@ pub extern "C" fn c_get_attribute_value(
     template: *mut CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> CK_RV {
-    dbg_log(&format!("GetAttributeValue: object={object} count={count}"));
     if object != PUBLIC_KEY_HANDLE && object != PRIVATE_KEY_HANDLE {
         return CKR_OBJECT_HANDLE_INVALID;
     }
@@ -428,13 +394,6 @@ pub extern "C" fn c_get_attribute_value(
                     CKR_ATTRIBUTE_TYPE_INVALID
                 }
             };
-            dbg_log(&format!(
-                "  attr type=0x{:x} in_value_null={} in_value_len={} -> rv={rv} out_value_len={}",
-                attr.attribute_type,
-                attr.value.is_null(),
-                attr.value_len,
-                attr.value_len
-            ));
             if rv != CKR_OK {
                 overall = rv;
             }
@@ -448,48 +407,58 @@ pub extern "C" fn c_decrypt_init(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    dbg_log(&format!(
-        "DecryptInit: key={key} mechanism_null={}",
-        mechanism.is_null()
-    ));
     if mechanism.is_null() || key != PRIVATE_KEY_HANDLE {
-        dbg_log("DecryptInit: ARGUMENTS_BAD (null mechanism or wrong key handle)");
         return CKR_ARGUMENTS_BAD;
     }
     let mechanism_type = unsafe { (*mechanism).mechanism };
-    dbg_log(&format!(
-        "DecryptInit: mechanism_type=0x{mechanism_type:x} expected=0x{CKM_RSA_PKCS_OAEP:x} param_len={}",
-        unsafe { (*mechanism).parameter_len }
-    ));
     if mechanism_type != CKM_RSA_PKCS_OAEP {
-        dbg_log("DecryptInit: MECHANISM_INVALID");
         return CKR_MECHANISM_INVALID;
     }
+
+    // `homed` probes which OAEP hash the token supports and picks one
+    // per-token (verified live against real homed: it chose SHA-256
+    // against this module's own mechanism list) -- the mechanism
+    // parameter carries that choice, and OAEP decryption fails outright
+    // if the wrong hash is used, so this has to be read, not assumed.
+    let parameter = unsafe { (*mechanism).parameter };
+    let parameter_len = unsafe { (*mechanism).parameter_len };
+    if parameter.is_null()
+        || parameter_len as usize != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let oaep_params = unsafe { &*(parameter as *const CK_RSA_PKCS_OAEP_PARAMS) };
+    let hash = match oaep_params.hash_alg {
+        CKM_SHA_1 => state::OaepHash::Sha1,
+        CKM_SHA256 => state::OaepHash::Sha256,
+        _ => return CKR_MECHANISM_INVALID,
+    };
+
     let mut provider = state::provider().lock().unwrap();
     let Some(s) = provider.sessions.get_mut(&session) else {
-        dbg_log("DecryptInit: SESSION_HANDLE_INVALID");
         return CKR_SESSION_HANDLE_INVALID;
     };
     if !s.logged_in {
-        dbg_log("DecryptInit: USER_NOT_LOGGED_IN");
         return CKR_USER_NOT_LOGGED_IN;
     }
     s.decrypting = true;
-    dbg_log("DecryptInit: OK");
+    s.decrypt_hash = Some(hash);
     CKR_OK
 }
 
 /// The one function that actually matters for Phase 5.5's NIP-46
-/// priority-1 unlock path. **Does real RSA-OAEP-SHA1 decryption right
-/// now -- verified end-to-end against homed's own enrollment/unlock
-/// flow -- but does not yet gate that decryption on a NIP-46 approval
-/// round-trip.** That gate is the entire remaining point of this crate
-/// and belongs right here, before the `rsa` decrypt call below: block
-/// on a signed request/response with the paired remote signer over the
-/// relay named in the identity's `backing::Backing::Remote` record, and
-/// return `CKR_FUNCTION_FAILED` on a decline or timeout instead of
-/// proceeding. Not implemented in this increment; this comment is the
-/// marker, not a placeholder pretending it's done.
+/// priority-1 unlock path. **Does real RSA-OAEP decryption right now
+/// (SHA-1 or SHA-256, matching whatever `C_DecryptInit` negotiated) --
+/// verified end-to-end against homed's own enrollment/unlock flow,
+/// including a real LUKS-encrypted home actually mounting -- but does
+/// not yet gate that decryption on a NIP-46 approval round-trip.** That
+/// gate is the entire remaining point of this crate and belongs right
+/// here, before the `rsa` decrypt call below: block on a signed
+/// request/response with the paired remote signer over the relay named
+/// in the identity's `backing::Backing::Remote` record, and return
+/// `CKR_FUNCTION_FAILED` on a decline or timeout instead of proceeding.
+/// Not implemented in this increment; this comment is the marker, not a
+/// placeholder pretending it's done.
 pub extern "C" fn c_decrypt(
     session: CK_SESSION_HANDLE,
     ciphertext: *mut CK_BYTE,
@@ -497,40 +466,28 @@ pub extern "C" fn c_decrypt(
     plaintext: *mut CK_BYTE,
     plaintext_len: *mut CK_ULONG,
 ) -> CK_RV {
-    dbg_log(&format!(
-        "Decrypt: ciphertext_len={ciphertext_len} plaintext_null={} plaintext_len_in={}",
-        plaintext.is_null(),
-        if plaintext_len.is_null() {
-            0
-        } else {
-            unsafe { *plaintext_len }
-        }
-    ));
     if ciphertext.is_null() || plaintext_len.is_null() {
-        dbg_log("Decrypt: ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
     let provider = state::provider().lock().unwrap();
-    let ready = match provider.sessions.get(&session) {
-        Some(s) => s.logged_in && s.decrypting,
-        None => {
-            dbg_log("Decrypt: SESSION_HANDLE_INVALID");
-            return CKR_SESSION_HANDLE_INVALID;
-        }
+    let hash = match provider.sessions.get(&session) {
+        Some(s) if s.logged_in && s.decrypting => s.decrypt_hash,
+        Some(_) => return CKR_USER_NOT_LOGGED_IN,
+        None => return CKR_SESSION_HANDLE_INVALID,
     };
-    if !ready {
-        dbg_log("Decrypt: USER_NOT_LOGGED_IN (not logged in or DecryptInit wasn't called)");
-        return CKR_USER_NOT_LOGGED_IN;
-    }
+    let Some(hash) = hash else {
+        return CKR_ARGUMENTS_BAD;
+    };
 
     let ciphertext_slice = unsafe { slice::from_raw_parts(ciphertext, ciphertext_len as usize) };
-    let decrypted = provider
-        .key
-        .decrypt(Oaep::new::<sha1::Sha1>(), ciphertext_slice);
-    dbg_log(&format!(
-        "Decrypt: rsa decrypt result ok={}",
-        decrypted.is_ok()
-    ));
+    let decrypted = match hash {
+        state::OaepHash::Sha1 => provider
+            .key
+            .decrypt(Oaep::new::<sha1::Sha1>(), ciphertext_slice),
+        state::OaepHash::Sha256 => provider
+            .key
+            .decrypt(Oaep::new::<sha2::Sha256>(), ciphertext_slice),
+    };
     drop(provider);
 
     let mut provider = state::provider().lock().unwrap();
@@ -541,17 +498,9 @@ pub extern "C" fn c_decrypt(
 
     let decrypted = match decrypted {
         Ok(bytes) => bytes,
-        Err(e) => {
-            dbg_log(&format!("Decrypt: rsa decrypt failed: {e:?}"));
-            return CKR_DATA_LEN_RANGE;
-        }
+        Err(_) => return CKR_DATA_LEN_RANGE,
     };
-    let rv = unsafe { write_out(&decrypted, plaintext, plaintext_len) };
-    dbg_log(&format!(
-        "Decrypt: write_out rv={rv} decrypted_len={}",
-        decrypted.len()
-    ));
-    rv
+    unsafe { write_out(&decrypted, plaintext, plaintext_len) }
 }
 
 pub extern "C" fn c_generate_random(

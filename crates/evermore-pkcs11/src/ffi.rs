@@ -136,8 +136,10 @@ pub const CKA_PUBLIC_EXPONENT: CK_ATTRIBUTE_TYPE = 0x122;
 // --- mechanisms ---
 pub const CKM_RSA_PKCS_OAEP: CK_MECHANISM_TYPE = 9;
 pub const CKG_MGF1_SHA1: CK_ULONG = 1;
+pub const CKG_MGF1_SHA256: CK_ULONG = 2;
 pub const CKZ_DATA_SPECIFIED: CK_ULONG = 1;
 pub const CKM_SHA_1: CK_MECHANISM_TYPE = 0x220;
+pub const CKM_SHA256: CK_MECHANISM_TYPE = 0x250;
 
 // --- session/slot/user flags and state ---
 pub const CKF_TOKEN_PRESENT: CK_FLAGS = 1 << 0;
@@ -165,7 +167,8 @@ pub const CKR_SESSION_HANDLE_INVALID: CK_RV = 0xB3;
 pub const CKR_OBJECT_HANDLE_INVALID: CK_RV = 0x82;
 pub const CKR_ATTRIBUTE_TYPE_INVALID: CK_RV = 0x12;
 pub const CKR_MECHANISM_INVALID: CK_RV = 0x70;
-pub const CKR_DATA_LEN_RANGE: CK_RV = 0x90;
+pub const CKR_DATA_LEN_RANGE: CK_RV = 0x21;
+pub const CKR_OPERATION_ACTIVE: CK_RV = 0x90;
 
 /// The base v2.40 function table (`CK_FUNCTION_LIST_` in the real header)
 /// -- every slot in the exact, authoritative order. All 65 function

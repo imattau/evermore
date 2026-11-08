@@ -374,26 +374,59 @@ implementation plan the way Phases 0-5 are.
     (same at-rest pattern as `device_identity.rs`: plaintext key
     material, root-owned, 0600).
 
-    **What's proven vs. still blocked, both verified on the VM, not
-    assumed:** the ABI, module discovery, mechanism negotiation, and
-    enrollment-time object reads all work correctly against real
-    `homed`. The final create-verification step — `homed`'s own
-    immediate round-trip self-test, decrypting what it just encrypted —
-    currently fails with `"Selected PKCS#11 object is not a private
-    key, refusing"` at the `C_Decrypt` call, with a suspiciously short
-    (1-byte) ciphertext passed in. Crucially, **this exact failure
-    reproduces identically with real, unmodified SoftHSM** (a
-    battle-tested reference PKCS#11 implementation) in this same VM —
-    strong evidence this is an existing bug or incompatibility in this
-    specific Arch/`systemd 262` `homed` build's PKCS#11 verification
-    path, not a defect in this module. Not yet root-caused to a fix;
-    the next step is either a different systemd version to test against
-    or reading `systemd-homework`'s actual C source for this self-test.
+    **Both blockers resolved for real (2026-11-08), root-caused by
+    reading systemd's and p11-kit's actual source, not by guessing:**
+    the `"Selected PKCS#11 object is not a private key, refusing"`
+    failure was never a bug in this module. Cloning `systemd` and
+    grepping for that exact string led straight to
+    `src/shared/pkcs11-util.c`'s `pkcs11_token_find_private_key()`: it
+    inspects the `pkcs11:` URI's *own* embedded `type=` component before
+    ever calling into the module, and hard-refuses if that component
+    says `public` rather than `private`. The enrollment command had
+    supplied `--pkcs11-token-uri=...type=public` (correct for reading
+    the public key at enrollment) — but that exact URI string gets
+    persisted into the record and reused verbatim by
+    `homework-pkcs11.c`'s decrypt callback later, tripping this
+    hard-coded check before the module is ever asked anything. **Fix:**
+    omit `type=` from the enrollment URI entirely; a bare
+    `token=...;id=...;object=...` URI isn't read as asserting a class at
+    all, so `find_private_key` falls through to searching generically
+    and reaches the module correctly. (This explains why real SoftHSM
+    hit the identical failure earlier — it's a caller-side URI-usage
+    issue, not anything module-specific, confirming the earlier
+    suspicion.) With that fixed, a second, this module's *own* bug
+    surfaced immediately: `CKR_DATA_LEN_RANGE` was transcribed as `0x90`
+    in `ffi.rs` instead of the real `0x21` — `0x90` is actually
+    `CKR_OPERATION_ACTIVE`, so a genuine RSA-decrypt failure was being
+    reported as "another operation is already taking place," a deeply
+    misleading error that pointed nowhere near the real cause. Fixing
+    that constant exposed the real problem underneath: `C_Decrypt` was
+    hardcoded to OAEP-SHA1 while `homed` had negotiated OAEP-SHA256
+    (confirmed via `C_DecryptInit`'s mechanism parameter, which was
+    already being parsed but not honored) — OAEP decryption fails
+    outright on a hash mismatch. Fixed by reading
+    `CK_RSA_PKCS_OAEP_PARAMS.hash_alg` in `C_DecryptInit`, storing the
+    negotiated hash per-session, and using the matching `sha1`/`sha2`
+    variant in `C_Decrypt`.
+
+    **Verified end to end on the VM after both fixes:** `homectl create`
+    with the corrected URI succeeds; `homectl activate` unlocks a real
+    LUKS-encrypted home through this module's genuine RSA-OAEP-SHA256
+    decrypt, with the home directory actually mounting and populated
+    skeleton files present — confirmed by directly listing
+    `/home/<user>`, not just checking exit codes. Temporary file-based
+    diagnostic logging (`dbg_log`) used to trace the exact call sequence
+    during this investigation has been removed now that both root
+    causes are fixed and verified; it isn't appropriate to leave
+    ad-hoc, unencrypted protocol tracing inside a crypto-handling module
+    long-term.
+
     The NIP-46 round-trip itself (connecting to a relay, encrypting a
     signed request to the paired signer, matching the response) is
-    still entirely unbuilt — `C_Decrypt` does real RSA today with no
-    gate in front of it; that gate is the next concrete step once the
-    homed-side blocker above is resolved, not before.
+    still entirely unbuilt — `C_Decrypt` does real, now-correct RSA-OAEP
+    today with no gate in front of it. That gate is the next concrete
+    step; the PKCS#11 plumbing it needs to sit inside is now proven
+    working end to end, not theoretical.
   - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
     a device/user with no paired phone, or no local-network path to a
     remote signer right now. Tap to unlock, fully offline, and the same

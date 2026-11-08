@@ -63,10 +63,21 @@ fn bootstrap_key(state_dir: &PathBuf) -> std::io::Result<RsaPrivateKey> {
     Ok(key)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OaepHash {
+    Sha1,
+    Sha256,
+}
+
 #[derive(Default)]
 pub struct Session {
     pub logged_in: bool,
     pub decrypting: bool,
+    /// The OAEP hash algorithm negotiated by `C_DecryptInit`'s mechanism
+    /// parameter -- `homed` probes and picks SHA-1 or SHA-256 per
+    /// token, so this can't be hardcoded (verified live: it chose
+    /// SHA-256 against this module's own mechanism list).
+    pub decrypt_hash: Option<OaepHash>,
     /// Object handles still to be returned by `C_FindObjects`, set by
     /// `C_FindObjectsInit` and drained in order.
     pub find_results: Vec<u64>,

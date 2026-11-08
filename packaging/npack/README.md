@@ -46,11 +46,24 @@ first install. `evermore-greeter` is exec'd by `greetd` as the
 per-user npack install can't place it where `greetd` looks; it isn't
 packaged here either, for the same reason.
 
+## The publisher identity
+
+`publisher.json` carries the public half (npub + hex) of Evermore's own
+npack publisher key -- safe to commit and reference, and the value
+every `--publisher` argument below should use. The secret half lives
+only in `publisher.secret` next to it, generated locally, gitignored,
+never committed; back it up somewhere durable (a password manager, not
+another repo) and treat it like any other private key. For GitHub
+Actions, store its `NSEC` (or `HEX`) value as a repository secret by
+hand (`gh secret set`) when the workflow is set up -- nothing here does
+that automatically.
+
 ## Building and publishing
 
 ```sh
 packaging/npack/build-and-publish.sh settingsd \
-  --publisher <evermore's npub-or-hex> --tag v0.1.0 \
+  --publisher npub1g3vdg46zq7xpkmtdnta7l8u9684zd2p4e9wrp3xd7wv4xk7vq03svh653x \
+  --tag v0.1.0 \
   --relay wss://relay.example
 ```
 

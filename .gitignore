@@ -2,6 +2,11 @@
 **/target/
 /.venv-training/
 
+# Publisher secret keys (nsec) -- generated locally, never committed.
+# The public half (npub/hex) is fine to commit; see packaging/npack/.
+packaging/npack/*.secret
+packaging/npack/*.nsec
+
 # Go build output (relay/ is a separate Go module, not in the Cargo workspace)
 relay/evermore-relay-supervisor
 relay/blossom-test-server

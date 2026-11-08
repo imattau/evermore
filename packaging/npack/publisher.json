@@ -1,0 +1,6 @@
+{
+  "comment": "Evermore's npack publisher identity -- the public half only. The secret half lives locally at packaging/npack/publisher.secret (gitignored, never committed). Pass --publisher with either field below.",
+  "npub": "npub1g3vdg46zq7xpkmtdnta7l8u9684zd2p4e9wrp3xd7wv4xk7vq03svh653x",
+  "hex": "4458d45742078c1b6d6d9afbef9f85d1ea26a835c95c30c4cdf399535bcc03e3",
+  "created": "2026-11-09"
+}

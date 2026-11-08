@@ -1,8 +1,0 @@
-{
-  "id": "sh.evermore.mcp",
-  "name": "Evermore MCP Server",
-  "version": "0.1.0",
-  "description": "Exposes Evermore's approved operations to external AI agents over MCP (stdio or --http), gated by evermore-operationsd's approval flow.",
-  "bin": "evermore-mcp",
-  "dependencies": ["sh.evermore.operationsd"]
-}

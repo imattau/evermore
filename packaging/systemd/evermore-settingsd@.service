@@ -6,11 +6,11 @@ Wants=evermore-signer.service evermore-relay.service
 
 [Service]
 Type=simple
-# Assumes `evermore-npack install sh.evermore.settingsd` (or a dev-time
-# `cargo build --release` + manual symlink) has put the binary at
-# %h/.local/bin/. %i (systemd instance name) carries the identity to run
-# as, so this is enabled per-identity: `systemctl --user enable evermore-settingsd@personal`.
-ExecStart=%h/.local/bin/evermore-settingsd --identity %i
+# Assumes `cargo install --path crates/evermore-settingsd` has put the
+# binary on the user's cargo bin path, same caveat as evermore-signer's
+# unit. %i (systemd instance name) carries the identity to run as, so this
+# is enabled per-identity: `systemctl --user enable evermore-settingsd@personal`.
+ExecStart=%h/.cargo/bin/evermore-settingsd --identity %i
 Restart=on-failure
 RestartSec=2
 

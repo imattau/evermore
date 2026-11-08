@@ -26,13 +26,6 @@ pub struct Manifest {
     /// install, if this package provides an executable.
     #[serde(default)]
     pub bin: Option<String>,
-    /// Path within the archive to a `systemd --user` unit file, if this
-    /// package runs as a background daemon. Installed to
-    /// `systemd_user_unit_dir()` and `enable --now`'d on install,
-    /// `restart`'d on update -- the unit's own `Exec*=` lines point at the
-    /// `bin` symlink above, so they don't need rewriting per version.
-    #[serde(default)]
-    pub systemd_unit: Option<String>,
     /// Optional signed local-model payload. The referenced GGUF is part of the
     /// archive and its digest is covered transitively by the signed release.
     #[serde(default)]
@@ -116,17 +109,6 @@ pub fn install_root() -> std::path::PathBuf {
 pub fn bin_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(home).join(".local").join("bin")
-}
-
-/// Where a package's `systemd_unit` gets installed -- the standard
-/// per-user unit directory `systemctl --user` already searches, so no
-/// `--unit-path` wiring is needed on top of it.
-pub fn systemd_user_unit_dir() -> std::path::PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        format!("{home}/.config")
-    });
-    std::path::PathBuf::from(base).join("systemd").join("user")
 }
 
 #[cfg(test)]

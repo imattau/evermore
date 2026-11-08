@@ -1,9 +1,0 @@
-{
-  "id": "sh.evermore.indexd",
-  "name": "Evermore Local Index Daemon",
-  "version": "0.1.0",
-  "description": "Chunks and indexes local files for AI retrieval over a Unix socket.",
-  "bin": "evermore-indexd",
-  "systemd_unit": "evermore-indexd.service",
-  "dependencies": []
-}

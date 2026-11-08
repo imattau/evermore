@@ -2476,24 +2476,8 @@ impl eframe::App for PanelApp {
                         ui.weak("Nothing installed yet.");
                     }
                     for pkg in self.npack_installed.clone() {
-                        let newer_available = self
-                            .npack_available
-                            .iter()
-                            .find(|available| available.id == pkg.id)
-                            .and_then(|available| available.version.as_deref())
-                            .is_some_and(|version| version != pkg.version);
                         ui.horizontal(|ui| {
                             ui.label(format!("{} v{}", pkg.name, pkg.version));
-                            if newer_available && ui.small_button("Update").clicked() {
-                                match npack_client::update(
-                                    &self.npack_identity,
-                                    &self.npack_blossom_url,
-                                    &pkg.id,
-                                ) {
-                                    Ok(()) => self.refresh_npack(),
-                                    Err(e) => self.npack_error = Some(e),
-                                }
-                            }
                             if ui.small_button("Remove").clicked() {
                                 match npack_client::remove(&pkg.id) {
                                     Ok(()) => self.refresh_npack(),

@@ -1,8 +1,0 @@
-{
-  "id": "sh.evermore.greeter",
-  "name": "Evermore Greeter",
-  "version": "0.1.0",
-  "description": "Custom greetd frontend showing each provisioned identity's display name and avatar at login.",
-  "bin": "evermore-greeter",
-  "dependencies": []
-}

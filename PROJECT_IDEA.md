@@ -548,12 +548,13 @@ implementation plan the way Phases 0-5 are.
   (see the unlock-priority decision above) slots in at the **homed**
   layer, the same place FIDO2 already does — so NIP-46 support doesn't
   need any greeter-specific or PAM-specific code either, once that
-  provider exists. The only Evermore-specific *greeter* work that's
-  left is UI polish, not auth plumbing: showing `kind:0` profile data
+  provider exists. The only Evermore-specific *greeter* work left was
+  UI polish, not auth plumbing: showing `kind:0` profile data
   (name/avatar) at the login screen, which no stock frontend knows how
-  to do. A completely stock `tuigreet` works, generically, right now
-  for the password/FIDO2 paths — profile display is a later layer on
-  top of a already-functional login, not a blocker for one.
+  to do — a completely stock `tuigreet` already worked, generically,
+  for the password/FIDO2 paths, so this was never a blocker for login
+  working at all. **That UI polish is now built — see
+  `evermore-greeter` below.**
 
   **Verified end to end on the VM (2026-11-08):** `evermore-enroll create`
   gained an `--identity-pubkey NPUB|HEX` flag that merges the
@@ -588,6 +589,88 @@ implementation plan the way Phases 0-5 are.
   actually carries the same identity through, not just each piece in
   isolation. Cleaned up afterward: greetd's config restored, test
   account removed, no scratch files left on the VM.
+
+- **`evermore-greeter`: a real graphical greetd frontend with kind:0
+  avatars (built 2026-11-08).** A new crate, `apps/evermore-greeter` —
+  an eframe/egui app run inside `cage` (a minimal kiosk Wayland
+  compositor, the same pattern `gtkgreet` uses), replacing the stock
+  `agreety`/`tuigreet` frontend greetd's own config points at
+  (`packaging/greetd/config.toml`). It enumerates provisioned
+  identities via homed's real D-Bus API (`ListHomes` +
+  `GetUserRecordByName`, reading each record's `evermore.pubkeyHex`),
+  shows each one's cached display name and avatar in a picker, and
+  drives the actual login by speaking greetd's own IPC protocol
+  directly (`greetd-ipc(7)`: length-prefixed JSON over `$GREETD_SOCK`)
+  — this binary genuinely *is* a frontend, the same way `agreety` is,
+  not a shortcut around one. All real authentication stays entirely
+  PAM's/homed's job, untouched; the greeter only ever relays prompts
+  and passes the typed answer through.
+
+  **The profile data itself:** `evermore-signer` gained a `set-profile`
+  subcommand (`set-profile NAME --display-name NAME [--avatar PATH]`)
+  that writes a plain-file cache — `/var/lib/evermore-profiles/<pubkey-hex>/{profile.json,avatar.png}`
+  — and best-effort publishes the equivalent signed `kind:0` event to
+  the local relay. The file cache is what actually matters for the
+  greeter: the local control-plane relay is a systemd *user* service
+  that only starts after a login session already exists, so there is
+  no relay to query before anyone has logged in, for any identity —
+  `kind:0`-on-the-relay is for every other consumer (the panel, etc.),
+  not this one.
+
+  **A real design conflict found and fixed, not hypothetical:** the
+  obvious location, `/var/lib/evermore/profiles`, doesn't work —
+  `/var/lib/evermore` itself is already actively managed as a 0700,
+  root-only secrets store by both `evermore-pkcs11` and this crate's
+  own `device_identity.rs`, each of which unconditionally
+  `set_permissions(dir, 0o700)`s it on every bootstrap. A
+  world-readable subdirectory nested inside it would get silently
+  re-locked the next time either of those happened to run. Fixed by
+  making the cache a *sibling* directory, `/var/lib/evermore-profiles`
+  (`packaging/systemd/evermore-profiles.conf`: `1777 root root`, like
+  `/tmp` — world-writable-but-sticky, since each user only ever creates
+  and writes their own `<pubkey-hex>` subdirectory, and the contents
+  are already public by nature, the same data a `kind:0` event carries).
+
+  **Verified end to end on the VM, including two real UI bugs found
+  only by actually driving it** (via `wtype` for keyboard input, since
+  this runs headless — the picker also supports pressing `1`-`9` to
+  select an identity, a real accessibility feature, not just a test
+  hook, which is what made driving it via keyboard alone possible at
+  all): (1) `TextEdit::request_focus()` was being called every frame
+  instead of once, which silently re-stole focus back onto the
+  password field the instant Enter tried to surrender it to submit —
+  broke every way to submit the form (Enter, Tab, clicking "Log in").
+  Fixed by tracking focus-requested state explicitly and requesting it
+  exactly once per prompt. (2) `vertical_centered` did not actually
+  center a nested `horizontal` row of avatar tiles in this egui
+  version — confirmed visually (the row rendered pinned to the left
+  edge under a correctly-centered heading); fixed by computing the
+  row's centering offset by hand from the known tile width, after also
+  discovering the whole screen needed wrapping in `CentralPanel` to
+  have a stable width to center against at all (`eframe::App::ui`'s own
+  doc comment: "no margin or background" — easy to miss that this also
+  means no defined width for a bare `Ui`).
+
+  Also needed one more system package the project hadn't needed before:
+  `vulkan-swrast` (lavapipe, a software Vulkan implementation). Without
+  it, Mesa's EGL falls back to `zink` (OpenGL-over-Vulkan) on this
+  headless, GPU-less VM and fails outright with
+  `VK_ERROR_INCOMPATIBLE_DRIVER` — root-caused via
+  `VK_LOADER_DEBUG=all`, not guessed, and documented in
+  `packaging/greetd/README.md` so it isn't rediscovered the hard way
+  again. On real hardware with a GPU this isn't needed at all; `cage`
+  picks up the real driver automatically.
+
+  Two full logins confirmed via real `greetd` + real `pam_systemd_home`
+  (journal: `Home for user evgreeter2 successfully acquired`, home
+  actually mounted) driven entirely through the picker UI: first with
+  no profile set (renders the initials-fallback avatar, a colored
+  circle with the name's first letter), second after running
+  `set-profile` with a real generated PNG from inside a live session —
+  the picker rendered that exact image, cropped circular, with the
+  configured display name, before any password was typed. Cleaned up
+  afterward: greetd's stock config restored, test account and all
+  scratch profile data removed, no stray processes left on the VM.
 
 **Still open:**
 

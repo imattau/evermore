@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.contextd",
+  "name": "Evermore Context Daemon",
+  "version": "0.1.0",
+  "description": "Gathers compositor/window context (active app, screen contents) for AI consumers over a Unix socket.",
+  "bin": "evermore-contextd",
+  "systemd_unit": "evermore-contextd.service",
+  "dependencies": []
+}

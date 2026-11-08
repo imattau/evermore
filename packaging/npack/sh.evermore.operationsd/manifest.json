@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.operationsd",
+  "name": "Evermore Operations Daemon",
+  "version": "0.1.0",
+  "description": "Executes approved AI-requested operations (e.g. calendar) behind an owner-signed approval gate.",
+  "bin": "evermore-operationsd",
+  "systemd_unit": "evermore-operationsd@.service",
+  "dependencies": ["sh.evermore.settingsd"]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.sway-ai-bridge",
+  "name": "Evermore Sway AI Bridge",
+  "version": "0.1.0",
+  "description": "Wires Sway's own IPC into evermore-contextd so window/workspace context reaches AI consumers.",
+  "bin": "evermore-sway-ai-bridge",
+  "systemd_unit": "evermore-sway-ai-bridge.service",
+  "dependencies": ["sh.evermore.contextd"]
+}

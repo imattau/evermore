@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.blossom-fs",
+  "name": "Evermore Blossom Filesystem Sync",
+  "version": "0.1.0",
+  "description": "Syncs ~/Nostr/ with a Blossom server, authorized via the signing daemon.",
+  "bin": "evermore-blossom-fs",
+  "systemd_unit": "evermore-blossom-fs@.service",
+  "dependencies": []
+}

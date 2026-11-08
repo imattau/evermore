@@ -11,7 +11,7 @@ use evermore_npack::{
     relay_client, signer_client::SignerClient,
 };
 use nostr::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:4869";
 
@@ -32,11 +32,13 @@ fn run() -> Result<(), String> {
         Some("publish") => publish_cmd(args.next(), args.next()),
         Some("available") => available_cmd(),
         Some("install") => install_cmd(args.next()),
+        Some("update") => update_cmd(args.next()),
+        Some("update-all") => update_all_cmd(),
         Some("remove") => remove_cmd(args.next()),
         Some("installed") => installed_cmd(),
         _ => {
             eprintln!(
-                "usage: evermore-npack <trust|untrust|trusted|publish|available|install|remove|installed>"
+                "usage: evermore-npack <trust|untrust|trusted|publish|available|install|update|update-all|remove|installed>"
             );
             eprintln!("  trust PUBKEY_HEX --identity NAME [--relay URL]");
             eprintln!("  untrust PUBKEY_HEX --identity NAME [--relay URL]");
@@ -46,6 +48,8 @@ fn run() -> Result<(), String> {
             );
             eprintln!("  available --identity NAME [--relay URL]");
             eprintln!("  install PACKAGE_ID --identity NAME --blossom-url URL [--relay URL]");
+            eprintln!("  update PACKAGE_ID --identity NAME --blossom-url URL [--relay URL]");
+            eprintln!("  update-all --identity NAME --blossom-url URL [--relay URL]");
             eprintln!("  remove PACKAGE_ID");
             eprintln!("  installed");
             std::process::exit(2);
@@ -306,30 +310,21 @@ fn fetch_latest_release_event(
     }))
 }
 
-// --- install / remove / installed ---
+// --- install / update / remove / installed ---
 
-fn install_cmd(id: Option<String>) -> Result<(), String> {
-    let id = require(id, "PACKAGE_ID")?;
-    if !safe_package_component(&id) {
-        return Err("PACKAGE_ID contains characters unsafe for an install path".into());
-    }
-    let blossom_url = arg_value("--blossom-url").ok_or("missing --blossom-url URL")?;
-    let signer = identity_arg()?;
-    let relay = relay_arg();
-    let own_pubkey = signer.get_public_key()?;
-
-    let trust_list = fetch_trust_list(&relay, &own_pubkey)?;
-    if trust_list.is_empty() {
-        return Err("no trusted publishers -- `evermore-npack trust PUBKEY_HEX` first".into());
-    }
-    let requested_version = arg_value("--version");
-    let requested_sha256 = arg_value("--sha256");
-    if requested_version.is_some() != requested_sha256.is_some() {
-        return Err("--version and --sha256 must be supplied together".into());
-    }
-    let (release, signed_release_event) = if let (Some(version), Some(sha256)) =
-        (&requested_version, &requested_sha256)
-    {
+/// Resolves which release to fetch: a pinned `(version, sha256)` pair
+/// checked against a trusted signed event, or (when neither is given)
+/// that publisher set's latest. Shared by `install` (where pinning makes
+/// sense -- installing nothing yet, you may want a specific known-good
+/// build) and `update` (which always moves to latest).
+fn resolve_release(
+    relay: &str,
+    id: &str,
+    trust_list: &[String],
+    pinned_version: Option<&str>,
+    pinned_sha256: Option<&str>,
+) -> Result<(ReleaseListing, serde_json::Value), String> {
+    let resolved = if let (Some(version), Some(sha256)) = (pinned_version, pinned_sha256) {
         if !safe_package_component(version)
             || sha256.len() != 64
             || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
@@ -337,16 +332,16 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
             return Err("pinned version or SHA-256 is malformed".into());
         }
         let events = relay_client::query(
-            &relay,
+            relay,
             serde_json::json!({
-                "kinds": [evermore_npack::KIND_RELEASE_ARTIFACT_SET], "authors": trust_list, "#d": [&id]
+                "kinds": [evermore_npack::KIND_RELEASE_ARTIFACT_SET], "authors": trust_list, "#d": [id]
             }),
         )?;
         events
             .into_iter()
             .find_map(|event| {
                 let candidate = ReleaseListing {
-                    id: id.clone(),
+                    id: id.to_string(),
                     version: tag_value(&event, "version")?,
                     publisher_pubkey: event.pubkey.to_hex(),
                     blossom_url: tag_value(&event, "url")?,
@@ -360,18 +355,25 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
             })
             .ok_or_else(|| format!("no trusted signed release matches {id} {version} {sha256}"))?
     } else {
-        fetch_latest_release_event(&relay, &id, &trust_list)?
+        fetch_latest_release_event(relay, id, trust_list)?
             .ok_or_else(|| format!("no release of '{id}' found from a trusted publisher"))?
     };
 
+    let (release, event) = resolved;
     if !safe_package_component(&release.version)
         || release.sha256.len() != 64
         || !release.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err("trusted release contains an unsafe version or malformed SHA-256".into());
     }
+    Ok((release, event))
+}
 
-    let archive_bytes = blossom_client::download(&blossom_url, &release.sha256)
+/// Downloads a resolved release's archive and checks it against the
+/// signed SHA-256 -- the actual trust boundary, independent of whichever
+/// Blossom URL answered.
+fn download_verified(blossom_url: &str, release: &ReleaseListing) -> Result<Vec<u8>, String> {
+    let archive_bytes = blossom_client::download(blossom_url, &release.sha256)
         .or_else(|_| blossom_client::download(&release.blossom_url, &release.sha256))?;
     let actual_sha256 = blossom_client::hex_sha256(&archive_bytes);
     if !actual_sha256.eq_ignore_ascii_case(&release.sha256) {
@@ -380,9 +382,20 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
             release.sha256
         ));
     }
+    Ok(archive_bytes)
+}
 
-    let version_dir = install_root().join(&id).join(&release.version);
-    let manifest = archive::extract(&archive_bytes, &version_dir)?;
+/// Unpacks a verified archive into its own version directory and checks
+/// the manifest matches what was requested. Does not touch `current` or
+/// any symlinks -- callers decide when to switch over.
+fn unpack_release(
+    id: &str,
+    release: &ReleaseListing,
+    archive_bytes: &[u8],
+    signed_release_event: &serde_json::Value,
+) -> Result<(PathBuf, Manifest), String> {
+    let version_dir = install_root().join(id).join(&release.version);
+    let manifest = archive::extract(archive_bytes, &version_dir)?;
     if manifest.id != id {
         return Err(format!(
             "archive manifest id '{}' doesn't match requested package '{id}'",
@@ -398,16 +411,67 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
 
     std::fs::write(
         version_dir.join("evermore-release-event.json"),
-        serde_json::to_vec(&signed_release_event).map_err(|e| e.to_string())?,
+        serde_json::to_vec(signed_release_event).map_err(|e| e.to_string())?,
     )
     .map_err(|e| format!("writing signed release evidence: {e}"))?;
-    std::fs::write(version_dir.join("package.npk"), &archive_bytes)
+    std::fs::write(version_dir.join("package.npk"), archive_bytes)
         .map_err(|e| format!("retaining verified package archive: {e}"))?;
 
-    let current_link = install_root().join(&id).join("current");
+    Ok((version_dir, manifest))
+}
+
+/// Refuses to activate a package whose declared `dependencies` aren't
+/// already installed -- the manifest field existed from the start but
+/// nothing enforced it, so a package naming a dependency that isn't
+/// present would previously install anyway and fail at runtime instead.
+fn check_dependencies(manifest: &Manifest) -> Result<(), String> {
+    if manifest.dependencies.is_empty() {
+        return Ok(());
+    }
+    let installed: std::collections::HashSet<String> = collect_installed(&install_root())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    let missing: Vec<&String> = manifest
+        .dependencies
+        .iter()
+        .filter(|dep| !installed.contains(*dep))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} depends on {} which {} not installed -- install {} first",
+            manifest.id,
+            missing
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if missing.len() == 1 { "is" } else { "are" },
+            if missing.len() == 1 { "it" } else { "them" },
+        ))
+    }
+}
+
+/// Switches `current` to `version_dir`, re-links `bin`, and
+/// enables/restarts the `systemd_unit` if the manifest declares one.
+/// `is_update` only changes whether the unit is started fresh
+/// (`enable --now`) or bounced (`restart`) -- everything else is
+/// identical between first install and a later update, which is the
+/// point: a baked-in package updates through the exact same path as one
+/// `npack install`ed from cold.
+fn activate(
+    id: &str,
+    version_dir: &Path,
+    manifest: &Manifest,
+    is_update: bool,
+) -> Result<(), String> {
+    let current_link = install_root().join(id).join("current");
     let _ = std::fs::remove_file(&current_link);
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&version_dir, &current_link)
+    std::os::unix::fs::symlink(version_dir, &current_link)
         .map_err(|e| format!("linking current version: {e}"))?;
 
     if let Some(bin) = &manifest.bin {
@@ -429,12 +493,182 @@ fn install_cmd(id: Option<String>) -> Result<(), String> {
         println!("linked {} -> {}", link_name.display(), target.display());
     }
 
+    if let Some(unit) = &manifest.systemd_unit {
+        activate_systemd_unit(version_dir, unit, is_update);
+    }
+
+    Ok(())
+}
+
+/// Best-effort: a failure here (no systemd user session, e.g. this CLI
+/// running inside a container or a build step) must not undo the
+/// already-verified install/update -- the files are correctly in place
+/// either way, so this only warns rather than returning an error.
+fn activate_systemd_unit(version_dir: &Path, unit: &str, is_update: bool) {
+    let unit_name = match unit.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name,
+        _ => {
+            eprintln!("evermore-npack: warning: malformed systemd_unit '{unit}'");
+            return;
+        }
+    };
+    let src = version_dir.join(unit);
+    let unit_dir = evermore_npack::systemd_user_unit_dir();
+    let dest = unit_dir.join(unit_name);
+
+    let install_result =
+        std::fs::create_dir_all(&unit_dir).and_then(|()| std::fs::copy(&src, &dest).map(|_| ()));
+    if let Err(e) = install_result {
+        eprintln!("evermore-npack: warning: couldn't install {unit_name}: {e}");
+        return;
+    }
+
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    if let Err(e) = reload {
+        eprintln!("evermore-npack: warning: `systemctl --user daemon-reload` failed: {e}");
+        return;
+    }
+
+    let verb = if is_update {
+        vec!["--user", "restart", unit_name]
+    } else {
+        vec!["--user", "enable", "--now", unit_name]
+    };
+    match std::process::Command::new("systemctl").args(&verb).status() {
+        Ok(status) if status.success() => {
+            println!(
+                "{} {unit_name}",
+                if is_update { "restarted" } else { "enabled" }
+            );
+        }
+        Ok(status) => eprintln!(
+            "evermore-npack: warning: `systemctl {}` exited with {status}",
+            verb.join(" ")
+        ),
+        Err(e) => eprintln!("evermore-npack: warning: couldn't run systemctl: {e}"),
+    }
+}
+
+fn install_cmd(id: Option<String>) -> Result<(), String> {
+    let id = require(id, "PACKAGE_ID")?;
+    if !safe_package_component(&id) {
+        return Err("PACKAGE_ID contains characters unsafe for an install path".into());
+    }
+    let blossom_url = arg_value("--blossom-url").ok_or("missing --blossom-url URL")?;
+    let signer = identity_arg()?;
+    let relay = relay_arg();
+    let own_pubkey = signer.get_public_key()?;
+
+    let trust_list = fetch_trust_list(&relay, &own_pubkey)?;
+    if trust_list.is_empty() {
+        return Err("no trusted publishers -- `evermore-npack trust PUBKEY_HEX` first".into());
+    }
+    let requested_version = arg_value("--version");
+    let requested_sha256 = arg_value("--sha256");
+    if requested_version.is_some() != requested_sha256.is_some() {
+        return Err("--version and --sha256 must be supplied together".into());
+    }
+    let (release, signed_release_event) = resolve_release(
+        &relay,
+        &id,
+        &trust_list,
+        requested_version.as_deref(),
+        requested_sha256.as_deref(),
+    )?;
+
+    let archive_bytes = download_verified(&blossom_url, &release)?;
+    let (version_dir, manifest) =
+        unpack_release(&id, &release, &archive_bytes, &signed_release_event)?;
+    check_dependencies(&manifest)?;
+    activate(&id, &version_dir, &manifest, false)?;
+
     println!(
         "installed {} {} from {}",
         manifest.id,
         manifest.version,
         short(&release.publisher_pubkey)
     );
+    Ok(())
+}
+
+/// Reads the manifest a package is currently running, if any -- the
+/// source of truth is the filesystem (`current/manifest.json`), same as
+/// `installed_cmd`, not a separate state file that could drift from it.
+fn current_manifest(id: &str) -> Option<Manifest> {
+    let manifest_json = std::fs::read_to_string(
+        install_root()
+            .join(id)
+            .join("current")
+            .join("manifest.json"),
+    )
+    .ok()?;
+    serde_json::from_str(&manifest_json).ok()
+}
+
+fn update_cmd(id: Option<String>) -> Result<(), String> {
+    let id = require(id, "PACKAGE_ID")?;
+    if !safe_package_component(&id) {
+        return Err("PACKAGE_ID contains characters unsafe for an install path".into());
+    }
+    let blossom_url = arg_value("--blossom-url").ok_or("missing --blossom-url URL")?;
+    let signer = identity_arg()?;
+    let relay = relay_arg();
+    let own_pubkey = signer.get_public_key()?;
+
+    let installed = current_manifest(&id)
+        .ok_or_else(|| format!("'{id}' isn't installed -- use `install` first"))?;
+
+    let trust_list = fetch_trust_list(&relay, &own_pubkey)?;
+    if trust_list.is_empty() {
+        return Err("no trusted publishers -- `evermore-npack trust PUBKEY_HEX` first".into());
+    }
+    let (release, signed_release_event) = resolve_release(&relay, &id, &trust_list, None, None)?;
+
+    if release.version == installed.version {
+        println!("{id} already at v{}", installed.version);
+        return Ok(());
+    }
+
+    let archive_bytes = download_verified(&blossom_url, &release)?;
+    let (version_dir, manifest) =
+        unpack_release(&id, &release, &archive_bytes, &signed_release_event)?;
+    check_dependencies(&manifest)?;
+    activate(&id, &version_dir, &manifest, true)?;
+
+    println!(
+        "updated {} {} -> {} from {}",
+        id,
+        installed.version,
+        manifest.version,
+        short(&release.publisher_pubkey)
+    );
+    Ok(())
+}
+
+/// Walks every currently-installed package and updates each in turn.
+/// One package's failure (no newer trusted release, a dependency not
+/// satisfied, a download hiccup) is reported and skipped rather than
+/// aborting the rest -- these are independent packages precisely so a
+/// problem with one doesn't block updating the others.
+fn update_all_cmd() -> Result<(), String> {
+    let root = install_root();
+    let manifests = if root.is_dir() {
+        collect_installed(&root)?
+    } else {
+        Vec::new()
+    };
+    if manifests.is_empty() {
+        println!("(nothing installed)");
+        return Ok(());
+    }
+    for manifest in manifests {
+        match update_cmd(Some(manifest.id.clone())) {
+            Ok(()) => {}
+            Err(e) => eprintln!("evermore-npack: {} not updated: {e}", manifest.id),
+        }
+    }
     Ok(())
 }
 
@@ -549,4 +783,154 @@ fn arg_value(flag: &str) -> Option<String> {
 /// parsing the human-readable text.
 fn json_flag() -> bool {
     std::env::args().any(|a| a == "--json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `install_root()` reads `XDG_DATA_HOME`, a process-global env var, so
+    // tests that need to control it run one at a time under this lock
+    // rather than racing each other's directories.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn bare_manifest(id: &str, dependencies: Vec<String>) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            bin: None,
+            systemd_unit: None,
+            ai_model: None,
+            dependencies,
+        }
+    }
+
+    fn with_data_home<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "evermore-npack-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("XDG_DATA_HOME").ok();
+        // SAFETY: serialized by ENV_LOCK -- no other thread reads or
+        // writes process env vars while this guard is held.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", &dir);
+        }
+        let result = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    #[test]
+    fn dependency_check_passes_once_dependency_is_installed() {
+        with_data_home(|| {
+            let needs_dep =
+                bare_manifest("sh.evermore.mcp", vec!["sh.evermore.operationsd".into()]);
+
+            let err = check_dependencies(&needs_dep).unwrap_err();
+            assert!(err.contains("sh.evermore.operationsd"));
+
+            let dep = bare_manifest("sh.evermore.operationsd", vec![]);
+            let dep_dir = install_root().join(&dep.id).join(&dep.version);
+            std::fs::create_dir_all(&dep_dir).unwrap();
+            std::fs::write(
+                dep_dir.join("manifest.json"),
+                serde_json::to_string(&dep).unwrap(),
+            )
+            .unwrap();
+            let current = install_root().join(&dep.id).join("current");
+            std::os::unix::fs::symlink(&dep_dir, &current).unwrap();
+
+            assert!(check_dependencies(&needs_dep).is_ok());
+        });
+    }
+
+    #[test]
+    fn dependency_check_is_a_no_op_without_declared_dependencies() {
+        with_data_home(|| {
+            assert!(check_dependencies(&bare_manifest("sh.evermore.panel", vec![])).is_ok());
+        });
+    }
+
+    #[test]
+    fn current_manifest_reads_through_the_symlink() {
+        with_data_home(|| {
+            assert!(current_manifest("sh.evermore.panel").is_none());
+
+            let manifest = bare_manifest("sh.evermore.panel", vec![]);
+            let version_dir = install_root().join(&manifest.id).join(&manifest.version);
+            std::fs::create_dir_all(&version_dir).unwrap();
+            std::fs::write(
+                version_dir.join("manifest.json"),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+            let current = install_root().join(&manifest.id).join("current");
+            std::os::unix::fs::symlink(&version_dir, &current).unwrap();
+
+            let read_back = current_manifest(&manifest.id).unwrap();
+            assert_eq!(read_back.version, "1.0.0");
+        });
+    }
+}
+
+#[cfg(test)]
+mod manifest_fixture_tests {
+    use super::Manifest;
+
+    #[test]
+    fn packaged_manifests_parse_and_reference_real_units() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/npack");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let manifest_path = entry.path().join("manifest.json");
+            let json = std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", manifest_path.display()));
+            let manifest: Manifest = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("parsing {}: {e}", manifest_path.display()));
+            assert_eq!(
+                manifest.id,
+                format!(
+                    "sh.evermore.{}",
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .trim_start_matches("sh.evermore.")
+                )
+            );
+            if let Some(unit) = &manifest.systemd_unit {
+                let unit_path = root.join("../systemd").join(unit);
+                assert!(
+                    unit_path.is_file(),
+                    "{} declares systemd_unit {unit} but {} doesn't exist",
+                    manifest_path.display(),
+                    unit_path.display()
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 11,
+            "expected 11 packaged manifests under packaging/npack"
+        );
+    }
 }

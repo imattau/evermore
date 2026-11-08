@@ -1,0 +1,8 @@
+{
+  "id": "sh.evermore.panel",
+  "name": "Evermore Panel",
+  "version": "0.1.0",
+  "description": "egui control panel: identities, settings, notifications, packages, and AI tabs.",
+  "bin": "evermore-panel",
+  "dependencies": []
+}

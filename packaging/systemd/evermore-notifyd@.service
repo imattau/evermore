@@ -8,7 +8,7 @@ Wants=evermore-signer.service evermore-relay.service
 Type=simple
 # Per-identity instance, same convention as evermore-settingsd@.service:
 # `systemctl --user enable evermore-notifyd@personal`.
-ExecStart=%h/.cargo/bin/evermore-notifyd --identity %i
+ExecStart=%h/.local/bin/evermore-notifyd --identity %i
 Restart=on-failure
 RestartSec=2
 

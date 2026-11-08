@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.inferd",
+  "name": "Evermore Inference Daemon",
+  "version": "0.1.0",
+  "description": "llama.cpp supervisor and local GGUF/LoRA model store, exposed over a Unix socket.",
+  "bin": "evermore-inferd",
+  "systemd_unit": "evermore-inferd.service",
+  "dependencies": []
+}

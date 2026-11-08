@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.notifyd",
+  "name": "Evermore Notification Bridge",
+  "version": "0.1.0",
+  "description": "Bridges Nostr mentions/DMs and local control-plane events into native desktop notifications.",
+  "bin": "evermore-notifyd",
+  "systemd_unit": "evermore-notifyd@.service",
+  "dependencies": ["sh.evermore.settingsd"]
+}

@@ -53,6 +53,17 @@ pub fn install(identity: &str, blossom_url: &str, id: &str) -> Result<(), String
     ])
 }
 
+pub fn update(identity: &str, blossom_url: &str, id: &str) -> Result<(), String> {
+    run(&[
+        "update",
+        id,
+        "--identity",
+        identity,
+        "--blossom-url",
+        blossom_url,
+    ])
+}
+
 pub fn remove(id: &str) -> Result<(), String> {
     run(&["remove", id])
 }

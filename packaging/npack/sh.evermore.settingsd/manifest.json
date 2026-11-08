@@ -1,0 +1,9 @@
+{
+  "id": "sh.evermore.settingsd",
+  "name": "Evermore Settings Daemon",
+  "version": "0.1.0",
+  "description": "NIP-78 desktop settings sync over the local control-plane relay.",
+  "bin": "evermore-settingsd",
+  "systemd_unit": "evermore-settingsd@.service",
+  "dependencies": []
+}

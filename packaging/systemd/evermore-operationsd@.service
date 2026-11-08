@@ -8,7 +8,7 @@ Wants=evermore-signer.service evermore-relay.service evermore-settingsd@%i.servi
 Type=simple
 # The owner identity is used only to verify signed approval events. Agent
 # requests are identified from their verified Nostr event pubkey.
-ExecStart=%h/.cargo/bin/evermore-operationsd serve --owner-identity %i --service-identity %i-operations
+ExecStart=%h/.local/bin/evermore-operationsd serve --owner-identity %i --service-identity %i-operations
 EnvironmentFile=-%h/.config/evermore/calendar.env
 Restart=on-failure
 RestartSec=2

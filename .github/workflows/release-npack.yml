@@ -1,0 +1,127 @@
+name: Release npack packages
+
+# Manual on purpose: publishing signs real Nostr events under Evermore's
+# publisher identity (packaging/npack/publisher.json) and writes to real
+# relays. Nothing here runs on a tag push or any other automatic trigger
+# until there's a settled relay/trust story to automate against -- see
+# packaging/npack/README.md and PROJECT_IDEA.md's M5.3 note.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitHub release tag to upload .npk assets to and publish as the package version (e.g. v0.1.0 -> version 0.1.0); created if it doesn't exist"
+        required: true
+      packages:
+        description: "Space-separated package names (see packaging/npack/README.md's table); defaults to all of them"
+        required: false
+        default: "settingsd notifyd blossom-fs contextd indexd inferd operationsd sway-ai-bridge mcp panel"
+      relays:
+        description: "Space-separated relay URLs to publish the release events to"
+        required: false
+        default: "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"
+      dry_run:
+        description: "Build and pack every package without uploading or publishing anything"
+        type: boolean
+        required: false
+        default: false
+
+# One release-npack run against a given tag at a time: concurrent runs
+# would both try to create the same GitHub release and upload assets to
+# it, racing gh release create/upload for no benefit.
+concurrency:
+  group: release-npack-${{ inputs.tag }}
+
+# gh release create/upload needs contents: write explicitly -- the
+# default GITHUB_TOKEN permissions for a workflow_dispatch run are not
+# guaranteed to include it.
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.plan.outputs.packages }}
+    steps:
+      - name: Turn the space-separated package list into a JSON array
+        id: plan
+        run: |
+          json=$(printf '%s\n' ${{ inputs.packages }} | jq -R . | jq -sc .)
+          echo "packages=$json" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release if it doesn't already exist
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "${{ inputs.tag }}" --repo "${{ github.repository }}" \
+              --title "${{ inputs.tag }}" --generate-notes
+
+  publish:
+    needs: [plan]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install panel's GUI build dependencies (eframe/egui needs these headers to compile, even headless)
+        if: ${{ matrix.package == 'panel' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libegl1-mesa-dev libfontconfig-dev
+
+      - name: Install npack 0.8.1 (its own .npk, hash-verified, no system-wide install)
+        run: |
+          curl -fsSL -o npack.npk \
+            https://github.com/imattau/npack/releases/download/v0.8.1/npack-0.8.1-linux-x86_64.npk
+          echo "05025f56a684c5350023b5e12c9b4e3cf6a472fa5a265d3563f26b8bd97d338d  npack.npk" | sha256sum -c -
+          mkdir -p npack-extracted
+          zstd -d -c npack.npk | tar -x -C npack-extracted bin/npack
+          chmod +x npack-extracted/bin/npack
+          echo "$PWD/npack-extracted/bin" >> "$GITHUB_PATH"
+
+      - name: Read the publisher identity
+        id: publisher
+        run: echo "hex=$(jq -r .hex packaging/npack/publisher.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build, pack, and publish ${{ matrix.package }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVERMORE_NPACK_SECRET_KEY: ${{ secrets.EVERMORE_NPACK_SECRET_KEY }}
+        run: |
+          relay_args=()
+          for relay in ${{ inputs.relays }}; do
+            relay_args+=(--relay "$relay")
+          done
+          secret_args=()
+          if [ -n "$EVERMORE_NPACK_SECRET_KEY" ]; then
+            secret_args=(--secret-key "$EVERMORE_NPACK_SECRET_KEY")
+          elif [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "EVERMORE_NPACK_SECRET_KEY is not set -- add it as a repository secret before a non-dry-run publish" >&2
+            exit 1
+          fi
+          dry_run_args=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            dry_run_args=(--dry-run)
+          fi
+          packaging/npack/build-and-publish.sh "${{ matrix.package }}" \
+            --publisher "${{ steps.publisher.outputs.hex }}" \
+            --tag "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            "${relay_args[@]}" "${secret_args[@]}" "${dry_run_args[@]}"
+
+      - name: Upload the dry-run output, if any
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: npack-dry-run-${{ matrix.package }}
+          path: "*.dry-run/*"
+          if-no-files-found: warn

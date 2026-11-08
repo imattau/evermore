@@ -6,13 +6,14 @@
 # at that asset via --artifact-url -- no Blossom server needed.
 #
 # --artifact-url is a feature this repo added to npack
-# (https://github.com/imattau/npack/pull/33); until it's merged, point
-# NPACK_BIN at a `cargo build --release -p npack` from that branch.
+# (https://github.com/imattau/npack/pull/33, merged, released in
+# v0.8.0): requires npack >= 0.8.0 on PATH, or NPACK_BIN pointed at one.
 #
 # Usage:
 #   packaging/npack/build-and-publish.sh <package> \
 #     --publisher <npub-or-hex> --tag v0.1.0 \
-#     [--relay wss://relay.example ...] [--repo imattau/evermore] [--dry-run]
+#     [--relay wss://relay.example ...] [--repo imattau/evermore] \
+#     [--secret-key <nsec-or-hex>] [--dry-run]
 #
 # <package> is one of: settingsd, notifyd, blossom-fs, contextd, indexd,
 # inferd, operationsd, sway-ai-bridge, mcp, panel. (Not greeter -- see
@@ -20,9 +21,11 @@
 # never npack packages at all.)
 #
 # Prerequisites: `npack` on PATH, `gh` authenticated against --repo, and
-# a registered publisher key (`npack register`) matching --publisher.
-# --dry-run builds and packs but skips the GitHub upload and npack
-# publish, so you can inspect the .npk and its manifest first.
+# either a registered publisher key (`npack register`, for interactive
+# use) matching --publisher, or --secret-key passed explicitly (for CI,
+# where nothing persists a registration between runs). --dry-run builds
+# and packs but skips the GitHub upload and npack publish, so you can
+# inspect the .npk and its manifest first.
 set -euo pipefail
 
 PACKAGE="${1:?usage: $0 PACKAGE --publisher KEY --tag vX.Y.Z [options]}"
@@ -32,6 +35,7 @@ PUBLISHER=""
 TAG=""
 REPO="imattau/evermore"
 RELAYS=()
+SECRET_KEY=""
 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
     --tag) TAG="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --relay) RELAYS+=("$2"); shift 2 ;;
+    --secret-key) SECRET_KEY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -50,6 +55,15 @@ VERSION="${TAG#v}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NPACK="${NPACK_BIN:-npack}"
 BIN_NAME="evermore-$PACKAGE"
+
+NPACK_VERSION="$("$NPACK" --version 2>/dev/null | awk '{print $2}')"
+NPACK_MAJOR="${NPACK_VERSION%%.*}"
+NPACK_MINOR="${NPACK_VERSION#*.}"
+NPACK_MINOR="${NPACK_MINOR%%.*}"
+if [ "${NPACK_MAJOR:-0}" -eq 0 ] && [ "${NPACK_MINOR:-0}" -lt 8 ]; then
+  echo "npack $NPACK_VERSION is too old -- --artifact-url needs >= 0.8.0 (set NPACK_BIN to point at a newer build)" >&2
+  exit 1
+fi
 
 # name, dependency names (space-separated, empty for none), systemd unit
 # filename under packaging/systemd/ (empty for none -- mcp and panel
@@ -128,5 +142,10 @@ for relay in "${RELAYS[@]}"; do
   RELAY_ARGS+=(--relay "$relay")
 done
 
+SECRET_ARGS=()
+if [ -n "$SECRET_KEY" ]; then
+  SECRET_ARGS=(--secret-key "$SECRET_KEY")
+fi
+
 echo "publishing $PACKAGE $VERSION -> $ARTIFACT_URL..."
-"$NPACK" publish "$WORK/manifest.json" "${RELAY_ARGS[@]}" --artifact-url "$ARTIFACT_URL"
+"$NPACK" publish "$WORK/manifest.json" "${RELAY_ARGS[@]}" "${SECRET_ARGS[@]}" --artifact-url "$ARTIFACT_URL"

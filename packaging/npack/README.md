@@ -15,12 +15,12 @@ up or depend on one just to distribute its own packages, when this
 repo's own GitHub Releases are a perfectly good place to host a `.npk`
 built from a tagged release.
 
-`--artifact-url` (https://github.com/imattau/npack/pull/33) is a
-feature this project added to `npack` for exactly this: it points the
-signed artifact event at any already-hosted URL instead of requiring a
-Blossom upload. Until that PR merges, build `npack` from
-`feat/artifact-url-storage` on that branch yourself and point
-`NPACK_BIN` at it.
+`--artifact-url` (https://github.com/imattau/npack/pull/33, merged,
+released in v0.8.0) is a feature this project added to `npack` for
+exactly this: it points the signed artifact event at any already-hosted
+URL instead of requiring a Blossom upload. `build-and-publish.sh`
+refuses to run against an older `npack`; point `NPACK_BIN` at a newer
+build if the one on `PATH` predates it.
 
 ## What's packaged
 
@@ -45,6 +45,8 @@ first install. `evermore-greeter` is exec'd by `greetd` as the
 `greeter` system user before any regular user's `$HOME` exists, so a
 per-user npack install can't place it where `greetd` looks; it isn't
 packaged here either, for the same reason.
+`qrencode` is a required base-image dependency of `evermore-greeter` because
+the first-user wizard uses it to render NIP-46 pairing URIs as QR codes.
 
 ## The publisher identity
 
@@ -85,6 +87,38 @@ package built this way needs to `npack trust add <publisher>` once, and
 pass `--allow-capability service-manager` on `install`/`update` for any
 package with a systemd unit (npack gates `register-service` behind that
 capability on purpose -- it never enables or starts the unit itself).
+
+In CI (`.github/workflows/release-npack.yml`), nothing persists a
+registered key between runs, so the workflow passes `--secret-key`
+explicitly from the `EVERMORE_NPACK_SECRET_KEY` repository secret
+instead of relying on `npack register`.
+
+## Running it from GitHub Actions
+
+`.github/workflows/release-npack.yml` is `workflow_dispatch`-only --
+deliberately never triggered by a tag push or anything else automatic,
+since a run signs real events under Evermore's publisher identity and
+writes them to real relays, and there's no settled relay/trust story to
+automate against yet. Run it from the Actions tab (or `gh workflow run
+release-npack.yml -f tag=v0.1.0`), with:
+
+- `tag` (required): the GitHub release tag, e.g. `v0.1.0`; created if
+  it doesn't already exist.
+- `packages` (optional): which of the table above to build, space
+  separated; defaults to all of them.
+- `relays` (optional): where to publish the release events; defaults
+  to a few public relays.
+- `dry_run` (optional): build and pack every selected package without
+  uploading or publishing anything, and upload the result as a workflow
+  artifact per package for inspection instead.
+
+One-time setup: `gh secret set EVERMORE_NPACK_SECRET_KEY --repo
+imattau/evermore < packaging/npack/publisher.secret` (or paste just the
+`NSEC=`/`HEX=` value by hand) -- required before any non-dry-run run.
+The workflow fails fast with a clear message if it's missing. It
+downloads a specific, hash-pinned release of `npack` itself (currently
+v0.8.1) rather than "latest", so a future `npack` release never changes
+this workflow's behavior without that pin being bumped on purpose.
 
 ## Updating
 

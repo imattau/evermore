@@ -7,7 +7,6 @@ mod ai_session_client;
 mod launcher_ai;
 mod nostr_feed;
 mod nostr_feed_client;
-mod npack_client;
 mod operations_client;
 mod settings_client;
 mod signer_client;
@@ -134,7 +133,7 @@ fn main() -> eframe::Result {
                 app.tab = Tab::Notifications;
             }
             if open_packages {
-                app.tab = Tab::Packages;
+                spawn_npack_gui();
             }
             if command_palette {
                 app.tab = Tab::Ai;
@@ -426,7 +425,6 @@ enum Tab {
     Settings,
     Notifications,
     Ai,
-    Packages,
 }
 
 #[derive(Default)]
@@ -466,14 +464,6 @@ struct PanelApp {
     palette_query: String,
     proposal_status: Option<String>,
     proposal_error: Option<String>,
-    npack_identity: String,
-    npack_blossom_url: String,
-    npack_trust_input: String,
-    npack_installed: Vec<npack_client::InstalledPackage>,
-    npack_trusted: Vec<String>,
-    npack_available: Vec<npack_client::AvailablePackage>,
-    npack_error: Option<String>,
-    npack_loaded: bool,
     ai_index_scopes: Vec<evermore_common::ai_index::Scope>,
     ai_index_loaded: bool,
     ai_index_path: String,
@@ -1076,30 +1066,6 @@ impl PanelApp {
         }
     }
 
-    fn refresh_npack(&mut self) {
-        self.npack_loaded = true;
-        self.npack_error = None;
-
-        match npack_client::installed() {
-            Ok(installed) => self.npack_installed = installed,
-            Err(e) => self.npack_error = Some(e),
-        }
-
-        if self.npack_identity.trim().is_empty() {
-            self.npack_trusted.clear();
-            self.npack_available.clear();
-            return;
-        }
-        match npack_client::trusted(&self.npack_identity) {
-            Ok(trusted) => self.npack_trusted = trusted,
-            Err(e) => self.npack_error = Some(e),
-        }
-        match npack_client::available(&self.npack_identity) {
-            Ok(available) => self.npack_available = available,
-            Err(e) => self.npack_error = Some(e),
-        }
-    }
-
     fn refresh_ai_index(&mut self) {
         self.ai_index_loaded = true;
         match ai_index_client::list_scopes() {
@@ -1494,11 +1460,17 @@ impl eframe::App for PanelApp {
                         (Tab::Settings, "settings", ICON_SETTINGS, "Settings"),
                         (Tab::Notifications, "bell", ICON_BELL, "Notifications"),
                         (Tab::Ai, "sparkles", ICON_SPARKLES, "AI"),
-                        (Tab::Packages, "package", ICON_PACKAGE, "Packages"),
                     ] {
                         if nav_item(ui, self.tab == tab, icon_id, icon, label) {
                             self.tab = tab;
                         }
+                    }
+                    // Not a tab: package management is npack-gui's job (a
+                    // separate eframe app exercising npackd's full
+                    // JSON-RPC API), so this launches it rather than
+                    // switching to in-panel content.
+                    if nav_item(ui, false, "package", ICON_PACKAGE, "Packages") {
+                        spawn_npack_gui();
                     }
                 });
         }
@@ -2416,143 +2388,20 @@ impl eframe::App for PanelApp {
                 }
                 });
             }
-            Tab::Packages => {
-                if !self.npack_loaded {
-                    self.refresh_npack();
-                }
-                ui.heading("Packages");
-                ui.weak("Software from publishers you trust.");
-                ui.add_space(12.0);
-
-                if let Some(err) = self.npack_error.clone() {
-                    open_section(ui, |ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 120, 110),
-                            "Couldn't load packages.",
-                        );
-                        ui.weak(&err);
-                    });
-                    ui.add_space(12.0);
-                }
-
-                open_section(ui, |ui| {
-                    section_heading(ui, "Available");
-                    if self.npack_available.is_empty() {
-                        ui.weak("Nothing available yet — add a trusted source below.");
-                    }
-                    for pkg in self.npack_available.clone() {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&pkg.name).strong());
-                                ui.weak(format!("v{}", pkg.version.as_deref().unwrap_or("?")));
-                            });
-                            ui.label(&pkg.description);
-                            advanced_details(ui, &pkg.id, |ui| {
-                                ui.weak(format!(
-                                    "{}  ·  by {}",
-                                    pkg.id,
-                                    short_pubkey(&pkg.publisher_pubkey)
-                                ));
-                            });
-                            if ui.button("Install").clicked() {
-                                match npack_client::install(
-                                    &self.npack_identity,
-                                    &self.npack_blossom_url,
-                                    &pkg.id,
-                                ) {
-                                    Ok(()) => self.refresh_npack(),
-                                    Err(e) => self.npack_error = Some(e),
-                                }
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                });
-
-                ui.add_space(12.0);
-                open_section(ui, |ui| {
-                    section_heading(ui, "Installed");
-                    if self.npack_installed.is_empty() {
-                        ui.weak("Nothing installed yet.");
-                    }
-                    for pkg in self.npack_installed.clone() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{} v{}", pkg.name, pkg.version));
-                            if ui.small_button("Remove").clicked() {
-                                match npack_client::remove(&pkg.id) {
-                                    Ok(()) => self.refresh_npack(),
-                                    Err(e) => self.npack_error = Some(e),
-                                }
-                            }
-                        });
-                        ui.add_space(4.0);
-                    }
-                });
-
-                ui.add_space(12.0);
-                open_section(ui, |ui| {
-                    section_heading(ui, "Sources");
-                    ui.horizontal(|ui| {
-                        ui.label("Identity");
-                        if ui.text_edit_singleline(&mut self.npack_identity).changed() {
-                            self.npack_loaded = false;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Blossom URL");
-                        ui.text_edit_singleline(&mut self.npack_blossom_url);
-                    });
-                    if ui.button("Refresh").clicked() {
-                        self.refresh_npack();
-                    }
-                    ui.add_space(8.0);
-                    ui.collapsing("Trusted publishers", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut self.npack_trust_input);
-                            if ui.button("Trust").clicked()
-                                && !self.npack_identity.trim().is_empty()
-                            {
-                                match npack_client::trust(
-                                    &self.npack_identity,
-                                    self.npack_trust_input.trim(),
-                                ) {
-                                    Ok(()) => {
-                                        self.npack_trust_input.clear();
-                                        self.refresh_npack();
-                                    }
-                                    Err(e) => self.npack_error = Some(e),
-                                }
-                            }
-                        });
-                        for pubkey in self.npack_trusted.clone() {
-                            ui.horizontal(|ui| {
-                                ui.monospace(short_pubkey(&pubkey));
-                                if ui.small_button("Untrust").clicked() {
-                                    match npack_client::untrust(&self.npack_identity, &pubkey) {
-                                        Ok(()) => self.refresh_npack(),
-                                        Err(e) => self.npack_error = Some(e),
-                                    }
-                                }
-                            });
-                        }
-                    });
-                });
-            }
         }
             });
             });
     }
 }
 
-fn short_pubkey(pubkey_hex: &str) -> String {
-    if pubkey_hex.len() > 12 {
-        format!(
-            "{}…{}",
-            &pubkey_hex[..6],
-            &pubkey_hex[pubkey_hex.len() - 6..]
-        )
-    } else {
-        pubkey_hex.to_string()
+/// Launches npack-gui (a separate eframe app, not part of this crate) as
+/// Evermore's package manager UI, rather than reimplementing a Packages
+/// tab here against npackd's JSON-RPC socket -- same author's project,
+/// already does more than a panel tab would (search, rollback, history,
+/// icons), so improvements belong there, not in a parallel copy.
+fn spawn_npack_gui() {
+    if let Err(error) = std::process::Command::new("npack-gui").spawn() {
+        eprintln!("evermore-panel: couldn't start npack-gui: {error}");
     }
 }
 

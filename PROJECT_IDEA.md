@@ -421,12 +421,58 @@ implementation plan the way Phases 0-5 are.
     ad-hoc, unencrypted protocol tracing inside a crypto-handling module
     long-term.
 
-    The NIP-46 round-trip itself (connecting to a relay, encrypting a
-    signed request to the paired signer, matching the response) is
-    still entirely unbuilt — `C_Decrypt` does real, now-correct RSA-OAEP
-    today with no gate in front of it. That gate is the next concrete
-    step; the PKCS#11 plumbing it needs to sit inside is now proven
-    working end to end, not theoretical.
+    **The NIP-46 approval gate itself (built 2026-11-08):**
+    `C_Decrypt` now blocks on a live NIP-46 round-trip
+    (`nip46_gate.rs`) before any RSA-OAEP math runs, closing the gap
+    noted above. Two already-established identities are reused rather
+    than invented: the device-root key (`evermore-signer`'s
+    `device_identity.rs` state file, read directly since this module
+    runs inside `systemd-homework` with no signer daemon or session
+    keyring available) and a separate pairing record
+    (`pkcs11-nip46-pairing.json`: `relay` + `remote_signer_pubkey`) that
+    deliberately does *not* reuse `evermore-signer`'s per-identity
+    `backing::Backing::Remote` records, since this gates the device's
+    own unlock, not any one human identity's signing. The approval
+    itself rides on NIP-46's standard `get_public_key` (to learn who
+    will actually sign) followed by `sign_event` on a small,
+    human-readable, nonce-bound event describing the unlock attempt —
+    exactly the action a real signer app (Amber, nsec.app, ...) already
+    prompts its user to confirm, rather than an invented method. A
+    validly-signed response whose event id matches what was requested
+    (which alone proves pubkey/content/kind/tags all matched, since
+    `EventId` hashes all of them together) is the approval; a decline,
+    a mismatch, or a timeout all fail closed, as does having no pairing
+    configured at all — this path refuses by design until a remote
+    signer is actually paired, rather than silently falling back to
+    unauthenticated RSA math.
+
+    **Verified twice, not just unit-tested:** a self-contained Rust test
+    (its own throwaway, unfiltered relay plus a mock signer in a
+    separate thread, real NIP-44 encryption and real secp256k1
+    signing/verification, no shortcut into the module's internals)
+    proves the wire protocol end to end. Separately, against real
+    `systemd-homed` on the VM: with no pairing configured, both
+    `homectl create` (which calls `C_Decrypt` itself, to verify the
+    encrypted key round-trips before committing the account) and
+    `homectl activate` now fail closed, where they used to silently
+    succeed. With a pairing configured and a standalone mock-signer
+    process answering over a real (throwaway) relay, both succeeded —
+    `homectl activate` unlocked a real LUKS home only after the mock
+    signer's log showed it receiving and approving the exact nonce-bound
+    unlock request, three separate times across one create+activate
+    cycle. One deliberate exclusion from this: the already-running
+    local control-plane relay (`relay/main.go`, `ws://127.0.0.1:4869`)
+    was *not* reused for either test, nor is it a candidate for
+    production pairing — it's loopback-only and enforces a kind
+    allowlist that excludes 24133 (NIP-46) on purpose, since it's for
+    intra-device daemon traffic, not for talking to an external phone.
+    Production's `relay` field must always point at a real, externally
+    reachable relay the paired phone can also see.
+
+    Still open: the actual pairing *flow* (how a phone and a device
+    agree on a `pkcs11-nip46-pairing.json` in the first place) doesn't
+    exist yet — today it's written by hand. That belongs with the
+    greeter/enrollment work, not this module.
   - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
     a device/user with no paired phone, or no local-network path to a
     remote signer right now. Tap to unlock, fully offline, and the same

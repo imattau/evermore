@@ -12,14 +12,14 @@
 //! fetch random bytes via `C_GenerateRandom`; unlock logs in with the PIN
 //! and calls `C_DecryptInit`/`C_Decrypt` against the private key).
 //!
-//! **What this increment does *not* do yet:** gate `C_Decrypt` on a
-//! NIP-46 approval round-trip with a paired remote signer. See
-//! `functions::c_decrypt`'s doc comment for exactly where that belongs.
-//! Real RSA-OAEP math runs today; the actual security gate (does the
-//! phone approve?) does not exist yet. See PROJECT_IDEA.md's Phase 5.5.
+//! `C_Decrypt` now also gates on a live NIP-46 approval round-trip with
+//! a paired remote signer before any RSA-OAEP math runs -- see
+//! `nip46_gate`'s module doc for the protocol and `functions::c_decrypt`
+//! for where it's called. See PROJECT_IDEA.md's Phase 5.5.
 
 mod ffi;
 mod functions;
+mod nip46_gate;
 mod state;
 mod stubs;
 

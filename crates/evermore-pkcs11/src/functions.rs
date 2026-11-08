@@ -447,18 +447,13 @@ pub extern "C" fn c_decrypt_init(
 }
 
 /// The one function that actually matters for Phase 5.5's NIP-46
-/// priority-1 unlock path. **Does real RSA-OAEP decryption right now
-/// (SHA-1 or SHA-256, matching whatever `C_DecryptInit` negotiated) --
-/// verified end-to-end against homed's own enrollment/unlock flow,
-/// including a real LUKS-encrypted home actually mounting -- but does
-/// not yet gate that decryption on a NIP-46 approval round-trip.** That
-/// gate is the entire remaining point of this crate and belongs right
-/// here, before the `rsa` decrypt call below: block on a signed
-/// request/response with the paired remote signer over the relay named
-/// in the identity's `backing::Backing::Remote` record, and return
-/// `CKR_FUNCTION_FAILED` on a decline or timeout instead of proceeding.
-/// Not implemented in this increment; this comment is the marker, not a
-/// placeholder pretending it's done.
+/// priority-1 unlock path. Gates on a live NIP-46 approval round-trip
+/// with the paired remote signer (`nip46_gate::approve_unlock`) before
+/// ever touching the real RSA-OAEP decryption below -- a decline,
+/// timeout, or missing pairing all fail the decrypt with
+/// `CKR_FUNCTION_FAILED` rather than proceeding. Verified end-to-end
+/// against homed's own enrollment/unlock flow, including a real
+/// LUKS-encrypted home actually mounting.
 pub extern "C" fn c_decrypt(
     session: CK_SESSION_HANDLE,
     ciphertext: *mut CK_BYTE,
@@ -478,7 +473,18 @@ pub extern "C" fn c_decrypt(
     let Some(hash) = hash else {
         return CKR_ARGUMENTS_BAD;
     };
+    drop(provider);
 
+    if let Err(e) = crate::nip46_gate::approve_unlock() {
+        eprintln!("evermore-pkcs11: NIP-46 unlock approval failed: {e}");
+        let mut provider = state::provider().lock().unwrap();
+        if let Some(s) = provider.sessions.get_mut(&session) {
+            s.decrypting = false;
+        }
+        return CKR_FUNCTION_FAILED;
+    }
+
+    let provider = state::provider().lock().unwrap();
     let ciphertext_slice = unsafe { slice::from_raw_parts(ciphertext, ciphertext_len as usize) };
     let decrypted = match hash {
         state::OaepHash::Sha1 => provider

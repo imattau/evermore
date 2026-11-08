@@ -1,0 +1,26 @@
+[Desktop Entry]
+Type=Application
+Name=Evermore
+GenericName=System and AI tools
+Comment=Open Evermore settings, inbox, AI drawer, and local files
+Exec=evermore-panel
+Terminal=false
+Categories=Utility;
+Actions=Settings;Notifications;AI;Files;
+
+[Desktop Action Settings]
+Name=Settings
+Exec=evermore-panel --settings
+
+[Desktop Action Notifications]
+Name=Notifications
+Exec=evermore-panel --notifications
+
+[Desktop Action AI]
+Name=AI drawer
+Exec=evermore-panel --ai
+
+[Desktop Action Files]
+Name=Search selected files
+Exec=evermore-panel --file-search
+

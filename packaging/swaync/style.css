@@ -1,0 +1,104 @@
+/* Open graphite surfaces; notification rows use space and type hierarchy. */
+notificationwindow,
+blankwindow {
+  background: transparent;
+}
+
+.control-center {
+  color: #E6E9EF;
+  background: #14171D;
+  border: none;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.control-center-list,
+.control-center-list .notification {
+  background: transparent;
+  box-shadow: none;
+}
+
+.widget {
+  margin: 8px 16px;
+  padding: 8px 0;
+  color: #E6E9EF;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.widget-title > label {
+  color: #E6E9EF;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.widget-title > button,
+.widget-dnd switch {
+  border: none;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.widget-dnd label,
+.notification-row .summary,
+.notification-row .body,
+.notification-row .time {
+  color: #E6E9EF;
+}
+
+.notification-row,
+.notification-group {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.notification-row:focus,
+.notification-group:focus {
+  background: #222731;
+}
+
+.notification-row .notification-background {
+  padding: 6px 12px;
+}
+
+.notification-row .notification-background .notification {
+  padding: 0 0 8px;
+  color: #E6E9EF;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.notification-default-action,
+.notification-row .notification-action > button {
+  color: #E6E9EF;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.notification-default-action:hover,
+.notification-row .notification-action > button:hover,
+.widget-title > button:hover {
+  background: #222731;
+}
+
+.notification-row .notification-action > button {
+  color: #8BB7FF;
+}
+
+.floating-notifications {
+  background: transparent;
+}
+
+.floating-notifications .notification {
+  color: #E6E9EF;
+  background: #14171D;
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}

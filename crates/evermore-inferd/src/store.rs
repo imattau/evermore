@@ -64,6 +64,7 @@ impl InstalledModel {
                 .map(|adapter| adapter.file.clone()),
             capabilities: self.manifest.capabilities.clone(),
             operation_registry_version: self.manifest.operation_registry_version.clone(),
+            loaded: false,
         }
     }
 }

@@ -1,0 +1,25 @@
+[Unit]
+Description=Evermore local semantic index
+Documentation=https://github.com/imattau/evermore
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/evermore-indexd
+ExecStartPre=/usr/bin/chmod 0700 %h/.local/state/evermore-indexd
+Restart=on-failure
+RestartSec=3
+UMask=0077
+RuntimeDirectory=evermore
+RuntimeDirectoryMode=0700
+StateDirectory=evermore-indexd
+StateDirectoryMode=0700
+Environment=EVERMORE_INDEX_STATE_DIR=%h/.local/state/evermore-indexd
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

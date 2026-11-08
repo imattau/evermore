@@ -65,6 +65,15 @@ vm/
   connect.sh          <- SSH into the running VM (committed)
   sync-repo.sh         <- rsync the working tree into the VM, optionally run a command (committed)
   phase7-offline-inference.sh <- run a local model with egress blocked (committed)
+  phase8-semantic-search.sh <- validate selected-file semantic search with egress blocked (committed)
+  phase8-approval-deep-link.sh <- verify SwayNC approval notification through signed owner decision
+  phase8-ai-proposal.sh <- verify real-model proposal through signed owner approval
+  phase8-desktop-integration.sh <- run Send to AI and output-focus checks in disposable Sway
+  phase8-launcher-input.sh <- regression check for the current launcher and deterministic Fuzzel pickers
+  phase10-launcher-waybar.sh <- test Wofi app grid and Waybar in temporary input-enabled Sway
+  phase8-send-to-ai.sh      <- validate file-manager AI handoff and .no-ai refusal in Sway
+  phase8-ai-output-focus.sh <- verify the AI drawer closes when focused Sway output changes
+  phase8-ai-window-focus.sh <- verify the AI drawer survives same-output window focus
   screenshot.sh         <- grab a PNG of the VM's Sway session via grim+SSH (committed)
   destroy-vm.sh           <- gracefully stop the VM, optionally wipe the disk (committed)
   .gitignore           <- ignores everything under .local/
@@ -74,6 +83,64 @@ vm/
     seed/                  <- cloud-init user-data/meta-data/seed.iso
     run/                     <- qemu.pid, monitor.sock, console.log (serial console output)
 ```
+
+## Phase 8 launcher keyboard check
+
+The normal VM desktop uses a headless-only Sway backend, which has no input
+devices. The Phase 8 regression check starts a separate temporary Sway session with
+`headless,libinput` backends so wlroots attaches the VM's AT keyboard. It uses
+the installed `wtype` helper to verify Super+Space, printable application
+filtering, Enter launch, Escape dismissal, and dismissal after clicking outside
+the launcher on the same output. The temporary XDG config and
+compositor are removed when the check exits; the regular VM session is left
+running.
+
+```bash
+vm/sync-repo.sh "bash vm/phase8-launcher-input.sh"
+```
+
+Set `EVERMORE_PHASE8_SCREENSHOT=/tmp/phase8-filtered.png` in the VM command to
+preserve the filtered launcher screenshot for inspection. If the panel has been
+built in `target/debug`, the same check also types a no-match file query,
+verifies the semantic-result picker displays its row, and seeds the Wayland
+clipboard to verify the Super+Shift+V binding launches the AI drawer. Set
+`EVERMORE_PHASE8_SEMANTIC_SCREENSHOT=/tmp/phase8-semantic.png` to preserve the
+semantic picker screenshot. Set
+`EVERMORE_PHASE8_CLIPBOARD_SCREENSHOT=/tmp/phase8-clipboard.png` to keep a
+screenshot showing the captured prompt text.
+
+To exercise the warm-only AI suggestion alongside semantic file results, run
+`EVERMORE_PHASE8_AI_FALLBACK_TEST=1 bash vm/phase8-launcher-input.sh` inside
+the VM. This starts a fake inference socket that reports one already-loaded
+chat model, checks the separate suggestion row copies its response, and
+asserts the launcher sends `warm_only=true`. It tests launcher wiring and
+selection behavior without downloading or starting a model.
+Run `EVERMORE_PHASE8_AI_FALLBACK_CANCEL_TEST=1 bash
+vm/phase8-launcher-input.sh` to hold the fake model after its first token,
+press Escape in the result picker, and verify the launcher closes the inference
+socket. Both modes use a local fake socket and require no model download.
+
+Set `EVERMORE_PHASE8_WAYBAR_SCREENSHOT=/tmp/phase8-waybar.png` to verify that
+Sway started Waybar and capture its panel before the launcher opens. This is
+useful in the headless VM because the regular desktop session may not be
+running when checking the packaged configuration.
+
+## Phase 10 launcher and Waybar check
+
+Wofi is the Super+Space desktop-app launcher. This check uses a separate Sway
+session with libinput so it can send the hotkey, confirm the empty-query grid,
+type the first search characters, launch Foot, and verify Escape and
+outside-click dismissal. It also starts Waybar using the packaged configuration.
+The temporary session and XDG config are removed on exit; the normal VM desktop
+is left alone.
+
+```bash
+vm/sync-repo.sh "bash vm/phase10-launcher-waybar.sh"
+```
+
+Set `EVERMORE_PHASE10_GRID_SCREENSHOT=/tmp/phase10-grid.png` or
+`EVERMORE_PHASE10_WAYBAR_SCREENSHOT=/tmp/phase10-waybar.png` in the VM command
+to preserve screenshots for visual inspection.
 
 Nothing under `.local/` is committed — it's host-specific generated state
 (private key, multi-gigabyte disk images, a seed ISO, runtime sockets). Anyone
@@ -87,10 +154,11 @@ running `create-vm.sh`.
    vm/create-vm.sh
    ```
    This downloads the official Arch Linux cloud image (~550MB, once), builds a
-   cloud-init seed that creates a `builder` user with passwordless sudo and
-   installs `base-devel`, `git`, `rustup` (default toolchain set to stable),
-   `rsync`, `llama-cpp`, `bubblewrap`, `iproute2`, and the GUI build
-   dependencies egui/eframe need to compile
+  cloud-init seed that creates a `builder` user with passwordless sudo and
+  installs `base-devel`, `git`, `rustup` (default toolchain set to stable),
+  `rsync`, `llama-cpp`, `bubblewrap`, `iproute2`, the desktop
+  components (`waybar`, `wofi`, `fuzzel`, `swaync`, `wl-clipboard`, `wtype`), and the
+   GUI build dependencies egui/eframe need to compile
    (`wayland`, `wayland-protocols`, `libxkbcommon`, `mesa`, `fontconfig`) —
    boots QEMU directly, and polls until SSH answers. First boot takes roughly
    1-2 minutes while cloud-init provisions the user and runs package installs
@@ -161,6 +229,71 @@ firewall and running desktop network are not changed. Set
 `EVERMORE_P7_MODEL_DIR`, `EVERMORE_P7_MODEL`, `EVERMORE_P7_INFERD_BIN`, or
 `EVERMORE_LLAMA_SERVER_BIN` in the VM to select a different model store, default
 model, daemon binary, or `llama-server`.
+With a chat model selected, the script also reports cold and warm first-token
+latency and warm total-response time against the Phase 8 optional-launcher
+budgets (300 ms first token and 3 s completion). A cold miss with a warm hit
+means the launcher must wait until the model is already warm or suppress the
+AI suggestion.
+
+## Phase 8 semantic search check
+
+After building `evermore-inferd` and `evermore-indexd` and importing the signed
+BGE embedding package, run:
+
+```bash
+vm/sync-repo.sh "cargo build -p evermore-inferd -p evermore-indexd"
+vm/sync-repo.sh "bash vm/phase8-semantic-search.sh"
+```
+
+This starts both daemons in a temporary Bubblewrap network namespace, indexes
+one temporary allowlisted note, checks semantic retrieval and secret redaction,
+measures warm search latency, and confirms a `.no-ai` marker hides the scope.
+The model store and desktop configuration are copied or isolated; the host/VM
+network settings and user service files are not changed. The embedding model
+can be selected with `EVERMORE_P8_EMBED_MODEL` and the model store with
+`EVERMORE_P8_MODEL_DIR`.
+
+## Phase 8 Send to AI desktop action
+
+With the headless Sway session running, build the panel and index daemon and
+run:
+
+```bash
+vm/sync-repo.sh "cargo build -p evermore-panel -p evermore-indexd"
+vm/sync-repo.sh "bash vm/phase8-send-to-ai.sh"
+```
+
+The check validates both desktop entries, launches the AI drawer with
+temporary selected and `.no-ai` files, verifies the selected file is stored as
+an unsent one-turn session grant, and confirms the excluded file is not added
+to index scopes. It uses isolated XDG config/data/state directories and cleans
+up its temporary services and files on exit.
+
+Run the same integration checks without a live desktop using
+`vm/sync-repo.sh "bash vm/phase8-desktop-integration.sh"`. The harness creates
+a disposable headless Sway session, runs the Send to AI and focused-output
+checks, confirms the AI drawer remains open when another window on the same
+output receives focus, then removes its temporary session and files. The
+focused-output script also verifies that a drawer opened on the second output
+belongs to that output before confirming it closes when focus moves away.
+Set `EVERMORE_PHASE8_VERIFY_INTERNAL_DRAG=1` to also start a fresh AI session,
+drag the indexed file into its composer, and verify the saved one-turn grant.
+
+`phase8-approval-deep-link.sh` validates the approval toast's Review action
+through the explicit signed owner decision. `phase8-ai-proposal.sh` runs the
+local Qwen model and checks the AI proposal through submission, owner review,
+and the resulting settings change. Both create an explicit shared session
+keyring for their disposable test identities and remove their test state when
+finished.
+Set `EVERMORE_PHASE8_INBOX_TEST=1` when running
+`phase8-approval-deep-link.sh` to add an ordinary D-Bus notification, open the
+SwayNC control center, and verify the local event and pending approval appear
+once in the same inbox.
+
+Run `vm/sync-repo.sh "cargo build -p evermore-panel && bash vm/phase8-ai-output-focus.sh"`
+with the Sway session running to create a temporary headless output, open the
+AI drawer on the focused output, switch output focus, and confirm the drawer
+closes. The script removes its extra output and returns focus to the original.
 
 ## GPU training
 

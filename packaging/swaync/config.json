@@ -1,0 +1,34 @@
+{
+  "ignore-gtk-theme": true,
+  "positionX": "right",
+  "positionY": "top",
+  "layer": "overlay",
+  "control-center-layer": "top",
+  "layer-shell": true,
+  "control-center-margin-top": 36,
+  "control-center-width": 390,
+  "control-center-height": 660,
+  "notification-window-width": 360,
+  "timeout": 8,
+  "timeout-low": 5,
+  "timeout-critical": 0,
+  "fit-to-screen": true,
+  "relative-timestamps": true,
+  "notification-grouping": true,
+  "hide-on-action": true,
+  "text-empty": "You're all caught up",
+  "widgets": ["title", "dnd", "notifications"],
+  "widget-config": {
+    "title": {
+      "text": "Inbox",
+      "clear-all-button": true,
+      "button-text": "Clear all"
+    },
+    "dnd": {
+      "text": "Do not disturb"
+    },
+    "notifications": {
+      "vexpand": true
+    }
+  }
+}

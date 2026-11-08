@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PendingOperation {
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
     pub operation_id: String,
     pub actor_pubkey: String,
     pub operation: String,
@@ -41,6 +43,23 @@ pub struct OperationHistoryEntry {
     pub status_source: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentGrant {
+    pub agent_pubkey: String,
+    pub allowed_operations: Vec<String>,
+    pub expires_at: u64,
+    #[serde(default)]
+    pub grant_published: bool,
+    pub revoked: bool,
+}
+
+pub fn configured_owner_pubkey() -> Result<String, String> {
+    request(&Request::ConfiguredOwner)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "operation daemon returned an invalid owner public key".into())
+}
+
 pub fn fetch_catalog() -> Result<Vec<Definition>, String> {
     let socket_path = operations::runtime_socket_path();
     let mut stream = UnixStream::connect(&socket_path)
@@ -56,6 +75,15 @@ pub fn fetch_catalog() -> Result<Vec<Definition>, String> {
     match response {
         Response::Ok { data } => serde_json::from_value(data).map_err(|e| e.to_string()),
         Response::Err { message } => Err(message),
+    }
+}
+
+pub fn fetch_grants() -> Result<Vec<AgentGrant>, String> {
+    match request(&Request::ListGrants)? {
+        Value::Array(grants) => {
+            serde_json::from_value(Value::Array(grants)).map_err(|e| e.to_string())
+        }
+        _ => Err("operation daemon returned an invalid grant list".into()),
     }
 }
 

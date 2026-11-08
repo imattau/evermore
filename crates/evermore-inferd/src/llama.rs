@@ -104,6 +104,11 @@ impl Pool {
         running.get(name).map(|entry| entry.endpoint.clone())
     }
 
+    pub fn endpoint_for_backend(&self, name: &str, backend: Backend) -> Option<Endpoint> {
+        let endpoint = self.endpoint(name)?;
+        backend_matches(endpoint.backend, backend).then_some(endpoint)
+    }
+
     pub fn unload(&self, name: &str) -> bool {
         let Ok(mut running) = self.running.lock() else {
             return false;
@@ -405,5 +410,11 @@ mod tests {
         assert!(backend_matches(Backend::Cpu, Backend::Cpu));
         assert!(!backend_matches(Backend::Auto, Backend::Gpu));
         assert!(!backend_matches(Backend::Cpu, Backend::Gpu));
+    }
+
+    #[test]
+    fn warm_endpoint_lookup_never_starts_a_model() {
+        let pool = Pool::new(PathBuf::from("/does/not/exist"), 1, Duration::from_millis(1));
+        assert!(pool.endpoint_for_backend("evermore/not-loaded", Backend::Auto).is_none());
     }
 }

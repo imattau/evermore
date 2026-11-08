@@ -7,8 +7,8 @@ mod signer_client;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use evermore_common::notifications::{NotificationRecord, Request, Response, Source};
 use nostr::prelude::*;
@@ -81,15 +81,17 @@ fn main() {
         });
     }
 
+    spawn_approval_monitor();
+
     if let Err(e) = serve(store) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
-fn notify(appname_suffix: &str, summary: &str, body: &str) {
+fn notify(appname: &str, summary: &str, body: &str) {
     if let Err(e) = Notification::new()
-        .appname(&format!("Evermore{appname_suffix}"))
+        .appname(appname)
         .summary(summary)
         .body(body)
         .show()
@@ -106,7 +108,7 @@ fn handle_local_event(event: Event, store: &NotificationStore) {
         body: event.content.clone(),
         received_at: now(),
     };
-    notify(" System", &record.title, &record.body);
+    notify("Evermore · System", &record.title, &record.body);
     store.push(record);
 }
 
@@ -119,7 +121,11 @@ fn handle_mention(event: Event, store: &NotificationStore) {
         body: event.content.clone(),
         received_at: now(),
     };
-    notify("", &record.title, &record.body);
+    notify(
+        &format!("Evermore · Mentions · {short_pubkey}"),
+        &record.title,
+        &record.body,
+    );
     store.push(record);
 }
 
@@ -139,8 +145,128 @@ fn handle_gift_wrap(event: Event, signer: &SignerClient, store: &NotificationSto
         body: rumor.content,
         received_at: now(),
     };
-    notify(" DM", &record.title, &record.body);
+    notify(
+        &format!("Evermore · Messages · {short_pubkey}"),
+        &record.title,
+        &record.body,
+    );
     store.push(record);
+}
+
+/// Surface pending owner approvals through the same desktop notification
+/// daemon. The toast is only a deep link: approval still requires the normal
+/// signer identity, grant check, and explicit decision in Evermore.
+fn spawn_approval_monitor() {
+    std::thread::spawn(|| {
+        let seen = Mutex::new(std::collections::HashSet::<String>::new());
+        loop {
+            match pending_operations() {
+                Ok(pending) => {
+                    let active: std::collections::HashSet<String> = pending
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("operation_id")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .collect();
+                    if let Ok(mut known) = seen.lock() {
+                        known.retain(|id| active.contains(id));
+                        for item in pending {
+                            let Some(operation_id) =
+                                item.get("operation_id").and_then(serde_json::Value::as_str)
+                            else {
+                                continue;
+                            };
+                            if !known.insert(operation_id.to_owned()) {
+                                continue;
+                            }
+                            let operation = item
+                                .get("operation")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("operation")
+                                .to_owned();
+                            let created_at = item
+                                .get("created_at")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or_default();
+                            let expires_at = item
+                                .get("expires_at")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or_default();
+                            if expires_at > 0 && expires_at <= now() {
+                                continue;
+                            }
+                            show_approval_notification(
+                                operation_id.to_owned(),
+                                operation,
+                                created_at,
+                                expires_at,
+                            );
+                        }
+                    }
+                }
+                Err(error) => eprintln!("evermore-notifyd: approval monitor: {error}"),
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+fn pending_operations() -> Result<Vec<serde_json::Value>, String> {
+    use evermore_common::operations::{Request, Response};
+    let path = evermore_common::operations::runtime_socket_path();
+    let mut stream = UnixStream::connect(&path)
+        .map_err(|error| format!("connecting to operations daemon: {error}"))?;
+    let request = serde_json::to_string(&Request::ListPendingOperations)
+        .map_err(|error| error.to_string())?;
+    writeln!(stream, "{request}").map_err(|error| error.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    let data = match serde_json::from_str::<Response>(&line).map_err(|e| e.to_string())? {
+        Response::Ok { data } => data,
+        Response::Err { message } => return Err(message),
+    };
+    serde_json::from_value(data).map_err(|error| error.to_string())
+}
+
+fn show_approval_notification(
+    operation_id: String,
+    operation: String,
+    created_at: u64,
+    expires_at: u64,
+) {
+    let mut body = format!("Owner review required · request {}", short(&operation_id));
+    if created_at > 0 && expires_at > 0 {
+        body.push_str(&format!(" · expires {expires_at}"));
+    }
+    match Notification::new()
+        .appname(&format!("Evermore · Approval · {operation}"))
+        .summary("Operation needs approval")
+        .body(&body)
+        .urgency(notify_rust::Urgency::Critical)
+        .action("review", "Review")
+        .show()
+    {
+        Ok(handle) => {
+            std::thread::spawn(move || {
+                handle.wait_for_action(move |action| {
+                    if action == "review" || action == "default" {
+                        if let Err(error) = std::process::Command::new("evermore-panel")
+                            .arg("--approval")
+                            .arg(operation_id)
+                            .spawn()
+                        {
+                            eprintln!("evermore-notifyd: couldn't open approval review: {error}");
+                        }
+                    }
+                });
+            });
+        }
+        Err(error) => eprintln!("evermore-notifyd: failed to show approval notification: {error}"),
+    }
 }
 
 fn short(pubkey_hex: &str) -> String {

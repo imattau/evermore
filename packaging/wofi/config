@@ -1,0 +1,21 @@
+# One-shot desktop application launcher. No runner, web, file, or network
+# providers are enabled; typing searches installed XDG desktop applications.
+show=drun
+prompt=Apps
+term=foot
+matching=fuzzy
+insensitive=true
+# Wofi's default order uses its usage cache, keeping commonly opened apps handy.
+sort_order=default
+columns=5
+width=900
+height=600
+location=center
+layer=overlay
+image_size=48
+allow_images=true
+no_actions=false
+key_expand=Tab
+close_on_focus_loss=true
+hide_scroll=true
+gtk_dark=true

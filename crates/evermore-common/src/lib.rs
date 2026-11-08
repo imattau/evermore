@@ -75,6 +75,7 @@ pub mod operations {
     #[serde(tag = "method", content = "params", rename_all = "snake_case")]
     pub enum Request {
         Catalog,
+        ConfiguredOwner,
         GetDefinition { name: String },
         Invoke { name: String, arguments: Value },
         SubmitSignedRequest { event: Value },
@@ -544,7 +545,7 @@ pub mod operations {
             ),
             definition(
                 "settings.set",
-                "Set a setting value. Requires owner approval before execution.",
+                "Set a setting value. For the desktop theme, use domain 'theme' and key 'mode' with value 'dark' or 'light'. Requires owner approval before execution.",
                 Access::Write,
                 "settings.write",
                 Approval::Required,
@@ -983,6 +984,10 @@ pub mod ai {
                 }
                 continue;
             }
+            if let Some(redacted) = redact_secret_assignments(line) {
+                output.push_str(&redacted);
+                continue;
+            }
             let mut start = 0;
             for (index, character) in line.char_indices() {
                 if character.is_whitespace() {
@@ -995,6 +1000,125 @@ pub mod ai {
             output.push_str(&redact_text_token(&line[start..], &mut redact_next));
         }
         output
+    }
+
+    fn redact_secret_assignments(line: &str) -> Option<String> {
+        const SECRET_LABELS: &[&str] = &[
+            "password",
+            "passwd",
+            "token",
+            "api_key",
+            "apikey",
+            "secret",
+            "credential",
+            "private_key",
+        ];
+
+        let mut output = String::new();
+        let mut cursor = 0;
+        let mut copied_until = 0;
+        let mut changed = false;
+
+        while cursor < line.len() {
+            let Some((offset, _)) = line[cursor..]
+                .char_indices()
+                .find(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
+            else {
+                break;
+            };
+            let key_start = cursor + offset;
+            let mut key_end = key_start;
+            while key_end < line.len() {
+                let ch = line[key_end..].chars().next().unwrap();
+                if !ch.is_ascii_alphanumeric() && ch != '_' {
+                    break;
+                }
+                key_end += ch.len_utf8();
+            }
+            let key = &line[key_start..key_end];
+            if !SECRET_LABELS
+                .iter()
+                .any(|label| key.eq_ignore_ascii_case(label))
+            {
+                cursor = key_end;
+                continue;
+            }
+
+            let mut separator = key_end;
+            while separator < line.len() {
+                let ch = line[separator..].chars().next().unwrap();
+                if !ch.is_whitespace() || ch == '\n' || ch == '\r' {
+                    break;
+                }
+                separator += ch.len_utf8();
+            }
+            while separator < line.len()
+                && matches!(line.as_bytes()[separator], b'"' | b'\'' | b'`')
+            {
+                separator += 1;
+            }
+            if separator >= line.len() || !matches!(line.as_bytes()[separator], b'=' | b':') {
+                cursor = key_end;
+                continue;
+            }
+            separator += 1;
+            while separator < line.len() {
+                let ch = line[separator..].chars().next().unwrap();
+                if !ch.is_whitespace() || ch == '\n' || ch == '\r' {
+                    break;
+                }
+                separator += ch.len_utf8();
+            }
+            if separator >= line.len() || line.as_bytes()[separator] == b'\n' {
+                cursor = key_end;
+                continue;
+            }
+
+            let first = line[separator..].chars().next().unwrap();
+            let (value_start, value_end) = if matches!(first, '"' | '\'') {
+                let value_start = separator + first.len_utf8();
+                let mut value_end = value_start;
+                let mut escaped = false;
+                let mut closing = None;
+                for (offset, ch) in line[value_start..].char_indices() {
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == first {
+                        closing = Some(value_start + offset);
+                        break;
+                    }
+                    value_end = value_start + offset + ch.len_utf8();
+                }
+                (value_start, closing.unwrap_or(value_end))
+            } else {
+                let value_start = separator;
+                let value_end = line[value_start..]
+                    .char_indices()
+                    .find(|(_, ch)| matches!(ch, ',' | ';' | '&' | '\n' | '\r'))
+                    .map(|(offset, _)| value_start + offset)
+                    .unwrap_or(line.len());
+                (value_start, value_end)
+            };
+
+            if value_end <= value_start {
+                cursor = key_end;
+                continue;
+            }
+            output.push_str(&line[copied_until..value_start]);
+            output.push_str("[REDACTED]");
+            cursor = value_end;
+            copied_until = value_end;
+            changed = true;
+        }
+
+        if changed {
+            output.push_str(&line[copied_until..]);
+            Some(output)
+        } else {
+            None
+        }
     }
 
     fn redact_text_token(token: &str, redact_next: &mut bool) -> String {
@@ -1010,8 +1134,11 @@ pub mod ai {
             "private_key",
         ];
         if *redact_next && !token.is_empty() {
-            *redact_next = false;
-            return "[REDACTED]".into();
+            if token.chars().any(char::is_alphanumeric) {
+                *redact_next = false;
+                return "[REDACTED]".into();
+            }
+            return token.to_string();
         }
         let trimmed = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
         let normalized = trimmed.to_ascii_lowercase();
@@ -1292,6 +1419,10 @@ pub mod ai {
         pub capabilities: Vec<String>,
         #[serde(default)]
         pub operation_registry_version: Option<String>,
+        /// True only when this model is already warm in the local process
+        /// pool. Reading this state must never load a model.
+        #[serde(default)]
+        pub loaded: bool,
     }
 
     /// Runtime state of a LoRA adapter loaded by a model's `llama-server`.
@@ -1329,6 +1460,10 @@ pub mod ai {
             /// operation-proposal callers that need parseable JSON.
             #[serde(default)]
             grammar: Option<String>,
+        /// Refuse the request unless the selected model is already running.
+        /// Used by latency-bounded launcher suggestions.
+        #[serde(default)]
+        warm_only: bool,
         },
         Embed {
             request_id: String,
@@ -1477,6 +1612,22 @@ pub mod ai {
         }
 
         #[test]
+        fn redacts_spaced_and_quoted_secret_assignments() {
+            assert_eq!(
+                redact_text("password = p8-semantic-secret\n"),
+                "password = [REDACTED]\n"
+            );
+            assert_eq!(
+                redact_text("{\"api_key\": \"two word secret\", \"name\": \"safe\"}\n"),
+                "{\"api_key\": \"[REDACTED]\", \"name\": \"safe\"}\n"
+            );
+            assert_eq!(
+                redact_text("password: \"two word secret\"\n"),
+                "password: \"[REDACTED]\"\n"
+            );
+        }
+
+        #[test]
         fn store_roots_parse_priority_order() {
             let roots =
                 parse_model_store_roots("/system/models:/home/u/.local/share/evermore/models");
@@ -1498,10 +1649,14 @@ pub mod ai {
             .unwrap();
             match legacy {
                 Request::Chat {
-                    grammar, backend, ..
+                    grammar,
+                    backend,
+                    warm_only,
+                    ..
                 } => {
                     assert!(grammar.is_none());
                     assert_eq!(backend, Backend::Auto);
+                    assert!(!warm_only);
                 }
                 other => panic!("unexpected request: {other:?}"),
             }
@@ -1632,6 +1787,11 @@ pub mod ai_context {
         ListSources,
         Get {
             source: String,
+        },
+        /// Reads one exact path only when ai-indexd currently lists it as an
+        /// explicitly selected, regular, non-`no-ai` file scope.
+        GetIndexedFile {
+            path: String,
         },
         /// Internal compositor snapshot published by the Sway bridge. This
         /// updates observation cache only; it cannot execute compositor IPC.

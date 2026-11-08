@@ -1,0 +1,82 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 36,
+  "margin": "8 8 0",
+  "spacing": 8,
+  "modules-left": ["group/desktop-left"],
+  "modules-center": ["group/desktop-center"],
+  "modules-right": ["group/desktop-right"],
+  "group/desktop-left": {
+    "orientation": "horizontal",
+    "modules": ["sway/workspaces", "sway/mode"]
+  },
+  "group/desktop-center": {
+    "orientation": "horizontal",
+    "modules": ["sway/window"]
+  },
+  "group/desktop-right": {
+    "orientation": "horizontal",
+    "modules": ["network", "custom/notification", "pulseaudio", "battery", "clock", "tray"]
+  },
+  "sway/workspaces": {
+    "disable-scroll": true,
+    "all-outputs": true,
+    "format": "{name}",
+    "persistent-workspaces": {
+      "1": [],
+      "2": [],
+      "3": [],
+      "4": [],
+      "5": [],
+      "6": [],
+      "7": [],
+      "8": [],
+      "9": []
+    }
+  },
+  "sway/mode": {
+    "format": "{name}"
+  },
+  "sway/window": {
+    "max-length": 40,
+    "separate-outputs": true
+  },
+  "network": {
+    "format-wifi": "Wi-Fi {essid} · {signalStrength}%",
+    "format-ethernet": "Network {ipaddr}",
+    "format-disconnected": "Network offline",
+    "tooltip-format": "{ifname}: {ipaddr}/{cidr}"
+  },
+  "custom/notification": {
+    "format": "Inbox {0}",
+    "return-type": "json",
+    "exec-if": "which swaync-client",
+    "exec": "swaync-client -swb",
+    "on-click": "swaync-client -t -sw",
+    "on-click-right": "swaync-client -d -sw",
+    "escape": true
+  },
+  "pulseaudio": {
+    "format": "Audio {volume}%",
+    "format-muted": "Audio muted",
+    "scroll-step": 5
+  },
+  "battery": {
+    "states": {
+      "warning": 30,
+      "critical": 15
+    },
+    "format": "Battery {capacity}%",
+    "format-charging": "Charging {capacity}%",
+    "format-plugged": "Power",
+    "format-full": "Battery full"
+  },
+  "clock": {
+    "format": "{:%a %d %b  %H:%M}",
+    "tooltip-format": "{:%A, %d %B %Y}"
+  },
+  "tray": {
+    "spacing": 8
+  }
+}

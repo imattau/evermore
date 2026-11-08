@@ -165,6 +165,7 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
                 max_tokens,
                 temperature,
                 grammar,
+                warm_only,
             } => {
                 if let Err(error) = validate_chat(
                     &request_id,
@@ -186,6 +187,7 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
                         max_tokens,
                         temperature,
                         grammar.as_deref(),
+                        warm_only,
                     )
                     .map(|()| None);
                     (Some(request_id), result)
@@ -234,7 +236,11 @@ fn list_models(config: &Config) -> Result<Option<Event>, String> {
 fn models(config: &Config) -> Vec<ai::Model> {
     store::scan(&config.model_roots)
         .into_iter()
-        .map(|model| model.to_public_model())
+        .map(|model| {
+            let mut public = model.to_public_model();
+            public.loaded = config.pool.endpoint(&model.name()).is_some();
+            public
+        })
         .collect()
 }
 
@@ -499,6 +505,7 @@ fn chat(
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     grammar: Option<&str>,
+    warm_only: bool,
 ) -> Result<(), String> {
     let installed = store::find(&config.model_roots, model)?;
     if !installed.manifest.supports("chat") {
@@ -506,7 +513,14 @@ fn chat(
             "model '{model}' does not declare the chat capability; install a chat model package"
         ));
     }
-    let endpoint = config.pool.ensure(&installed, backend)?;
+    let endpoint = if warm_only {
+        config
+            .pool
+            .endpoint_for_backend(&installed.name(), backend)
+            .ok_or_else(|| format!("model '{}' is not already warm", installed.name()))?
+    } else {
+        config.pool.ensure(&installed, backend)?
+    };
 
     write_event(
         writer,

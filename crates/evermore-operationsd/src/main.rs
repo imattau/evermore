@@ -154,6 +154,7 @@ fn handle_connection(
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(Request::Catalog) => Response::ok(operations::catalog()),
+            Ok(Request::ConfiguredOwner) => Response::ok(store.owner_pubkey_hex()),
             Ok(Request::GetDefinition { name }) => match operations::find(&name) {
                 Some(definition) => Response::ok(definition),
                 None => Response::err(format!("unknown operation '{name}'")),
@@ -190,11 +191,13 @@ fn handle_connection(
             },
             Ok(Request::ListPendingOperations) => match store.all_records() {
                 Ok(records) => {
+                    let owner_pubkey = store.owner_pubkey_hex();
                     let pending: Vec<Value> = records
                         .into_iter()
                         .filter(|r| r.status == store::Status::Pending)
                         .map(|record| {
                             serde_json::json!({
+                                "owner_pubkey": owner_pubkey,
                                 "operation_id": record.operation_id,
                                 "actor_pubkey": record.actor_pubkey,
                                 "operation": record.operation,

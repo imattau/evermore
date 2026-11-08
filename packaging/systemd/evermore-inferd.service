@@ -11,6 +11,8 @@ Environment=EVERMORE_LLAMA_SERVER_BIN=/usr/bin/llama-server
 Environment=EVERMORE_INFER_MAX_MODELS=2
 Environment=EVERMORE_INFER_READY_TIMEOUT_SECS=120
 UMask=0077
+RuntimeDirectory=evermore
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 KillMode=control-group
 ProtectSystem=strict

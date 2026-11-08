@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Send to Evermore AI
+GenericName=Attach a local file to an AI session
+Comment=Attach a selected text file to a local Evermore AI session
+TryExec=evermore-panel
+Exec=evermore-panel --ai --file %f
+Terminal=false
+StartupNotify=true
+NoDisplay=true
+Categories=Utility;
+MimeType=text/plain;text/markdown;text/x-markdown;

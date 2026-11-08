@@ -101,6 +101,12 @@ packages:
   - mesa
   - fontconfig
   - sway
+  - waybar
+  - wofi
+  - fuzzel
+  - swaync
+  - wl-clipboard
+  - wtype
   - foot
   - seatd
   - grim

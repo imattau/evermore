@@ -176,6 +176,9 @@ fn scopes() -> Result<Vec<ai_index::Scope>, String> {
         if !meta.file_type().is_file() {
             continue;
         }
+        if has_no_ai_marker(&p) {
+            continue;
+        }
         let id = format!("{:x}-{:x}", meta.dev(), meta.ino());
         out.push(ai_index::Scope {
             id,
@@ -190,6 +193,9 @@ fn scopes() -> Result<Vec<ai_index::Scope>, String> {
 }
 
 fn index_file(scope_id: &str, path: &std::path::Path) -> Result<Vec<Chunk>, String> {
+    if has_no_ai_marker(path) {
+        return Err("this file is marked no-AI and cannot be embedded or searched".into());
+    }
     let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !meta.file_type().is_file() || meta.len() > MAX_FILE_BYTES {
         return Err("selected path must be a regular file no larger than 2 MiB".into());
@@ -220,6 +226,9 @@ fn index_file(scope_id: &str, path: &std::path::Path) -> Result<Vec<Chunk>, Stri
     if content.len() as u64 > MAX_FILE_BYTES {
         return Err("selected file grew beyond 2 MiB while being read".into());
     }
+    if has_no_ai_marker(path) {
+        return Err("this file became marked no-AI before embedding and was not submitted".into());
+    }
     let content = ai::redact_text(&content);
     let parts = chunks(&content);
     if parts.is_empty() {
@@ -242,6 +251,17 @@ fn index_file(scope_id: &str, path: &std::path::Path) -> Result<Vec<Chunk>, Stri
             vector,
         })
         .collect())
+}
+
+/// A sibling `<filename>.no-ai` marker is an owner-controlled deny rule. It
+/// also filters already indexed chunks from search results immediately.
+fn has_no_ai_marker(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return true;
+    };
+    let mut marker = name.to_os_string();
+    marker.push(".no-ai");
+    path.with_file_name(marker).exists()
 }
 
 fn chunks(text: &str) -> Vec<String> {
@@ -356,13 +376,17 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn index_path() -> Result<std::path::PathBuf, String> {
-    let root = std::env::var("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| {
-            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        })
-        .map_err(|e| e.to_string())?
-        .join("evermore");
+    let root = if let Some(root) = std::env::var_os("EVERMORE_INDEX_STATE_DIR") {
+        std::path::PathBuf::from(root)
+    } else {
+        std::env::var("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| {
+                std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+            })
+            .map_err(|e| e.to_string())?
+            .join("evermore")
+    };
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;

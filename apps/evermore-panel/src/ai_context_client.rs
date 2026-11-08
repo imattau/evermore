@@ -20,9 +20,14 @@ pub fn list_sources() -> Result<Vec<String>, String> {
 }
 
 pub fn get(source: &str) -> Result<serde_json::Value, String> {
-    match request(&Request::Get {
-        source: source.into(),
-    })? {
+    let payload = if let Some(path) = source.strip_prefix("file:") {
+        Request::GetIndexedFile { path: path.into() }
+    } else {
+        Request::Get {
+            source: source.into(),
+        }
+    };
+    match request(&payload)? {
         Event::Context { data, .. } => Ok(data),
         Event::Error { message } => Err(message),
         _ => Err("unexpected response from context service".into()),

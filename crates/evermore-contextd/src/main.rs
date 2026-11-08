@@ -1,4 +1,4 @@
-use evermore_common::{ai, ai_context, notifications, settings};
+use evermore_common::{ai, ai_context, ai_index, notifications, settings};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -87,6 +87,13 @@ fn execute(request: ai_context::Request) -> Result<ai_context::Event, String> {
             };
             Ok(ai_context::Event::Context { source, data })
         }
+        ai_context::Request::GetIndexedFile { path } => {
+            let data = indexed_file_context(&path)?;
+            Ok(ai_context::Event::Context {
+                source: format!("file:{path}"),
+                data,
+            })
+        }
         ai_context::Request::UpdateCompositor { data } => {
             let normalized = normalize_compositor(data)?;
             *COMPOSITOR_CACHE
@@ -98,6 +105,70 @@ fn execute(request: ai_context::Request) -> Result<ai_context::Event, String> {
             })
         }
     }
+}
+
+fn indexed_file_context(requested_path: &str) -> Result<Value, String> {
+    let event: ai_index::Event = request_socket(
+        ai_index::runtime_socket_path(),
+        &ai_index::Request::ListScopes,
+    )?;
+    let scopes = match event {
+        ai_index::Event::Scopes { scopes } => scopes,
+        ai_index::Event::Error { message } => return Err(message),
+        _ => return Err("unexpected response from local file index".into()),
+    };
+    let canonical = std::fs::canonicalize(requested_path)
+        .map_err(|error| format!("resolving selected file: {error}"))?;
+    let path = canonical.to_string_lossy().into_owned();
+    if requested_path != path || !scopes.iter().any(|scope| scope.path == path) {
+        return Err("file is not in the active local index allowlist or is marked no-AI".into());
+    }
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() > 2 * 1024 * 1024 {
+        return Err("selected file must be a regular file no larger than 2 MiB".into());
+    }
+    let extension = canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !["md", "txt", "rst", "org"].contains(&extension.as_str()) {
+        return Err("only selected md, txt, rst, and org files can be sent as context".into());
+    }
+    if has_no_ai_marker(&canonical) {
+        return Err("file is marked no-AI".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000); // O_NOFOLLOW
+    }
+    let file = options
+        .open(&canonical)
+        .map_err(|error| error.to_string())?;
+    let mut content = String::new();
+    use std::io::Read;
+    file.take(2 * 1024 * 1024 + 1)
+        .read_to_string(&mut content)
+        .map_err(|error| format!("reading selected file as UTF-8: {error}"))?;
+    if content.len() > 2 * 1024 * 1024 || has_no_ai_marker(&canonical) {
+        return Err("file size or no-AI policy changed before context capture".into());
+    }
+    Ok(redact_value(serde_json::json!({
+        "path": ai::redact_text(&path),
+        "content": ai::redact_text(&content),
+    })))
+}
+
+fn has_no_ai_marker(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return true;
+    };
+    let mut marker = name.to_os_string();
+    marker.push(".no-ai");
+    path.with_file_name(marker).exists()
 }
 
 fn allowed_sources() -> Result<Vec<String>, String> {
@@ -317,12 +388,41 @@ fn find_focused(node: &Value, parent_workspace: Option<String>) -> (Option<Value
 }
 
 fn redact_value(value: Value) -> Value {
+    redact_value_at(value, None)
+}
+
+fn redact_value_at(value: Value, key: Option<&str>) -> Value {
+    const SECRET_KEY_PARTS: &[&str] = &[
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "private_key",
+        "nsec",
+        "api_key",
+    ];
+    if key.is_some_and(|key| {
+        let key = key.to_ascii_lowercase();
+        SECRET_KEY_PARTS.iter().any(|part| key.contains(part))
+    }) {
+        return Value::String("[REDACTED]".into());
+    }
     match value {
         Value::String(text) => Value::String(ai::redact_text(&text)),
-        Value::Array(items) => Value::Array(items.into_iter().map(redact_value).collect()),
-        Value::Object(map) => {
-            Value::Object(map.into_iter().map(|(k, v)| (k, redact_value(v))).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| redact_value_at(item, None))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| {
+                    let redacted = redact_value_at(v, Some(&k));
+                    (k, redacted)
+                })
+                .collect(),
+        ),
         other => other,
     }
 }

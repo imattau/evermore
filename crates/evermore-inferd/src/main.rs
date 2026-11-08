@@ -1,5 +1,6 @@
 mod http;
 mod llama;
+mod npackd_client;
 mod store;
 
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -145,8 +146,8 @@ fn handle_connection(stream: UnixStream, config: &Config) -> Result<(), String> 
                 let result = unload_model(config, &model).map(Some);
                 (None, result)
             }
-            ai::Request::InstallNpackModel { package_id } => {
-                let result = install_npack_model(config, &package_id).map(Some);
+            ai::Request::InstallNpackModel { publisher, name } => {
+                let result = install_npack_model(config, &publisher, &name).map(Some);
                 (None, result)
             }
             ai::Request::Embed {
@@ -664,33 +665,61 @@ fn chat(
     .map_err(|error| error.to_string())
 }
 
-fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, String> {
-    if package_id.is_empty()
-        || package_id.len() > 128
-        || !package_id
+/// `publisher`/`name` are an installed npack package's own identity (see
+/// `packages.list_installed`) -- combined here only as this crate's own
+/// internal, filesystem-safe model-store identifier (`package_id`, the
+/// field `store::InstalledModel`/`ModelManifest` already had; the "." is
+/// one of `is_safe_component`'s allowed characters).
+fn model_package_id(publisher: &str, name: &str) -> String {
+    format!("{publisher}.{name}")
+}
+
+fn install_npack_model(config: &Config, publisher: &str, name: &str) -> Result<Event, String> {
+    if publisher.len() != 64
+        || !publisher
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("publisher must be a 64-character lowercase hexadecimal public key".into());
+    }
+    if name.is_empty()
+        || name.len() > 128
+        || !name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
     {
-        return Err("package_id contains characters unsafe for an install path".into());
+        return Err("name contains characters unsafe for an install path".into());
     }
-    let root = evermore_npack::install_root().join(package_id);
-    let current = std::fs::canonicalize(root.join("current"))
-        .map_err(|error| format!("package is not installed: {error}"))?;
-    let canonical_package = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
-    if !current.starts_with(&canonical_package) {
-        return Err("installed package current link escapes its package directory".into());
+    let installed =
+        npackd_client::find_installed(publisher, name)?.ok_or("package is not installed")?;
+
+    // The retained, npackd-verified archive is this crate's one source of
+    // truth for the package's declared AI-model metadata (npack's own
+    // `Manifest` type has no `ai_model` field and silently drops it, but
+    // the raw, signed bytes npack retains still carry it) -- re-hashing it
+    // here is defense-in-depth against the on-disk store being tampered
+    // with after npackd already verified and installed it, not a
+    // re-verification of npack's own trust decision.
+    let archive_path = npackd_client::npack_store_root()
+        .join("packages")
+        .join(publisher)
+        .join(name)
+        .join(&installed.version)
+        .join(&installed.artifact);
+    if verify_file_sha256(&archive_path, &installed.sha256)?
+        != installed.sha256.to_ascii_lowercase()
+    {
+        return Err("installed package archive no longer matches npackd's recorded hash".into());
     }
-    let manifest: evermore_npack::Manifest = serde_json::from_slice(
-        &std::fs::read(current.join("manifest.json")).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("invalid installed package manifest: {error}"))?;
-    if manifest.id != package_id {
-        return Err("installed manifest package id does not match requested id".into());
-    }
-    let payload = manifest
-        .ai_model
-        .clone()
-        .ok_or("installed package does not declare an AI model payload")?;
+    let manifest_value = read_embedded_manifest_value(&archive_path)?;
+    let ai_model_value = manifest_value
+        .get("ai_model")
+        .cloned()
+        .ok_or("installed package does not declare an ai_model payload")?;
+    let payload: ai::AiModelPayload = serde_json::from_value(ai_model_value)
+        .map_err(|error| format!("invalid ai_model payload: {error}"))?;
+
+    let prefix = npackd_client::npack_user_prefix();
     let base_relative = std::path::Path::new(&payload.gguf_file);
     if base_relative.as_os_str().is_empty()
         || base_relative
@@ -701,10 +730,10 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
     {
         return Err("model payload path or SHA-256 is malformed".into());
     }
-    let base_source = std::fs::canonicalize(current.join(base_relative))
+    let base_source = std::fs::canonicalize(prefix.join(base_relative))
         .map_err(|error| format!("model payload is missing: {error}"))?;
-    if !base_source.starts_with(&current) || !base_source.is_file() {
-        return Err("model payload resolves outside the installed package".into());
+    if !base_source.starts_with(&prefix) || !base_source.is_file() {
+        return Err("model payload resolves outside the install prefix".into());
     }
     let adapter_source = match (&payload.adapter_gguf_file, &payload.adapter_sha256) {
         (Some(file), Some(hash)) => {
@@ -718,56 +747,16 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
             {
                 return Err("adapter payload path or SHA-256 is malformed".into());
             }
-            let path = std::fs::canonicalize(current.join(relative))
+            let path = std::fs::canonicalize(prefix.join(relative))
                 .map_err(|error| format!("adapter payload is missing: {error}"))?;
-            if !path.starts_with(&current) || !path.is_file() {
-                return Err("adapter payload resolves outside the installed package".into());
+            if !path.starts_with(&prefix) || !path.is_file() {
+                return Err("adapter payload resolves outside the install prefix".into());
             }
             Some((path, hash.to_ascii_lowercase()))
         }
         (None, None) => None,
         _ => return Err("adapter payload must declare both a file and a SHA-256".into()),
     };
-    let release_bytes = std::fs::read(current.join("evermore-release-event.json"))
-        .map_err(|error| format!("signed release evidence is missing: {error}"))?;
-    let release: nostr::prelude::Event = serde_json::from_slice(&release_bytes)
-        .map_err(|error| format!("invalid signed release evidence: {error}"))?;
-    release
-        .verify()
-        .map_err(|error| format!("signed release verification failed: {error}"))?;
-    if release.kind.as_u16() != evermore_npack::KIND_RELEASE_ARTIFACT_SET
-        || !release.tags.iter().any(|tag| {
-            let values = tag.as_slice();
-            values.first().is_some_and(|name| name == "d")
-                && values.get(1).is_some_and(|value| value == package_id)
-        })
-        || !release.tags.iter().any(|tag| {
-            let values = tag.as_slice();
-            values.first().is_some_and(|name| name == "version")
-                && values
-                    .get(1)
-                    .is_some_and(|value| value == &manifest.version)
-        })
-    {
-        return Err("signed release does not bind this installed package version".into());
-    }
-    let archive_hash = release
-        .tags
-        .iter()
-        .find_map(|tag| {
-            let values = tag.as_slice();
-            (values.first().is_some_and(|name| name == "x"))
-                .then(|| values.get(1))
-                .flatten()
-        })
-        .ok_or("signed release has no archive hash")?;
-    let archive_path = current.join("package.npk");
-    if !archive_path.exists() {
-        return Err("installed archive is unavailable for release binding verification".into());
-    }
-    if verify_file_sha256(&archive_path, archive_hash)? != archive_hash.to_ascii_lowercase() {
-        return Err("installed package archive does not match signed release hash".into());
-    }
     if verify_file_sha256(&base_source, &payload.sha256)? != payload.sha256.to_ascii_lowercase() {
         return Err("GGUF payload hash does not match installed manifest".into());
     }
@@ -777,6 +766,7 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
         return Err("adapter GGUF hash does not match installed manifest".into());
     }
 
+    let package_id = model_package_id(publisher, name);
     let capabilities = if payload.capabilities.is_empty() {
         vec!["chat".to_string()]
     } else {
@@ -784,9 +774,9 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
     };
     let model_manifest = ModelManifest {
         manifest_version: ai::MODEL_MANIFEST_VERSION,
-        package_id: package_id.to_string(),
-        package_version: manifest.version.clone(),
-        description: manifest.name.clone(),
+        package_id: package_id.clone(),
+        package_version: installed.version.clone(),
+        description: name.to_string(),
         base: ModelArtifact {
             file: "base.gguf".into(),
             sha256: payload.sha256.to_ascii_lowercase(),
@@ -805,7 +795,7 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
         capabilities,
         operation_registry_version: payload.operation_registry_version.clone(),
         training: payload.training.clone(),
-        publisher: Some(release.pubkey.to_hex()),
+        publisher: Some(publisher.to_string()),
     };
     model_manifest.validate()?;
 
@@ -813,8 +803,8 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
         .map_err(|error| format!("cannot create model store: {error}"))?;
     let directory_name = format!(
         "{}-{}",
-        safe_dir_name(package_id),
-        safe_dir_name(&manifest.version)
+        safe_dir_name(&package_id),
+        safe_dir_name(&installed.version)
     );
     let destination = config.import_root.join(&directory_name);
     let staging = config.import_root.join(format!(
@@ -858,15 +848,43 @@ fn install_npack_model(config: &Config, package_id: &str) -> Result<Event, Strin
         return Err(error);
     }
 
-    let installed = store::InstalledModel {
+    let installed_model = store::InstalledModel {
         manifest: model_manifest,
         base_path: destination.join("base.gguf"),
         adapter_path: adapter_source.map(|_| destination.join("adapter.gguf")),
     };
     Ok(Event::ModelInstalled {
-        package_id: package_id.to_string(),
-        model: installed.to_public_model(),
+        package_id,
+        model: installed_model.to_public_model(),
     })
+}
+
+/// Reads `.npack/manifest.json` out of a retained `.npk` archive --
+/// zstd-compressed tar, per npack's own format -- as a raw JSON `Value`
+/// rather than npack's typed `Manifest`, which doesn't know about the
+/// `ai_model` extension and would silently drop it.
+fn read_embedded_manifest_value(archive_path: &Path) -> Result<Value, String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|error| format!("reading {}: {error}", archive_path.display()))?;
+    let decoder =
+        zstd::stream::read::Decoder::new(file).map_err(|error| format!("opening .npk: {error}"))?;
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().map_err(|error| error.to_string())? {
+        let mut entry = entry.map_err(|error| error.to_string())?;
+        let path = entry
+            .path()
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        if path == Path::new(".npack/manifest.json") {
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            return serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parsing embedded .npack/manifest.json: {error}"));
+        }
+    }
+    Err(".npk does not contain .npack/manifest.json".into())
 }
 
 fn safe_dir_name(value: &str) -> String {

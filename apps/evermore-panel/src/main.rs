@@ -1733,7 +1733,7 @@ impl eframe::App for PanelApp {
                         ui.weak("The local inference service is unavailable. Start evermore-inferd, then refresh this view.");
                     } else {
                         ui.weak("No local models are installed yet.");
-                        ui.label("In Packages, install a trusted signed package that declares a GGUF model. Then propose ai.model.install_signed_npack with that package ID and approve it here. Return and refresh this list when import finishes.");
+                        ui.label("In Packages, install a trusted signed package that declares a GGUF model. Then propose ai.model.install_signed_npack with that package's publisher and name and approve it here. Return and refresh this list when import finishes.");
                     }
                 } else {
                     let mut preferences_changed = false;

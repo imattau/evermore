@@ -43,9 +43,13 @@ package's exact current version and hash immediately before proposing
 `packages.install_pinned`, which still binds to that exact version and
 SHA-256 and requires owner approval (a mismatch between what npack actually
 installs and the approved hash is removed again, not left installed).
-`ai.model.install_signed_npack` is unrelated to these: it stays on
-`evermore-npack`'s own id scheme, since it imports a GGUF/LoRA model from a
-package manifest field `npack` has no equivalent for.
+`ai.model.install_signed_npack` also takes `publisher`/`name`, same as the
+rest, but is otherwise unrelated: it imports a GGUF/LoRA model from an
+`ai_model` object a publisher embeds in their package's own
+`.npack/manifest.json` -- a field `npack`'s own manifest type has no
+equivalent for and silently drops, which is fine, since `evermore-inferd`
+reads it directly from the installed package's retained, verified archive
+rather than through `npack`'s typed manifest.
 
 ## Approval-gated writes
 

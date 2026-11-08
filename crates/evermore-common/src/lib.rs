@@ -501,17 +501,20 @@ pub mod operations {
             ),
             definition(
                 "ai.model.install_signed_npack",
-                "Import the declared GGUF (and optional LoRA adapter) from an already installed signed npack package into the local model store. Requires owner approval.",
+                "Import the declared GGUF (and optional LoRA adapter) from an already installed npack package (publisher/name, as reported by packages.list_installed) into the local model store. Requires owner approval.",
                 Access::Write,
                 "packages.write",
                 Approval::Required,
                 object_schema(
-                    json!({ "package_id": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" } }),
-                    &["package_id"],
+                    json!({
+                        "publisher": { "type": "string", "format": "hex_pubkey" },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 128, "format": "path_component" }
+                    }),
+                    &["publisher", "name"],
                 ),
                 object_schema(
-                    json!({ "package_id": { "type": "string" }, "model": { "type": "object" } }),
-                    &["package_id", "model"],
+                    json!({ "publisher": { "type": "string" }, "name": { "type": "string" }, "model": { "type": "object" } }),
+                    &["publisher", "name", "model"],
                 ),
                 Redaction::None,
             ),
@@ -1394,6 +1397,38 @@ pub mod ai {
         pub scale: f32,
     }
 
+    /// An `ai_model` object embedded in an npack package's own
+    /// `.npack/manifest.json`, by convention rather than a field npack's
+    /// own `Manifest` type knows about -- npack's deserializer (no
+    /// `deny_unknown_fields`) drops unrecognised keys when it parses that
+    /// file into its typed struct, but the raw bytes npack retains (and
+    /// publishes/verifies) still carry it, so this is read directly from
+    /// those bytes, never through npack's own manifest type.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AiModelPayload {
+        /// Base GGUF file, relative to the install prefix (e.g.
+        /// `share/evermore/models/<name>/base.gguf`), the same way any
+        /// other payload file in the package is.
+        pub gguf_file: String,
+        pub sha256: String,
+        #[serde(default)]
+        pub adapter_gguf_file: Option<String>,
+        #[serde(default)]
+        pub adapter_sha256: Option<String>,
+        #[serde(default)]
+        pub adapter_scale: Option<f32>,
+        #[serde(default)]
+        pub context_size: Option<u32>,
+        #[serde(default)]
+        pub quant: Option<String>,
+        #[serde(default)]
+        pub capabilities: Vec<String>,
+        #[serde(default)]
+        pub operation_registry_version: Option<String>,
+        #[serde(default)]
+        pub training: Option<TrainingProvenance>,
+    }
+
     /// Provenance for a trained LoRA adapter. Build tooling writes it into the
     /// package; the store records it so an adapter is never detached from the
     /// data, base model, and catalogue it was evaluated against.
@@ -1667,7 +1702,8 @@ pub mod ai {
             model: String,
         },
         InstallNpackModel {
-            package_id: String,
+            publisher: String,
+            name: String,
         },
     }
 

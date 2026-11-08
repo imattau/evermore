@@ -563,20 +563,26 @@ fn execute_approved(
             store.finish_execution(operation_id, result)
         }
         "ai.model.install_signed_npack" => {
+            let publisher = record.arguments["publisher"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
+            let name = record.arguments["name"]
+                .as_str()
+                .expect("validated string")
+                .to_string();
             let request = evermore_common::ai::Request::InstallNpackModel {
-                package_id: record.arguments["package_id"]
-                    .as_str()
-                    .expect("validated string")
-                    .to_string(),
+                publisher: publisher.clone(),
+                name: name.clone(),
             };
             match send_request::<_, evermore_common::ai::Event>(
                 &evermore_common::ai::runtime_infer_socket_path(),
                 &request,
             ) {
-                Ok(evermore_common::ai::Event::ModelInstalled { package_id, model }) => store
+                Ok(evermore_common::ai::Event::ModelInstalled { model, .. }) => store
                     .finish_execution(
                         operation_id,
-                        Ok(serde_json::json!({"package_id": package_id, "model": model})),
+                        Ok(serde_json::json!({"publisher": publisher, "name": name, "model": model})),
                     ),
                 Ok(evermore_common::ai::Event::Error { message, .. }) => {
                     store.finish_execution(operation_id, Err(message))

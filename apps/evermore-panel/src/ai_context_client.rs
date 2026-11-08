@@ -9,6 +9,7 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("notifications:local", "Local notification metadata"),
     ("notifications:mention", "Mention notification metadata"),
     ("packages:installed", "Installed package metadata"),
+    ("calendar:events", "Nostr calendar event details"),
 ];
 
 pub fn list_sources() -> Result<Vec<String>, String> {

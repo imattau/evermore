@@ -638,6 +638,10 @@ impl PanelApp {
                     "packages:installed" => {
                         Some("Explain the installed packages in this context.".into())
                     }
+                    "calendar:events" => Some(
+                        "Summarize my upcoming calendar events and highlight scheduling conflicts."
+                            .into(),
+                    ),
                     _ => None,
                 }
             };

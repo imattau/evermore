@@ -18,7 +18,7 @@ on:
       relays:
         description: "Space-separated relay URLs to publish the release events to"
         required: false
-        default: "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"
+        default: "wss://relay.ditto.pub wss://nostr-01.yakihonne.com wss://relay.primal.net"
       dry_run:
         description: "Build and pack every package without uploading or publishing anything"
         type: boolean

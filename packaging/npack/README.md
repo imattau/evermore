@@ -66,7 +66,9 @@ that automatically.
 packaging/npack/build-and-publish.sh settingsd \
   --publisher npub1g3vdg46zq7xpkmtdnta7l8u9684zd2p4e9wrp3xd7wv4xk7vq03svh653x \
   --tag v0.1.0 \
-  --relay wss://relay.example
+  --relay wss://relay.ditto.pub \
+  --relay wss://nostr-01.yakihonne.com \
+  --relay wss://relay.primal.net
 ```
 
 This builds the release binary, runs `npack init`/`pack` to produce a
@@ -107,7 +109,7 @@ release-npack.yml -f tag=v0.1.0`), with:
 - `packages` (optional): which of the table above to build, space
   separated; defaults to all of them.
 - `relays` (optional): where to publish the release events; defaults
-  to a few public relays.
+  to `relay.ditto.pub`, `nostr-01.yakihonne.com` and `relay.primal.net`.
 - `dry_run` (optional): build and pack every selected package without
   uploading or publishing anything, and upload the result as a workflow
   artifact per package for inspection instead.

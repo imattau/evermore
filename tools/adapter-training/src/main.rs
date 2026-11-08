@@ -151,7 +151,12 @@ fn generate(config: &Config) -> Result<Summary, String> {
         for (index, phrase) in phrasings.iter().enumerate() {
             records.push(Record {
                 id: format!("positive.{}.{}", definition.name, index),
-                split: if index == 1 { "eval" } else { "train" }.into(),
+                split: if matches!(index, 1 | 4) {
+                    "eval"
+                } else {
+                    "train"
+                }
+                .into(),
                 source: "catalogue".into(),
                 expected_kind: "proposal".into(),
                 expected_operation: Some(definition.name.clone()),
@@ -224,10 +229,17 @@ fn generate(config: &Config) -> Result<Summary, String> {
         .map_err(|error| format!("cannot create {}: {error}", config.output_dir.display()))?;
     write_jsonl(&config.output_dir.join("train.jsonl"), &train)?;
     write_jsonl(&config.output_dir.join("eval.jsonl"), &eval)?;
+    let mut dataset_bytes =
+        std::fs::read(config.output_dir.join("train.jsonl")).map_err(|error| error.to_string())?;
+    dataset_bytes.extend(
+        std::fs::read(config.output_dir.join("eval.jsonl")).map_err(|error| error.to_string())?,
+    );
+    let dataset_sha256 = sha256_hex(&dataset_bytes);
 
     let manifest = json!({
         "dataset_version": DATASET_VERSION,
         "catalogue_fingerprint": fingerprint,
+        "dataset_sha256": dataset_sha256,
         "counts": {
             "train": train.len(),
             "eval": eval.len(),
@@ -263,9 +275,17 @@ fn phrasings(definition: &operations::Definition) -> Vec<String> {
     let description = trim_period(&definition.description);
     let lower = lower_first(&description);
     vec![
-        description,
+        description.clone(),
         format!("Use the {} operation to {lower}", definition.name),
         format!("Please {lower} (operation {})", definition.name),
+        format!("I need to {lower}."),
+        format!(
+            "Propose the {} operation for this request: {lower}",
+            definition.name
+        ),
+        format!(
+            "Which catalogue operation should {lower}? Answer with its exact name and arguments."
+        ),
     ]
 }
 
@@ -587,6 +607,7 @@ mod tests {
             manifest["catalogue_fingerprint"].as_str().unwrap(),
             operations::catalog_fingerprint()
         );
+        assert_eq!(manifest["dataset_sha256"].as_str().unwrap().len(), 64);
 
         let mut seen = std::collections::HashSet::new();
         for split in ["train", "eval"] {

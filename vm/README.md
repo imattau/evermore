@@ -162,6 +162,16 @@ firewall and running desktop network are not changed. Set
 `EVERMORE_LLAMA_SERVER_BIN` in the VM to select a different model store, default
 model, daemon binary, or `llama-server`.
 
+## GPU training
+
+This VM has no GPU passthrough and is not meant to train the adapter. Train on
+a machine with a GPU using `packaging/training/` (optional Evermore training
+profile) or the host toolchain, then copy the resulting GGUF here for
+validation and packaging. Passthrough would require moving the host display to
+its integrated GPU and binding the discrete GPU to `vfio-pci`; that is a
+host-specific setup and is not configured by these scripts. The packaged
+adapter is portable, so the VM does not need the GPU that trained it.
+
 6. When done:
    ```bash
    vm/destroy-vm.sh         # gracefully powers off the VM, keeps the disk overlay

@@ -1,0 +1,8 @@
+base-devel
+cuda
+cudnn
+git
+llama-cpp
+python
+python-pip
+python-virtualenv

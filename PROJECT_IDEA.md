@@ -901,8 +901,9 @@ lifecycle — while the `ai-inferd` Unix-socket contract that the panel, drawer,
 `ai-indexd`, and MCP already depend on stays stable. This is
 integration/refactor work: no new authority, no new daemon, and no cloud path.
 
-**Implementation status (2026-11-08):** M7.10–M7.20 are implemented, with the
-first training run and ISO pre-install outstanding. `evermore-common` defines
+**Implementation status (2026-11-08):** M7.10–M7.20 are implemented. A first
+adapter was trained and hot-swapped locally; the signed adapter release and ISO
+pre-install remain. `evermore-common` defines
 the versioned `ModelManifest` (an adapter requires the operation-registry
 version and training provenance it was built against), store discovery via
 `EVERMORE_MODEL_DIRS` with user-root precedence, and protocol version 2.
@@ -937,7 +938,11 @@ current catalogue produces 78 train and 49 eval records covering every
 operation. M7.19 adds a versioned PEFT training config and script plus an
 evaluator that reports parse rate, tool selection, schema validity, refusal
 accuracy, unexpected operations, and base-vs-adapter and scale sweeps against a
-local `llama-server`. M7.20 records training provenance in the model package
+local `llama-server`. A first run on TinyLlama-1.1B (124 train / 72 eval, 12
+epochs, 372 steps) improved parse rate from 0.764 to 0.972, operation accuracy
+from 0.423 to 0.594, and schema validity from 0.099 to 0.609 at adapter scale
+1.0; refusal accuracy stayed at 0.0 and is the gate before publishing. M7.20
+records training provenance in the model package
 (base, dataset, config, eval-report, catalogue fingerprint, trace contribution)
 and adds `registry.lock` with `check-registry.sh`; the lock currently pins the
 catalogue fingerprint with no adapter published yet, and
@@ -947,12 +952,13 @@ VM validation with external networking disabled scanned two models, returned a
 384-dimension embedding, streamed normal and grammar-constrained chat, blocked
 external egress, restarted a killed child, unloaded it, and verified signed
 import into the store. Arch's package is `llama-cpp` (it provides
-`llama-server`), so packaging and the VM script target that name. Remaining
-work: run the training on a GPU host to produce the first adapter artifact, use
-it to exercise hot-swap end-to-end, and pre-install the default base + adapter
-pair once the Phase 5 ISO profile exists. Existing disposable model fixtures
-must be republished with `capabilities` (or `EVERMORE_EMBED_MODEL` set) before
-`ai-indexd` can select them.
+`llama-server`), so packaging and the VM script target that name. Remaining work: improve refusal
+accuracy with more refusal variants (and likely a larger base model), publish
+the first adapter as a signed npack package and fill `registry.lock`, and
+pre-install the default base + adapter pair once the Phase 5 ISO profile
+exists. Existing disposable model fixtures must be republished with
+`capabilities` (or `EVERMORE_EMBED_MODEL` set) before `ai-indexd` can select
+them.
 
 **Why not Ollama:** Ollama's value proposition is model management for end
 users; Evermore is a distribution that must own the inference path, pair base
@@ -1311,7 +1317,8 @@ initial baseline.
 Phase 7.5 is a refactor of the inference runtime, not a further Phase 7
 enhancement: it replaces the Ollama-compatible backend recorded above with a
 supervised `llama-server` while preserving the `ai-inferd` socket contract. Its
-runtime, packaging, and VM checks are implemented; end-to-end adapter hot-swap
-and the ISO default pair remain artifact-dependent (see its status note). It
-does not change Phase 7's acceptance evidence, but it must complete before
-Phase 8's AI drawer and semantic launcher fallback are considered complete.
+runtime, packaging, training, and VM checks are implemented, and adapter
+hot-swap has been exercised end to end; the signed adapter release and ISO
+default pair remain. It does not change Phase 7's acceptance evidence, but it
+must complete before Phase 8's AI drawer and semantic launcher fallback are
+considered complete.

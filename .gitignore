@@ -1,5 +1,6 @@
 /target/
 **/target/
+/.venv-training/
 
 # Go build output (relay/ is a separate Go module, not in the Cargo workspace)
 relay/evermore-relay-supervisor

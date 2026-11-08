@@ -1,0 +1,10 @@
+base-devel
+git
+hipblas
+hipcub
+llama-cpp
+python
+python-pip
+python-virtualenv
+rocm
+rocminfo

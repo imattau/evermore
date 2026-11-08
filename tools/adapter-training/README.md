@@ -106,7 +106,7 @@ requires:
 ```json
 "training": {
   "base_model_sha256": "<sha256>",
-  "dataset_sha256": "<sha256 of the reviewed dataset inputs>",
+  "dataset_sha256": "<from dataset-manifest.json>",
   "config_sha256": "<sha256 of config.example.json>",
   "eval_report_sha256": "<sha256 of the eval report>",
   "catalogue_fingerprint": "<from dataset-manifest.json>",
@@ -127,3 +127,30 @@ tools/adapter-training/check-registry.sh --require-adapter
 If the catalogue changes, the check fails with a rebuild-and-re-evaluate
 message until the lock and the signed adapter package are updated together.
 Use `--require-adapter` once the ISO is expected to ship the default pair.
+
+## Reference run (2026-11-08)
+
+Local validation artifact, not a published or signed release:
+
+- Base: `TinyLlama-1.1B-Chat-v1.0`, `Q4_K_M` GGUF.
+- Data: 124 train / 72 eval records, catalogue fingerprint
+  `68a86dfe…de1f`.
+- Config: rank 32, alpha 64, 12 epochs, lr 3e-4, batch 1 × accumulate 4.
+- Training: 372 steps, ~106 s on an RTX 5060 Ti; train loss 0.186, eval loss
+  0.319, eval token accuracy 0.954.
+- Evaluation (72 records, `proposal.gbnf`):
+
+  | Run | Parse | Operation | Schema | Refusal |
+  | :--- | ---: | ---: | ---: | ---: |
+  | base, scale 0 | 0.764 | 0.423 | 0.099 | 0.0 |
+  | adapter, scale 1.0 | 0.972 | 0.594 | 0.609 | 0.0 |
+
+- Hot-swap verified through `evermore-inferd`: declared adapter reported
+  unloaded, `SetAdapterScale` loaded it at 1.0, chat completed under a GBNF
+  grammar, rescale to 0.25 was reported by `llama-server`, and unload stopped
+  the child.
+
+Refusal accuracy is the weak point: the base and adapter both propose an
+operation for out-of-catalogue requests. Before publishing, add more refusal
+variants (and likely a larger base model) and require a non-zero refusal score
+in the evaluation gate.

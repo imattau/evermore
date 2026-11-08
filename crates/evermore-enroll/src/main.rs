@@ -21,7 +21,11 @@
 //! new code needed here.
 
 use nostr::prelude::*;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::PathBuf;
 use zbus::blocking::Connection;
+use zeroize::{Zeroize, Zeroizing};
 
 const DESTINATION: &str = "org.freedesktop.home1";
 const PATH: &str = "/org/freedesktop/home1";
@@ -31,12 +35,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("create") => create(&args[2..]),
+        Some("first-user") => first_user(),
         Some("activate") => activate(&args[2..]),
         Some("deactivate") => deactivate(&args[2..]),
         Some("remove") => remove(&args[2..]),
         _ => {
             eprintln!(
-                "usage: evermore-enroll <create|activate|deactivate|remove>\n\n\
+                "usage: evermore-enroll <first-user|create|activate|deactivate|remove>\n\n\
+                 first-user  interactively create the first local identity and encrypted home\n\
                  create --identity PATH [--secret-password PASSWORD] [--identity-pubkey NPUB|HEX]\n\
                               create a home area from a JSON identity record\n\
                               (same shape as `homectl -I`). If\n\
@@ -63,6 +69,243 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn first_user() -> Result<(), String> {
+    if !nix_is_root() {
+        return Err("first-user must run as root from the first-boot enrollment service".into());
+    }
+    if !list_homes()?.is_empty() {
+        return Err("homed already contains a user; first-user is only for an empty system".into());
+    }
+
+    println!("Evermore first-user setup\n");
+    let username = read_line("Account name (lowercase letters, numbers, _ or -): ")?;
+    validate_username(&username)?;
+    let display_name = read_line("Display name: ")?;
+    if display_name.trim().is_empty() || display_name.contains(['\n', '\r', '\0']) {
+        return Err("display name must not be empty or contain control characters".into());
+    }
+
+    let mode = read_line("Create a new identity or import an nsec? [new/import]: ")?;
+    let keys = match mode.as_str() {
+        "new" => Keys::generate(),
+        "import" => {
+            let secret = Zeroizing::new(ask_secret("Enter the existing nsec (input is hidden): ")?);
+            let parsed = SecretKey::parse(secret.trim()).map_err(|e| format!("invalid nsec: {e}"));
+            Keys::new(parsed?)
+        }
+        _ => return Err("choose 'new' or 'import'".into()),
+    };
+    let mut password = Zeroizing::new(ask_secret("Choose the encrypted home passphrase: ")?);
+    let mut confirmation = Zeroizing::new(ask_secret("Repeat the home passphrase: ")?);
+    if password.len() < 8 {
+        password.zeroize();
+        confirmation.zeroize();
+        return Err("use a passphrase of at least 8 characters".into());
+    }
+    if password != confirmation {
+        password.zeroize();
+        confirmation.zeroize();
+        return Err("passphrases do not match".into());
+    }
+    confirmation.zeroize();
+
+    let pubkey = keys.public_key();
+    let mut record = serde_json::json!({
+        "userName": &username,
+        "realName": &display_name,
+        "homeDirectory": format!("/home/{username}"),
+        "shell": "/bin/bash",
+        "storage": "luks",
+        "evermore": {
+            "npub": pubkey.to_bech32().map_err(|e| e.to_string())?,
+            "pubkeyHex": pubkey.to_hex(),
+        },
+        "secret": { "password": [password.as_str()] },
+    });
+    let mut record_json =
+        Zeroizing::new(serde_json::to_string(&record).map_err(|e| e.to_string())?);
+    let connection = system_connection()?;
+    connection
+        .call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(INTERFACE),
+            "CreateHome",
+            &(record_json.as_str(),),
+        )
+        .map_err(|e| format!("CreateHome failed: {e}"))?;
+    record_json.zeroize();
+    if let Some(secret) = record.get_mut("secret")
+        && let Some(passwords) = secret
+            .get_mut("password")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        passwords.clear();
+    }
+    activate_with_password(&username, &password)?;
+
+    let (uid, gid) = list_homes()?
+        .into_iter()
+        .find(|home| home.0 == username)
+        .map(|home| (home.1, home.3))
+        .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
+    install_identity_secret(&username, uid, gid, &keys)?;
+    write_greeter_profile(&pubkey.to_hex(), &display_name)?;
+
+    println!("\nCreated the encrypted home for {display_name} ({username}).");
+    println!(
+        "Identity public key: {}",
+        pubkey.to_bech32().unwrap_or_default()
+    );
+    if mode == "new" {
+        println!("\nRecovery nsec (record this somewhere safe; it will not be shown again):");
+        println!("{}", keys.secret_key().to_bech32().unwrap_or_default());
+        let _ = read_line("Press Enter after you have recorded the recovery key: ");
+    }
+    write_first_user_marker()?;
+    println!("First-user enrollment complete. Restart greetd to continue to login.");
+    Ok(())
+}
+
+fn nix_is_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success() && output.stdout.trim_ascii() == b"0")
+}
+
+fn validate_username(username: &str) -> Result<(), String> {
+    let bytes = username.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 31
+        || !(bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+    {
+        return Err("invalid account name; use 1–31 lowercase letters, digits, _ or -, starting with a letter or _".into());
+    }
+    Ok(())
+}
+
+fn read_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut value = String::new();
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(|e| e.to_string())?;
+    Ok(value.trim().to_string())
+}
+
+fn ask_secret(prompt: &str) -> Result<String, String> {
+    let output = std::process::Command::new("systemd-ask-password")
+        .arg("--echo=no")
+        .arg(prompt)
+        .output()
+        .map_err(|e| format!("starting systemd-ask-password: {e}"))?;
+    if !output.status.success() {
+        return Err("password prompt was cancelled".into());
+    }
+    String::from_utf8(output.stdout)
+        .map(|s| s.trim_end_matches(['\r', '\n']).to_string())
+        .map_err(|e| format!("password prompt returned invalid UTF-8: {e}"))
+}
+
+fn list_homes() -> Result<Vec<ListHomesEntry>, String> {
+    let connection = system_connection()?;
+    let reply = connection
+        .call_method(Some(DESTINATION), PATH, Some(INTERFACE), "ListHomes", &())
+        .map_err(|e| format!("ListHomes failed: {e}"))?;
+    reply.body().deserialize().map_err(|e| e.to_string())
+}
+
+type ListHomesEntry = (
+    String,
+    u32,
+    String,
+    u32,
+    String,
+    String,
+    String,
+    zbus::zvariant::OwnedObjectPath,
+);
+
+fn activate_with_password(username: &str, password: &str) -> Result<(), String> {
+    let secret_json = Zeroizing::new(
+        serde_json::to_string(&serde_json::json!({ "password": [password] }))
+            .map_err(|e| e.to_string())?,
+    );
+    let connection = system_connection()?;
+    connection
+        .call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(INTERFACE),
+            "ActivateHome",
+            &(username, secret_json.as_str()),
+        )
+        .map_err(|e| format!("ActivateHome failed: {e}"))?;
+    Ok(())
+}
+
+fn install_identity_secret(username: &str, uid: u32, gid: u32, keys: &Keys) -> Result<(), String> {
+    let home = PathBuf::from(format!("/home/{username}"));
+    let dir = home.join(".local/share/evermore");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    for path in [home.join(".local"), home.join(".local/share"), dir.clone()] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("setting permissions on {}: {e}", path.display()))?;
+        chown(&path, uid, gid)?;
+    }
+    let path = dir.join("identity.nsec");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("creating {}: {e}", path.display()))?;
+    let secret_hex = Zeroizing::new(keys.secret_key().to_secret_hex());
+    file.write_all(secret_hex.as_bytes())
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("syncing {}: {e}", path.display()))?;
+    drop(file);
+    chown(&path, uid, gid)
+}
+
+fn chown(path: &std::path::Path, uid: u32, gid: u32) -> Result<(), String> {
+    let status = std::process::Command::new("chown")
+        .args([format!("{uid}:{gid}"), "--".into()])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("starting chown: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("chown failed for {}", path.display()))
+    }
+}
+
+fn write_greeter_profile(pubkey_hex: &str, name: &str) -> Result<(), String> {
+    let dir = PathBuf::from("/var/lib/evermore-profiles").join(pubkey_hex);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let path = dir.join("profile.json");
+    let data = serde_json::to_vec(&serde_json::json!({ "name": name, "avatar": null }))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| format!("writing greeter profile: {e}"))
+}
+
+fn write_first_user_marker() -> Result<(), String> {
+    let dir = PathBuf::from("/var/lib/evermore");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("setting permissions on {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("first-user-enrolled"), b"enrolled\n")
+        .map_err(|e| format!("writing first-user marker: {e}"))
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {

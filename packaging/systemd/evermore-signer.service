@@ -7,6 +7,11 @@ Type=simple
 # Assumes `cargo install --path crates/evermore-signer` (or equivalent) has
 # put the binary on the user's cargo bin path. Revisit once packaging (npack
 # / an AUR package) exists -- Phase 5.
+# homed has unlocked and mounted this user's encrypted home before the user
+# manager starts. Import the Nostr key into this login session's kernel
+# keyring before serving requests; existing sessions without a home key keep
+# their current behavior and can still load one explicitly.
+ExecStartPre=%h/.cargo/bin/evermore-signer load-home-identity %u --if-present
 ExecStart=%h/.cargo/bin/evermore-signer serve
 Restart=on-failure
 RestartSec=2

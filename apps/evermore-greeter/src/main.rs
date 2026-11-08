@@ -296,6 +296,16 @@ impl GreeterApp {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             ui.heading("Welcome");
+            if user_names.is_empty() {
+                ui.add_space(24.0);
+                ui.heading("No identities are enrolled");
+                ui.add_space(8.0);
+                ui.label("First-user setup did not finish on this system.");
+                ui.add_space(12.0);
+                ui.weak(
+                    "Switch to a text terminal, resolve the enrollment error, then restart greetd.",
+                );
+            }
             if let Some(error) = &error {
                 ui.add_space(8.0);
                 ui.colored_label(Color32::from_rgb(220, 80, 80), error);

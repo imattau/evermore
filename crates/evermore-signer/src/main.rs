@@ -20,6 +20,7 @@ fn main() {
         Some("serve") => serve(&args[2..]),
         Some("keygen") => keygen(args.get(2)),
         Some("import") => import(args.get(2)),
+        Some("load-home-identity") => load_home_identity(args.get(2), &args[3..]),
         Some("list") => list(),
         Some("bootstrap-device") => bootstrap_device(&args[2..]),
         Some("pair") => pair(args.get(2), &args[3..]),
@@ -27,13 +28,16 @@ fn main() {
         Some("set-profile") => set_profile(args.get(2), &args[3..]),
         _ => {
             eprintln!(
-                "usage: evermore-signer <serve|keygen NAME|import NAME|list|bootstrap-device|pair|list-remote|set-profile>\n\n\
+                "usage: evermore-signer <serve|keygen NAME|import NAME|load-home-identity NAME|list|bootstrap-device|pair|list-remote|set-profile>\n\n\
                  serve [--device] [--state-dir PATH] [--socket PATH]\n\
                               run the signing daemon (foreground). --device\n\
                               loads the device-root identity instead of serving\n\
                               human identities, on its own socket.\n\
                  keygen NAME  generate a new identity, store it, print its npub\n\
                  import NAME  read an nsec (bech32 or hex) from stdin, store it\n\
+                 load-home-identity NAME [--path PATH] [--if-present]\n\
+                              read the mode-0600 encrypted-home key file into\n\
+                              this session's keyring before starting the daemon\n\
                  list         list local identities currently in the session keyring\n\
                  bootstrap-device [--state-dir PATH]\n\
                               generate the device-root identity if one doesn't\n\
@@ -219,6 +223,46 @@ fn import(name: Option<&String>) -> Result<(), String> {
     println!(
         "npub:      {}",
         keys.public_key().to_bech32().unwrap_or_default()
+    );
+    Ok(())
+}
+
+fn load_home_identity(name: Option<&String>, args: &[String]) -> Result<(), String> {
+    let name = require_name(name)?;
+    let path = flag_value(args, "--path")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".local/share/evermore/identity.nsec")
+        });
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && has_flag(args, "--if-present") =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(format!("reading {}: {error}", path.display())),
+    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("inspecting {}: {e}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{} must be a regular file with no group or other permissions",
+            path.display()
+        ));
+    }
+    let secret = std::str::from_utf8(&bytes)
+        .map_err(|e| format!("{} is not UTF-8: {e}", path.display()))?
+        .trim();
+    let keys =
+        Keys::new(SecretKey::parse(secret).map_err(|e| format!("invalid identity key: {e}"))?);
+    keyring_store::store(name, keys.secret_key().as_secret_bytes()).map_err(|e| e.to_string())?;
+    eprintln!(
+        "loaded home identity '{}' ({})",
+        name,
+        keys.public_key().to_hex()
     );
     Ok(())
 }

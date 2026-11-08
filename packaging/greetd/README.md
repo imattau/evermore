@@ -10,6 +10,7 @@ app showing each identity's `kind:0`-derived name/avatar, run inside
 - `greetd` (official Arch package)
 - `cage` (official Arch package) -- the kiosk compositor evermore-greeter runs inside
 - `evermore-greeter` itself on `$PATH` (built from `apps/evermore-greeter`)
+- `evermore-enroll` and `evermore-signer` in `/usr/bin` for first-user setup and login key loading
 
 On real hardware with a GPU, that's everything: `cage` picks up the
 real GPU driver automatically. **On a headless VM with no GPU (e.g.
@@ -34,3 +35,27 @@ sudo systemctl restart greetd
 
 Back up `/etc/greetd/config.toml` first if you want the stock config
 back -- this overwrites it, it doesn't merge.
+
+## First-user enrollment
+
+On an empty install, install `evermore-first-user.service` from
+`packaging/systemd/` and enable it before enabling greetd:
+
+```sh
+sudo install -m 0644 packaging/systemd/evermore-first-user.service /usr/lib/systemd/system/
+sudo systemctl enable evermore-first-user.service
+sudo systemctl enable greetd.service
+```
+
+The required dependency makes greetd wait for enrollment on first boot. The
+service runs `evermore-enroll first-user` as root on tty1. It supports a new
+local identity or importing an `nsec`, creates a LUKS-backed homed account,
+stores its key in the encrypted home with mode 0600, and writes the display
+name cache used by the greeter. For newly generated identities it displays
+the recovery `nsec` once; record it somewhere safe. The user's signer service
+loads the key into the login session keyring before it accepts requests.
+
+If enrollment fails, switch to another text terminal, inspect
+`journalctl -u evermore-first-user.service`, resolve the reported issue, and
+restart the unit. The greeter reports when no account was created. This is an
+early local-passphrase path; NIP-46 pairing is not supported by this setup.

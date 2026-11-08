@@ -7,3 +7,4 @@ edition.workspace = true
 nostr = "0.45.7"
 serde_json = "1"
 zbus = "5.19.0"
+zeroize = "1.8"

@@ -210,18 +210,56 @@ the CLI.
 **Goal:** Make signing in to an Evermore machine mean unlocking a Nostr
 identity, not just unlocking a Unix account that happens to run Evermore's
 daemons. Phase 6's M6.1 ("run it as a real daily session") is not
-meaningful until this exists — today there is no greeter, no enabled
-login session, and no connection between "which Unix user logged in" and
-"which `nsec` the signer should hold." This phase is **planning-stage**:
-the identity model, unlock mechanism, profile-data approach, and
-device-root identity below are now decided, and the core assumption
-behind the identity model (that `homed`'s record format can actually
-carry a pubkey as identity metadata) has been verified for real against
-a running VM, not just assumed — but no production code exists yet, the
-NIP-46 unlock path needs new PKCS#11-shim work that doesn't exist, and
-this phase's relationship to Phase 7's owner/service identities remains
-genuinely unresolved. Treat this whole phase as not yet a committed
-implementation plan the way Phases 0-5 are.
+meaningful until this exists: the login session must connect "which Unix
+user logged in" to "which `nsec` the signer should hold." **Implementation
+status (2026-11-09):** The identity model, unlock mechanism, profile-data
+approach, and device-root identity below are decided. The core assumption
+behind the
+identity model (that `homed`'s record format can carry a pubkey as
+identity metadata) has been verified against a running VM. Core
+components now exist: `evermore-enroll` can provision a prepared homed
+record, and `evermore-greeter` can list homed users, display cached
+profiles, relay PAM prompts, and start Sway. The end-to-end first-use
+path is still incomplete: a fresh system with no homed users has no
+enrollment UI, no chosen durable custody flow for a newly created local
+key, and no login hook that restores that key into the signer's session
+keyring. NIP-46 unlock still needs PKCS#11-shim work, and the
+relationship to Phase 7's owner/service identities remains unresolved.
+Treat this as partial implementation, not a usable identity-native
+login flow.
+
+**First-use implementation order:**
+
+1. **Choose and implement local key custody.** The current signer
+   `keygen` stores a secret only in the current kernel session keyring,
+   which does not survive logout or reboot. Define how an identity's
+   secret is protected at rest in the homed home and released after
+   authentication. Keep the signer as the only process that receives
+   the decrypted key. Do not ship enrollment that creates a homed user
+   without this matching unlock path.
+2. **Add first-boot enrollment.** Provide a dedicated setup screen when
+   no human homed records exist. It must support generating a new
+   identity or importing one, collect the chosen unlock factor, validate
+   the account name, and create the homed record. Run privileged
+   provisioning through a narrowly scoped system service or first-boot
+   service; do not grant the greeter account general root access.
+3. **Join authentication to signer startup.** After homed/PAM unlock
+   succeeds, load the selected identity into the per-user signer before
+   dependent user services start. On logout, stop the signer and clear
+   session key material. Wrong credentials, locked homes, and signer
+   startup failures must return to a recoverable greeter state with a
+   useful message.
+4. **Make the empty state and recovery path explicit.** The greeter now
+   reports when no identities are enrolled and that first-boot
+   enrollment is unavailable in the current build. Replace that message
+   with the enrollment flow when step 2 lands. Document recovery from a
+   failed enrollment without deleting unrelated home records.
+5. **Gate the flow on a fresh-system acceptance run.** Start with zero
+   homed users, create or import an identity, reboot, unlock it, confirm
+   Sway starts and the signer returns that identity's public key, then
+   log out and verify session key material is gone. Repeat with invalid
+   credentials and interrupted enrollment; neither case should leave an
+   unrecoverable partial account.
 
 **Decided:**
 

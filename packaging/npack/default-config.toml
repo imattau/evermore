@@ -1,0 +1,28 @@
+# npack's default trust seed for a fresh Evermore install.
+#
+# This is PROJECT_IDEA.md's deferred M5.3 ("default trust seed") --
+# deliberately not done until there was a real Evermore publisher key
+# to seed with. There is now (packaging/npack/publisher.json); this is
+# that seed.
+#
+# Install to the new user's $XDG_CONFIG_HOME/npack/config.toml (usually
+# ~/.config/npack/config.toml) before their first `npack` invocation --
+# e.g. by a first-user provisioning step (evermore-enroll) or baked
+# into packaging/archiso/'s skeleton home. This is what npack itself
+# would write after `npack trust add npub1g3vdg46zq7xpkmtdnta7l8u9684zd2p4e9wrp3xd7wv4xk7vq03svh653x --yes`
+# (publisher.json's npub) -- it's checked in so a fresh install trusts
+# Evermore's own packages without a human running that command first.
+#
+# Does NOT trust anyone else, and does not stop the owner from running
+# `npack trust add`/`npack trust remove` themselves afterwards -- this
+# is npack's own config file format, edited the same way either way.
+[trust]
+publishers = ["npub1g3vdg46zq7xpkmtdnta7l8u9684zd2p4e9wrp3xd7wv4xk7vq03svh653x"]
+
+# The relays Evermore's own release-npack.yml workflow publishes to
+# (packaging/npack/README.md). Not required for trust to take effect --
+# npack falls back to its own public relay defaults otherwise -- but a
+# fresh install is more likely to actually find Evermore's packages
+# with these than with npack's generic defaults.
+[network]
+relays = ["wss://relay.ditto.pub", "wss://nostr-01.yakihonne.com", "wss://relay.primal.net"]

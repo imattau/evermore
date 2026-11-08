@@ -48,6 +48,30 @@ packaged here either, for the same reason.
 `qrencode` is a required base-image dependency of `evermore-greeter` because
 the first-user wizard uses it to render NIP-46 pairing URIs as QR codes.
 
+## The default trust seed
+
+`default-config.toml` is PROJECT_IDEA.md's deferred M5.3: a fresh
+install trusts Evermore's own publisher and knows its release relays
+without a human running `npack trust add` first. Install it to the new
+user's `$XDG_CONFIG_HOME/npack/config.toml` during provisioning --
+there's no code wiring this up yet (the obvious hook is
+`evermore-enroll`'s first-user flow, or `packaging/archiso/`'s
+skeleton home once that exists), so for now, copy it by hand:
+
+```sh
+install -D -m 0644 packaging/npack/default-config.toml \
+  ~/.config/npack/config.toml
+```
+
+Verified against a real install with nothing else in the config: a
+clean `$XDG_CONFIG_HOME` seeded with only this file already shows
+Evermore's publisher as trusted (`npack trust list`), finds every
+published package without `--relay` (`npack search`), and installs one
+end to end (`npack install settingsd --user --allow-capability
+service-manager`) -- all with zero flags beyond those, since the seed
+supplies the publisher and relays that would otherwise need spelling
+out every time.
+
 ## The publisher identity
 
 `publisher.json` carries the public half (npub + hex) of Evermore's own

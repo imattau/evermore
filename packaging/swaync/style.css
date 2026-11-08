@@ -5,6 +5,7 @@ blankwindow {
 }
 
 .control-center {
+  font-family: Inter, "Noto Sans", sans-serif;
   color: #E6E9EF;
   background: #14171D;
   border: none;

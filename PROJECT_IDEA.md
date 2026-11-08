@@ -1373,7 +1373,7 @@ that the approval's Review action opens the Evermore owner UI and a signed
 owner decision completes the request. The status indicator remains in Waybar,
 with history in SwayNC.
 
-M8.4/M8.5 work is in progress in the existing panel: named sessions are stored
+M8.4/M8.5 are implemented in the existing panel: named sessions are stored
 locally with user-only permissions; source grants support one-turn or pinned
 scope and snapshot or per-turn refresh; the sanitized context payload and a
 conservative token estimate are inspectable, and over-budget requests fail
@@ -1419,8 +1419,8 @@ focused Sway output on open and closes when output focus changes. An expanded
 Arch VM check confirms it stays open when another window on the same output
 receives focus, opens on the currently focused second output, and closes when
 focus then moves back. This validates Sway placement and focus lifecycle across
-two headless outputs; final desktop usability review remains useful for sizing
-and visual placement.
+two headless outputs; final interactive usability review can still refine
+sizing and visual placement.
 The `ai-indexd`
 search path has been exercised end to
 end in a Bubblewrap network-isolated Arch VM using the installed signed BGE
@@ -1438,21 +1438,36 @@ chat-capable model already loaded. The request is warm-only, creates no saved
 chat, and is omitted when the model is cold or unavailable. An Arch VM test
 verified the deterministic semantic results remain selectable, the separate
 suggestion row copies its response, and the request carries `warm_only=true`.
-The AI fallback is currently limited to semantic file search. Once a warm
-model produces its first token within 300 ms, the visually distinct suggestion
-row appears while generation continues; Escape or selecting a file cancels the
-remaining stream, and selecting the suggestion waits only within the 3 s total
-budget. The launcher suppresses a cold or late suggestion. VM acceptance now
+The AI fallback is scoped to the file-search launcher flow and does not create
+a general chat surface. Once a warm model produces its first token within
+300 ms, the visually distinct suggestion row appears while generation
+continues; Escape or selecting a file cancels the remaining stream, and
+selecting the suggestion waits only within the 3 s total budget. The launcher
+suppresses a cold or late suggestion. VM acceptance now
 checks copy and Escape cancellation using a fake warm model, and a separate
 timed-socket test verifies a stalled model-list request returns within budget.
 A VM timing run with the installed
 TinyLlama chat model measured 1.65 s to first token on a cold request, 25.7 ms
 on the next warm request, and 703 ms total for the warm response. The warm
 request meets the 300 ms first-token and 3 s completion budgets; cold start does
-not. An eventual launcher fallback must therefore stay hidden until the local
-model is warm or omit the suggestion. This is backend timing evidence, not an
-interactive-launcher acceptance test. No custom general-purpose launcher or
-layer-shell toolkit has been added.
+not. The launcher consequently hides the suggestion unless a chat-capable
+model is already warm. The input-enabled VM verified that the suggestion is
+separate from deterministic results, copies its response, and cancels generation
+on Escape. No custom general-purpose launcher or layer-shell toolkit has been
+added.
+
+**Phase 8 acceptance (2026-11-08):** The current Arch VM run passed the panel's
+12 unit tests; Send-to-AI and `.no-ai` rejection; same-output and multi-output
+drawer focus; notification deep-link and signed owner approval; local-plus-
+approval inbox deduplication; scoped semantic search and its 50 ms target; Wofi
+empty-grid, first-key launch, Escape, and outside-click behavior; and both warm
+AI suggestion and Escape-cancellation modes. The real-model proposal check
+generated the canonical `settings.set` arguments, submitted a signed pending
+request, and changed the theme only after the configured owner approved it.
+These checks use an isolated headless Sway session in the input-enabled Arch
+VM and disposable identities/state. External Wayland file drops and final
+interactive sizing review remain documented enhancements; the required
+file-manager handoff and internal context drag paths are tested.
 
 The index, inference, context, and Sway bridge user units now create their
 shared 0700 runtime directory. The index service also has read-only home access,
@@ -2708,3 +2723,168 @@ revocation mid-task, and daemon restart covered; and a task-level screenshot in
 - Conversations and task state are new local data with their own retention
   question. They belong in the private user store, subject to the same export
   and deletion rules as the operation journal.
+
+## Addendum: Nostr Calendar Integration — Design Note
+
+**Status:** exploration and proposed architecture, not an implementation
+commitment. It adds no milestones or acceptance gates. The first implementation
+should prove one end-to-end read and one owner-approved calendar write before
+adding broad application compatibility.
+
+**Goal:** make NIP-52 calendars useful to the owner, local applications, and
+Evermore AI through one local service and the existing operation control
+plane. Calendar records should be ordinary NIP-52 events on explicitly chosen
+Nostr relays; the local control-plane relay remains a local coordination and
+audit bus, not an implicit public-calendar publisher.
+
+### Protocol mapping
+
+Reuse [NIP-52](https://github.com/nostr-protocol/nips/blob/master/52.md):
+
+| Kind | NIP-52 meaning | Evermore use |
+| :--- | :--- | :--- |
+| `31922` | Date-based calendar event | All-day and multi-day entries; `end` is exclusive |
+| `31923` | Time-based calendar event | Timed entries using Unix seconds, optional IANA TZID, and `D` day-index tags |
+| `31924` | Calendar addressable list | Named collections such as Personal, Work, and Shared; its repeated `a` tags point to event coordinates |
+| `31925` | RSVP addressable event | The attendee's `accepted`, `declined`, or `tentative` status, optionally with `fb=free/busy` |
+
+Treat NIP-52 as a draft interoperability format, and preserve unknown tags and
+content when an event is edited. Events may request inclusion in a calendar
+with an `a` tag; that request is not authorization. The calendar owner decides
+whether to include it. Do not imply that an RSVP grants access or settles
+attendance policy. NIP-52 intentionally has no recurrence model, and these
+event kinds are not private by default. Public NIP-52 events must never be
+presented as private merely because their `.content` is encrypted; the title,
+times, location, participants, and other tags remain visible. Recurring
+schedules and free/busy disclosure need explicit product decisions before
+support.
+
+### Private events: NIP-59 gift-wrapped NIP-52 rumors
+
+For private events, use NIP-59 gift wrapping rather than publishing the NIP-52
+event with only its description encrypted. Put the full NIP-52-shaped event
+(kind `31922` or `31923`, including sensitive tags and content) in an unsigned
+rumor, seal it as kind `13` with the owner's signer, then create a separate
+kind `1059` gift wrap for each invited recipient. The outer `p` tag lets relays
+route the wrap; the event fields and real author are revealed only after the
+recipient unwraps it. Private RSVP kind `31925` can use the same recipient
+delivery pattern. Use durable kind `1059` for calendar invitations and updates,
+not ephemeral kind `21059`.
+
+This is a NIP-59 application convention, not a standard NIP-52 private-event
+profile: NIP-59 defines wrapping any event but leaves concrete application
+protocols to other specifications. Therefore only Evermore-aware clients can
+discover, decrypt, replace, and display these wrapped calendar records; normal
+NIP-52 clients and public calendar indexes will not see them. The outer relay
+still learns each recipient pubkey, publication timing and volume, and relay
+connection metadata. NIP-59 reduces exposed event metadata; it does not provide
+anonymity.
+
+For a first version, recipients explicitly listed by the owner are the access
+list, with one wrap per recipient and a self-addressed wrap for the owner's
+other devices. Unwrap and verify the kind-13 seal before trusting the inner
+author or tags. Locally deduplicate and resolve revisions using the inner
+`kind:pubkey:d` coordinate and signed seal provenance; relay addressable-event
+replacement does not apply to the outer kind-1059 wraps. Private deletion,
+revocation of previously delivered copies, and participant changes require
+their own defined sync behavior: deletion cannot erase data a recipient has
+already retained. Until those rules and multi-client fixtures are specified,
+ship public NIP-52 events and private gift-wrapped events as explicitly
+separate visibility choices, and do not claim private-calendar interoperability
+with other Nostr clients.
+
+### Service and data flow
+
+Add a headless `evermore-calendard` only when implementation begins. It owns
+the normalized local calendar projection, validation, selected-relay sync,
+and NIP-52 event construction. It uses `evermore-signer` for signatures; it
+never receives or persists an `nsec`. Store the local projection and sync
+cursors in the user's private data directory so search, agenda views, and
+availability reads remain useful offline. Keep source event JSON/tags so
+round-trips do not erase fields the first version does not understand.
+
+Use these boundaries:
+
+1. Configured external relays carry public NIP-52 events and kind-1059 wraps
+   addressed to the owner or invited recipients. Network sync is explicit,
+   scoped to chosen calendars/relays, and reports partial/offline results.
+2. A per-user Unix socket exposes typed calendar reads and service commands to
+   the panel, local applications, and CLI. It returns normalized event data
+   plus source coordinates and freshness; clients do not each implement relay
+   queries or NIP-52 parsing. AI and MCP go through `evermore-operationsd`.
+3. `evermore-operationsd` remains the only AI/application path for actions
+   requiring authority. Add catalogue reads such as `calendar.list`,
+   `calendar.get`, and `calendar.find_availability`, plus approval-required
+   writes such as `calendar.create_event`, `calendar.update_event`,
+   `calendar.delete_event`, `calendar.respond_rsvp`, and
+   `calendar.include_event`. Define grant names and input/output schemas in
+   `evermore-common`; MCP then exposes the same definitions automatically.
+4. Writes become signed requests bound to canonical event fields and target
+   calendar coordinates and visibility. The owner approval is recorded in the
+   existing operation lifecycle; only after approval does calendard publish
+   the public NIP-52 event or construct the recipient gift wraps. Public
+   deletions use NIP-09 deletion events and require the same explicit review.
+   Private deletion and update delivery must follow the private-event sync
+   rules above. Retries are idempotent by operation ID and event coordinate.
+
+Do not mirror complete public NIP-52 records onto the local relay just to make
+them discoverable to local clients. The local relay can carry small
+Evermore-local sync/refresh or notification signals if needed, tagged and
+documented as local control events; it is not the source of truth for remote
+calendar state. Avoid inventing Evermore event kinds for events, calendars,
+or RSVPs.
+
+### AI and application use
+
+AI gets read access only through catalogue tools, with clear time-zone and
+freshness metadata. A first calendar recipe can answer “what is next?”, find a
+free slot across selected calendars, or summarize the day's agenda. Availability
+must consider accepted/tentative RSVP policy explicitly and must never infer
+that an unselected calendar is empty. Model context excludes participant
+details and event descriptions unless the user has selected that scope.
+
+For creation or edits, AI produces a preview with title, local date/time,
+time-zone, calendar, participants, visibility/publication destination, and
+exact operation. The review surface reuses Phase 7's amber-leading-rule
+proposal and clear approval footer. No hard-outlined card stack: use the
+Graphite open-row and soft-fill grouping language. Reject ambiguous time zones
+or missing dates rather than letting the model guess. Each mutation requires
+the normal owner approval; read grants do not imply write permission.
+
+The panel can provide an agenda screen and event detail/actions as a control
+surface, while a conversational “what's next?” lives in the existing AI
+drawer. Do not build a standalone calendar application. Begin application
+interoperability with an explicit `.ics` import/export path. Add a CalDAV or
+Evolution Data Server bridge only after a target application is selected and
+its sync, conflict, and credential model is validated; NIP-52 itself is not a
+drop-in CalDAV backend. Keep the local socket/API stable so future bridges do
+not change the AI and panel contracts.
+
+### Suggested delivery order
+
+1. Validate NIP-52 parsing/serialization and preservation against fixture
+events for all four kinds; handle date-only versus timestamp semantics,
+exclusive end dates, TZIDs, `D` tags, and address coordinates.
+2. Build a local read-only projection and panel agenda over imported fixtures;
+   add configured-relay read sync and offline/freshness states.
+3. Expose catalogue reads to the panel and MCP; test AI agenda and availability
+   with a deterministic fixture set, including overlapping events and DST
+   boundaries.
+4. Add public event creation and RSVP as separately granted, owner-approved
+   operations. Validate signed relay publication, retries, denial, and restart
+   recovery in the VM.
+5. Specify and fixture-test the private kind-1059 profile, including recipient
+   delivery, unwrap verification, updates, duplicate delivery, and explicit
+   visibility in the UI; then add its approved create/RSVP operations.
+6. Add public edit/delete and incoming calendar inclusion requests after
+   conflict handling, NIP-09 behavior, and destructive-review wording are
+   settled. Private deletion remains a separate supported behavior to define.
+7. Evaluate one real calendar application for `.ics` or a standards bridge;
+   implement only the adapter that proves useful.
+
+The NostrHost lesson applies directly: ship one complete, recoverable journey
+before accumulating integrations. First prove configured relay → local
+projection → AI read, then an approved write → signed NIP-52 publication →
+local refresh. Keep owner, AI actor, and service signer distinct throughout,
+and make network or relay failure visible without losing the locally cached
+agenda or replaying a write.

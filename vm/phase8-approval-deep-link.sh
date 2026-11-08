@@ -258,8 +258,8 @@ fi
 # The test owner is lexically first among the test identities, so the
 # approval view preselects that identity. Click its explicit Approve control.
 # The fixed 1280x720 headless output centers the 620x460 review window at
-# (330, 130); the Approve button is at (365, 440).
-swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set 365 440 >/dev/null
+# (330, 152); the Approve button is at (385, 472).
+swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set 385 472 >/dev/null
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor press button1 >/dev/null
 sleep 0.1
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor release button1 >/dev/null

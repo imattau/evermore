@@ -270,10 +270,11 @@ swaymsg -s "$SWAY_SOCKET" seat seat0 cursor press button1 >/dev/null
 sleep 0.1
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor release button1 >/dev/null
 wtype "Set desktop theme setting domain 'theme' key 'mode' to dark."
+sleep 0.25
 if [[ -n "${EVERMORE_PHASE8_BEFORE_SEND_SCREENSHOT:-}" ]]; then
     grim "$EVERMORE_PHASE8_BEFORE_SEND_SCREENSHOT"
 fi
-swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set "${EVERMORE_PHASE8_SEND_X:-132}" "${EVERMORE_PHASE8_SEND_Y:-506}" >/dev/null
+swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set "${EVERMORE_PHASE8_SEND_X:-65}" "${EVERMORE_PHASE8_SEND_Y:-358}" >/dev/null
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor press button1 >/dev/null
 sleep 0.1
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor release button1 >/dev/null
@@ -338,8 +339,8 @@ fi
 # grant for this operation. The assertion below verifies the submitted signer
 # is exactly the test agent; no unfiltered identity-picker navigation is used.
 sleep 0.2
-SUBMIT_X="${EVERMORE_PHASE8_SUBMIT_X:-95}"
-SUBMIT_Y="${EVERMORE_PHASE8_SUBMIT_Y:-460}"
+SUBMIT_X="${EVERMORE_PHASE8_SUBMIT_X:-130}"
+SUBMIT_Y="${EVERMORE_PHASE8_SUBMIT_Y:-506}"
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set "$SUBMIT_X" "$SUBMIT_Y" >/dev/null
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor press button1 >/dev/null
 sleep 0.1
@@ -412,7 +413,7 @@ if [[ -n "${EVERMORE_PHASE8_AI_REVIEW_SCREENSHOT:-}" ]]; then
     grim "$EVERMORE_PHASE8_AI_REVIEW_SCREENSHOT"
 fi
 # Same 1280x720 centered review layout validated by the Phase 8 deep-link test.
-swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set 365 440 >/dev/null
+swaymsg -s "$SWAY_SOCKET" seat seat0 cursor set 385 472 >/dev/null
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor press button1 >/dev/null
 sleep 0.1
 swaymsg -s "$SWAY_SOCKET" seat seat0 cursor release button1 >/dev/null

@@ -20,6 +20,7 @@
 //! goes through this same `create` command with a different JSON file, no
 //! new code needed here.
 
+use nostr::prelude::*;
 use zbus::blocking::Connection;
 
 const DESTINATION: &str = "org.freedesktop.home1";
@@ -36,12 +37,17 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: evermore-enroll <create|activate|deactivate|remove>\n\n\
-                 create --identity PATH [--secret-password PASSWORD]\n\
+                 create --identity PATH [--secret-password PASSWORD] [--identity-pubkey NPUB|HEX]\n\
                               create a home area from a JSON identity record\n\
                               (same shape as `homectl -I`). If\n\
                               --secret-password is given, merges it into the\n\
                               record's secret.password before sending, so\n\
                               homed never has to interactively ask for it.\n\
+                              If --identity-pubkey is given, merges an\n\
+                              \"evermore\":{{\"npub\":...,\"pubkeyHex\":...}}\n\
+                              block into the record (see PROJECT_IDEA.md's\n\
+                              Phase 5.5 -- \"the pubkey is the identity\"),\n\
+                              overwriting any existing \"evermore\" block.\n\
                  activate --username NAME --password PASSWORD\n\
                               unlock and mount an inactive home area\n\
                  deactivate --username NAME\n\
@@ -91,6 +97,21 @@ fn create(args: &[String]) -> Result<(), String> {
             .as_object_mut()
             .ok_or("'secret' field must be a JSON object")?
             .insert("password".to_string(), serde_json::json!([password]));
+    }
+
+    if let Some(pubkey_arg) = flag_value(args, "--identity-pubkey") {
+        let pubkey = PublicKey::parse(&pubkey_arg)
+            .map_err(|e| format!("invalid --identity-pubkey '{pubkey_arg}': {e}"))?;
+        record
+            .as_object_mut()
+            .ok_or("identity record must be a JSON object")?
+            .insert(
+                "evermore".to_string(),
+                serde_json::json!({
+                    "npub": pubkey.to_bech32().map_err(|e| e.to_string())?,
+                    "pubkeyHex": pubkey.to_hex(),
+                }),
+            );
     }
 
     let record_json = serde_json::to_string(&record).map_err(|e| e.to_string())?;

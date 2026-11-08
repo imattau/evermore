@@ -555,6 +555,40 @@ implementation plan the way Phases 0-5 are.
   for the password/FIDO2 paths — profile display is a later layer on
   top of a already-functional login, not a blocker for one.
 
+  **Verified end to end on the VM (2026-11-08):** `evermore-enroll create`
+  gained an `--identity-pubkey NPUB|HEX` flag that merges the
+  `"evermore":{"npub":...,"pubkeyHex":...}` block into the record being
+  created (parsed via `nostr`'s `PublicKey::parse`, which accepts either
+  form) — closing the gap between "the pubkey-is-identity model is
+  proven to round-trip through homed" (verified earlier, by hand, via
+  `homectl -I`) and "`evermore-enroll` actually sets it" (previously
+  the caller had to hand-author that block into the JSON file itself).
+
+  Then proved the real login path, not just `CreateHome`/`ActivateHome`
+  over D-Bus: provisioned an evermore-tagged account with a real
+  `privileged.hashedPassword` (homed refuses `CreateHome` outright with
+  "User record has no hashed passwords, refusing" if this is missing —
+  `--secret-password` alone only supplies the transient unlock secret,
+  not the persistent hash homed needs to accept the account at all),
+  then drove a real login through real `greetd` — speaking its IPC
+  protocol directly (`greetd-ipc(7)`: length-prefixed JSON over
+  `$GREETD_SOCK`) rather than through `agreety`/`tuigreet`'s UI, since
+  that protocol *is* what a stock frontend speaks and bypassing just the
+  terminal UI, not greetd or PAM, keeps the test meaningful while
+  staying scriptable. The journal shows `greetd`'s real PAM stack doing
+  the work: `pam_systemd_home(greetd:auth): Home for user evgreettest
+  successfully acquired`, then a real `pam_unix` session opened as that
+  user with the home actually mounted (`~/.identity`,
+  `~/.identity-blob/`, skeleton files all present). From *inside* that
+  live session, `homectl inspect`'s `.evermore.npub` and a fresh
+  `evermore-signer import` of the matching `nsec` (done in-session,
+  since the session keyring only exists for the life of the PAM
+  session) produced the identical pubkey — confirming the whole chain
+  (enroll → homed record → real greetd+PAM login → session keyring)
+  actually carries the same identity through, not just each piece in
+  isolation. Cleaned up afterward: greetd's config restored, test
+  account removed, no scratch files left on the VM.
+
 **Still open:**
 
 - **Relationship to Phase 7's owner/service-identity split.**

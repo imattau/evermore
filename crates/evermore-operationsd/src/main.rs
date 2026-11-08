@@ -1,3 +1,4 @@
+mod calendar;
 mod store;
 
 use std::io::{BufRead, BufReader, Write};
@@ -18,6 +19,10 @@ use tungstenite::stream::MaybeTlsStream;
 
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:4869";
 static OWNER_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn configured_relay_url() -> String {
+    std::env::var("EVERMORE_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string())
+}
 
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
@@ -82,9 +87,18 @@ fn serve() -> std::io::Result<()> {
     }
     let owner_pubkey_hex = owner_pubkey.to_hex();
     let store = Arc::new(OperationStore::open(owner_pubkey).map_err(std::io::Error::other)?);
-    let relay_url =
-        std::env::var("EVERMORE_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
+    let relay_url = configured_relay_url();
     reconcile_all(&store, &service_identity, &relay_url);
+    let calendar_owner = owner_pubkey;
+    let calendar_identity = owner_identity.clone();
+    std::thread::spawn(move || {
+        loop {
+            if let Err(error) = calendar::sync(&calendar_owner, &calendar_identity) {
+                eprintln!("evermore-operationsd: calendar relay sync failed: {error}");
+            }
+            std::thread::sleep(Duration::from_secs(300));
+        }
+    });
     {
         let store = Arc::clone(&store);
         let service_identity = service_identity.clone();
@@ -451,12 +465,16 @@ fn reconcile_record(
 }
 
 fn publish_event(relay_url: &str, event: &Value) -> Result<(), String> {
+    publish_event_to_relay(relay_url, event, "control relay")
+}
+
+fn publish_event_to_relay(relay_url: &str, event: &Value, relay_label: &str) -> Result<(), String> {
     let event_id = event
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| "signed event is missing id".to_string())?;
     let (mut socket, _) = tungstenite::connect(relay_url)
-        .map_err(|error| format!("couldn't connect to configured relay: {error}"))?;
+        .map_err(|error| format!("couldn't connect to {relay_label}: {error}"))?;
     if let MaybeTlsStream::Plain(tcp) = socket.get_ref() {
         tcp.set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| error.to_string())?;
@@ -464,7 +482,7 @@ fn publish_event(relay_url: &str, event: &Value) -> Result<(), String> {
     let message = serde_json::json!(["EVENT", event]).to_string();
     socket
         .send(Message::text(message))
-        .map_err(|error| format!("couldn't publish event to control relay: {error}"))?;
+        .map_err(|error| format!("couldn't publish event to {relay_label}: {error}"))?;
 
     loop {
         let message = socket
@@ -493,7 +511,7 @@ fn publish_event(relay_url: &str, event: &Value) -> Result<(), String> {
             return Ok(());
         }
         return Err(format!(
-            "control relay rejected event {event_id}: {message}"
+            "{relay_label} rejected event {event_id}: {message}"
         ));
     }
 }
@@ -504,6 +522,33 @@ fn execute_approved(
 ) -> Result<store::OperationRecord, String> {
     let record = store.claim_execution(operation_id)?;
     match record.operation.as_str() {
+        "calendar.create_event" => {
+            if let Err(error) = validate_calendar_event_arguments(&record.arguments) {
+                return store.finish_execution(operation_id, Err(error));
+            }
+            match create_calendar_event(&record.arguments, operation_id) {
+                Ok(result) => store.finish_execution(operation_id, Ok(result)),
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "calendar.update_event" => {
+            if let Err(error) = validate_calendar_mutation_arguments(&record.arguments) {
+                return store.finish_execution(operation_id, Err(error));
+            }
+            match update_calendar_event(&record.arguments, operation_id) {
+                Ok(result) => store.finish_execution(operation_id, Ok(result)),
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
+        "calendar.delete_event" => {
+            if let Err(error) = validate_calendar_delete_arguments(&record.arguments) {
+                return store.finish_execution(operation_id, Err(error));
+            }
+            match delete_calendar_event(&record.arguments, operation_id) {
+                Ok(result) => store.finish_execution(operation_id, Ok(result)),
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
         "packages.remove" => {
             let package_id = record.arguments["package_id"]
                 .as_str()
@@ -762,6 +807,816 @@ fn execute_approved(
             )),
         ),
     }
+}
+
+fn create_calendar_event(arguments: &Value, operation_id: &str) -> Result<Value, String> {
+    let title = arguments["title"]
+        .as_str()
+        .ok_or("calendar event title is missing")?;
+    let start = arguments["start"]
+        .as_u64()
+        .ok_or("calendar event start must be Unix seconds")?;
+    let end = arguments["end"]
+        .as_u64()
+        .ok_or("calendar event end must be Unix seconds")?;
+    if end <= start || end.saturating_sub(start) > 366 * 86400 {
+        return Err("calendar event end must follow start and span no more than 366 days".into());
+    }
+    let visibility = arguments["visibility"]
+        .as_str()
+        .ok_or("calendar visibility is missing")?;
+    if !matches!(visibility, "public" | "private") {
+        return Err("calendar visibility must be public or private".into());
+    }
+    let relay_url = arguments["relay_url"]
+        .as_str()
+        .ok_or("calendar relay destination is missing")?;
+    if !(relay_url.starts_with("wss://")
+        || relay_url.starts_with("ws://127.0.0.1:")
+        || relay_url.starts_with("ws://localhost:")
+        || relay_url.starts_with("ws://[::1]:"))
+    {
+        return Err("calendar relays must use wss://; unencrypted ws:// is allowed only for loopback testing".into());
+    }
+    if !std::env::var("EVERMORE_CALENDAR_RELAYS")
+        .unwrap_or_default()
+        .split([',', ';'])
+        .map(str::trim)
+        .any(|configured| configured == relay_url)
+    {
+        return Err("relay destination is not in EVERMORE_CALENDAR_RELAYS".into());
+    }
+    let timezone = arguments["timezone"]
+        .as_str()
+        .ok_or("calendar event time zone is missing")?;
+    if !valid_time_zone(timezone) {
+        return Err("calendar time zone must name an installed IANA time zone".into());
+    }
+    let mut tags = vec![
+        vec!["d".into(), operation_id.into()],
+        vec!["title".into(), title.into()],
+        vec!["start".into(), start.to_string()],
+        vec!["end".into(), end.to_string()],
+        vec!["start_tzid".into(), timezone.into()],
+        vec!["end_tzid".into(), timezone.into()],
+    ];
+    for day in start / 86400..=((end - 1) / 86400) {
+        tags.push(vec!["D".into(), day.to_string()]);
+    }
+    if let Some(summary) = arguments.get("description").and_then(Value::as_str)
+        && !summary.is_empty()
+    {
+        tags.push(vec!["summary".into(), summary.into()]);
+    }
+    if let Some(coordinate) = arguments.get("calendar").and_then(Value::as_str)
+        && !coordinate.is_empty()
+    {
+        let parts: Vec<_> = coordinate.splitn(3, ':').collect();
+        if parts.len() != 3
+            || parts[0] != "31924"
+            || parts[2].is_empty()
+            || coordinate.contains(['\n', '\r', '\0'])
+        {
+            return Err("calendar must be a kind-31924 address coordinate".into());
+        }
+        let calendar_pubkey = PublicKey::parse(parts[1])
+            .map_err(|error| format!("invalid calendar owner pubkey: {error}"))?;
+        tags.push(vec![
+            "a".into(),
+            format!("31924:{}:{}", calendar_pubkey.to_hex(), parts[2]),
+        ]);
+    }
+    if let Some(participants) = arguments.get("participants").and_then(Value::as_array) {
+        for participant in participants {
+            let pubkey = participant
+                .as_str()
+                .ok_or("participant pubkey must be a string")?;
+            let pubkey = PublicKey::parse(pubkey)
+                .map_err(|error| format!("invalid participant pubkey: {error}"))?;
+            tags.push(vec!["p".into(), pubkey.to_hex()]);
+        }
+    }
+    if visibility == "private" {
+        let participants = arguments
+            .get("participants")
+            .and_then(Value::as_array)
+            .ok_or("private calendar events require at least one recipient pubkey")?;
+        if participants.is_empty() {
+            return Err("private calendar events require at least one recipient pubkey".into());
+        }
+        return create_private_calendar_event(
+            arguments,
+            operation_id,
+            &tags,
+            relay_url,
+            title,
+            start,
+            end,
+            timezone,
+        );
+    }
+    let owner = OWNER_IDENTITY
+        .get()
+        .ok_or("owner identity is unavailable")?;
+    let signed: evermore_common::Response = send_request(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::SignEvent {
+            identity: owner.clone(),
+            kind: 31923,
+            content: arguments
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+            tags,
+            created_at: None,
+        },
+    )?;
+    let event = match signed {
+        evermore_common::Response::Ok { data } => data,
+        evermore_common::Response::Err { message } => return Err(message),
+    };
+    let event_id = event
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("signer response is missing event id")?
+        .to_string();
+    publish_event_to_relay(relay_url, &event, "calendar relay")?;
+    publish_event_to_relay(&configured_relay_url(), &event, "local control-plane relay")?;
+    Ok(serde_json::json!({
+        "event_id": event_id,
+        "coordinate": format!("31923:{}:{operation_id}", event.get("pubkey").and_then(Value::as_str).unwrap_or("")),
+        "kind": 31923,
+        "visibility": visibility,
+        "relay_url": relay_url,
+        "published": true
+    }))
+}
+
+fn create_private_calendar_event(
+    arguments: &Value,
+    operation_id: &str,
+    tags: &[Vec<String>],
+    relay_url: &str,
+    title: &str,
+    start: u64,
+    end: u64,
+    timezone: &str,
+) -> Result<Value, String> {
+    let owner = OWNER_IDENTITY
+        .get()
+        .ok_or("owner identity is unavailable")?;
+    let owner_pubkey = match send_request::<_, evermore_common::Response>(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::GetPublicKey {
+            identity: owner.clone(),
+        },
+    )? {
+        evermore_common::Response::Ok { data } => data
+            .get("pubkey_hex")
+            .and_then(Value::as_str)
+            .ok_or("signer response is missing owner pubkey")?
+            .to_string(),
+        evermore_common::Response::Err { message } => return Err(message),
+    };
+    let owner_key = PublicKey::parse(&owner_pubkey).map_err(|error| error.to_string())?;
+    let mut builder = EventBuilder::new(
+        Kind::from(31923),
+        arguments
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    for raw in tags {
+        builder = builder.tag(Tag::parse(raw.clone()).map_err(|error| error.to_string())?);
+    }
+    let mut rumor = builder.finalize_unsigned(owner_key);
+    rumor.ensure_id();
+    let rumor_id = rumor
+        .id
+        .as_ref()
+        .ok_or("NIP-59 rumor is missing its event id")?
+        .to_hex();
+    let recipients = arguments
+        .get("participants")
+        .and_then(Value::as_array)
+        .ok_or("private calendar events require at least one recipient pubkey")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "participant pubkey must be a string".to_string())
+                .and_then(|value| PublicKey::parse(value).map_err(|error| error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let wrap_ids = publish_private_rumor(owner, owner_key, rumor, recipients, relay_url)?;
+    Ok(serde_json::json!({
+        "event_id": rumor_id,
+        "coordinate": format!("31923:{owner_pubkey}:{operation_id}"),
+        "kind": 31923,
+        "visibility": "private",
+        "relay_url": relay_url,
+        "recipient_count": wrap_ids.len(),
+        "gift_wrap_ids": wrap_ids,
+        "published": true,
+        "title": title,
+        "start": start,
+        "end": end,
+        "timezone": timezone
+    }))
+}
+
+fn signer_nip44_encrypt(
+    identity: &str,
+    recipient_pubkey: &str,
+    plaintext: &str,
+) -> Result<String, String> {
+    match send_request::<_, evermore_common::Response>(
+        &evermore_common::runtime_socket_path(),
+        &evermore_common::Request::Nip44Encrypt {
+            identity: identity.into(),
+            recipient_pubkey: recipient_pubkey.into(),
+            plaintext: plaintext.into(),
+        },
+    )? {
+        evermore_common::Response::Ok { data } => data
+            .get("ciphertext")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or("signer response is missing ciphertext".into()),
+        evermore_common::Response::Err { message } => Err(message),
+    }
+}
+
+fn validate_calendar_mutation_arguments(arguments: &Value) -> Result<(), String> {
+    for field in ["event_id", "expected_title", "title"] {
+        arguments[field]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("calendar {field} is missing"))?;
+    }
+    EventId::parse(arguments["event_id"].as_str().unwrap())
+        .map_err(|_| "calendar writes require the selected event's event_id")?;
+    validate_calendar_destination(
+        arguments["relay_url"]
+            .as_str()
+            .ok_or("calendar relay destination is missing")?,
+    )
+}
+
+fn validate_calendar_delete_arguments(arguments: &Value) -> Result<(), String> {
+    let event_id = arguments["event_id"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("calendar event identifier is missing")?;
+    if event_id.len() > 256 || event_id.contains(['\n', '\r', '\0']) {
+        return Err("calendar event identifier is invalid".into());
+    }
+    validate_calendar_destination(
+        arguments["relay_url"]
+            .as_str()
+            .ok_or("calendar relay destination is missing")?,
+    )
+}
+
+fn validate_calendar_destination(relay_url: &str) -> Result<(), String> {
+    if !(relay_url.starts_with("wss://")
+        || relay_url.starts_with("ws://127.0.0.1:")
+        || relay_url.starts_with("ws://localhost:")
+        || relay_url.starts_with("ws://[::1]:"))
+    {
+        return Err("calendar relays must use wss://; unencrypted ws:// is allowed only for loopback testing".into());
+    }
+    if !std::env::var("EVERMORE_CALENDAR_RELAYS")
+        .unwrap_or_default()
+        .split([',', ';'])
+        .map(str::trim)
+        .any(|configured| configured == relay_url)
+    {
+        return Err("relay destination is not in EVERMORE_CALENDAR_RELAYS".into());
+    }
+    Ok(())
+}
+
+fn update_calendar_event(arguments: &Value, operation_id: &str) -> Result<Value, String> {
+    let owner = OWNER_IDENTITY
+        .get()
+        .ok_or("owner identity is unavailable")?;
+    let owner_key = load_public_key(owner)?;
+    let (mut raw, private) = calendar::get_for_write(
+        arguments["event_id"]
+            .as_str()
+            .ok_or("calendar event identifier is missing")?,
+        owner,
+        &owner_key,
+    )?;
+    let author = raw["pubkey"]
+        .as_str()
+        .ok_or("calendar event author is missing")?;
+    if author != owner_key.to_hex() {
+        return Err("only the event author can edit this calendar event".into());
+    }
+    let kind = raw["kind"]
+        .as_u64()
+        .ok_or("calendar event kind is missing")? as u16;
+    if !matches!(kind, 31922 | 31923) {
+        return Err("only calendar event kinds 31922 and 31923 can be edited".into());
+    }
+    let expected_title = arguments["expected_title"]
+        .as_str()
+        .ok_or("current event title is missing from the reviewed request")?;
+    let current_title = raw["tags"]
+        .as_array()
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == "title")
+                    .then(|| tag.get(1)?.as_str())
+                    .flatten()
+            })
+        })
+        .ok_or("calendar event title is missing")?;
+    if expected_title != current_title {
+        return Err(
+            "calendar event changed since it was selected; review the latest event before editing"
+                .into(),
+        );
+    }
+    let prior_coordinate = event_coordinate(&raw)?;
+    let mut tags = raw["tags"]
+        .as_array()
+        .ok_or("calendar event tags are missing")?
+        .iter()
+        .map(|tag| {
+            tag.as_array()
+                .ok_or("calendar event tag is malformed")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or("calendar event tag value is malformed")
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let participants = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+        .filter_map(|tag| tag.get(1))
+        .map(|value| PublicKey::parse(value).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(requested) = arguments.get("participants").and_then(Value::as_array) {
+        let requested = requested
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| "participant pubkey must be a string".to_string())
+                    .and_then(|value| PublicKey::parse(value).map_err(|error| error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut current = participants
+            .iter()
+            .map(PublicKey::to_hex)
+            .collect::<Vec<_>>();
+        let mut requested = requested.iter().map(PublicKey::to_hex).collect::<Vec<_>>();
+        current.sort();
+        requested.sort();
+        if private && current != requested {
+            return Err("changing private event recipients requires a separate invitation and revocation flow".into());
+        }
+        if !private {
+            tags.retain(|tag| tag.first().map(String::as_str) != Some("p"));
+            for pubkey in requested {
+                tags.push(vec!["p".into(), pubkey]);
+            }
+        }
+    }
+    let title = arguments["title"]
+        .as_str()
+        .ok_or("calendar event title is missing")?;
+    let description = arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| raw["content"].as_str().unwrap_or("").to_owned());
+    set_calendar_tag(&mut tags, "title", Some(vec!["title".into(), title.into()]));
+    if kind == 31923 {
+        if arguments.get("date_start").is_some() || arguments.get("date_end").is_some() {
+            return Err("date_start/date_end are only valid for kind-31922 events".into());
+        }
+        let start = arguments["start"]
+            .as_u64()
+            .ok_or("timed event start must be Unix seconds")?;
+        let end = arguments["end"]
+            .as_u64()
+            .ok_or("timed event end must be Unix seconds")?;
+        if end <= start || end.saturating_sub(start) > 366 * 86400 {
+            return Err(
+                "calendar event end must follow start and span no more than 366 days".into(),
+            );
+        }
+        let timezone = arguments["timezone"]
+            .as_str()
+            .ok_or("timed event time zone is missing")?;
+        if !valid_time_zone(timezone) {
+            return Err("calendar time zone must name an installed IANA time zone".into());
+        }
+        set_calendar_tag(
+            &mut tags,
+            "start",
+            Some(vec!["start".into(), start.to_string()]),
+        );
+        set_calendar_tag(&mut tags, "end", Some(vec!["end".into(), end.to_string()]));
+        set_calendar_tag(
+            &mut tags,
+            "start_tzid",
+            Some(vec!["start_tzid".into(), timezone.into()]),
+        );
+        set_calendar_tag(
+            &mut tags,
+            "end_tzid",
+            Some(vec!["end_tzid".into(), timezone.into()]),
+        );
+        tags.retain(|tag| tag.first().map(String::as_str) != Some("D"));
+        for day in start / 86400..=((end - 1) / 86400) {
+            tags.push(vec!["D".into(), day.to_string()]);
+        }
+    } else {
+        if arguments.get("start").is_some()
+            || arguments.get("end").is_some()
+            || arguments.get("timezone").is_some()
+        {
+            return Err("start/end/timezone are only valid for kind-31923 events".into());
+        }
+        let start = arguments["date_start"]
+            .as_str()
+            .ok_or("date_start is required for a kind-31922 event")?;
+        let end = arguments.get("date_end").and_then(Value::as_str);
+        if !calendar::valid_date(start)
+            || end.is_some_and(|end| !calendar::valid_date(end))
+            || end.is_some_and(|end| end <= start)
+        {
+            return Err("date_start/date_end must be valid YYYY-MM-DD dates, with end exclusive and after start".into());
+        }
+        set_calendar_tag(&mut tags, "start", Some(vec!["start".into(), start.into()]));
+        set_calendar_tag(
+            &mut tags,
+            "end",
+            end.map(|end| vec!["end".into(), end.into()]),
+        );
+        set_calendar_tag(&mut tags, "start_tzid", None);
+        set_calendar_tag(&mut tags, "end_tzid", None);
+        tags.retain(|tag| tag.first().map(String::as_str) != Some("D"));
+    }
+    if arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        set_calendar_tag(
+            &mut tags,
+            "summary",
+            (!description.is_empty()).then(|| vec!["summary".into(), description.clone()]),
+        );
+    }
+    raw["tags"] = serde_json::to_value(&tags).map_err(|error| error.to_string())?;
+    raw["content"] = Value::String(description.clone());
+    let relay_url = arguments["relay_url"]
+        .as_str()
+        .ok_or("calendar relay destination is missing")?;
+    if private {
+        let mut builder = EventBuilder::new(Kind::from(kind), description.clone());
+        for tag in &tags {
+            builder = builder.tag(Tag::parse(tag.clone()).map_err(|error| error.to_string())?);
+        }
+        let mut rumor = builder.finalize_unsigned(owner_key);
+        rumor.ensure_id();
+        let event_id = rumor
+            .id
+            .as_ref()
+            .ok_or("updated rumor is missing its event id")?
+            .to_hex();
+        publish_private_rumor(owner, owner_key, rumor, participants, relay_url)?;
+        Ok(
+            serde_json::json!({"event_id": event_id, "coordinate": prior_coordinate, "kind": kind, "visibility": "private", "relay_url": relay_url, "published": true, "operation_id": operation_id}),
+        )
+    } else {
+        let signed = match send_request::<_, evermore_common::Response>(
+            &evermore_common::runtime_socket_path(),
+            &evermore_common::Request::SignEvent {
+                identity: owner.clone(),
+                kind,
+                content: description,
+                tags,
+                created_at: None,
+            },
+        )? {
+            evermore_common::Response::Ok { data } => data,
+            evermore_common::Response::Err { message } => return Err(message),
+        };
+        let event_id = signed["id"]
+            .as_str()
+            .ok_or("signer response is missing event id")?
+            .to_string();
+        publish_event_to_relay(relay_url, &signed, "calendar relay")?;
+        publish_event_to_relay(
+            &configured_relay_url(),
+            &signed,
+            "local control-plane relay",
+        )?;
+        Ok(
+            serde_json::json!({"event_id": event_id, "coordinate": prior_coordinate, "kind": kind, "visibility": "public", "relay_url": relay_url, "published": true, "operation_id": operation_id}),
+        )
+    }
+}
+
+fn delete_calendar_event(arguments: &Value, _operation_id: &str) -> Result<Value, String> {
+    let owner = OWNER_IDENTITY
+        .get()
+        .ok_or("owner identity is unavailable")?;
+    let owner_key = load_public_key(owner)?;
+    let event_id = arguments["event_id"]
+        .as_str()
+        .ok_or("calendar event identifier is missing")?;
+    let (raw, private) = calendar::get_for_write(event_id, owner, &owner_key)?;
+    if raw["pubkey"].as_str() != Some(&owner_key.to_hex()) {
+        return Err("only the event author can delete this calendar event".into());
+    }
+    let expected_title = arguments["expected_title"]
+        .as_str()
+        .ok_or("current event title is missing from the reviewed request")?;
+    let current_title = raw["tags"]
+        .as_array()
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == "title")
+                    .then(|| tag.get(1)?.as_str())
+                    .flatten()
+            })
+        })
+        .ok_or("calendar event title is missing")?;
+    if expected_title != current_title {
+        return Err(
+            "calendar event changed since it was selected; review the latest event before deleting"
+                .into(),
+        );
+    }
+    let kind = raw["kind"]
+        .as_u64()
+        .ok_or("calendar event kind is missing")? as u16;
+    if !matches!(kind, 31922 | 31923) {
+        return Err("only calendar event kinds 31922 and 31923 can be deleted".into());
+    }
+    let coordinate = event_coordinate(&raw)?;
+    let relay_url = arguments["relay_url"]
+        .as_str()
+        .ok_or("calendar relay destination is missing")?;
+    if private {
+        let recipients = raw["tags"]
+            .as_array()
+            .ok_or("calendar event tags are missing")?
+            .iter()
+            .filter_map(|tag| {
+                let values = tag.as_array()?;
+                (values.first()?.as_str()? == "p")
+                    .then(|| values.get(1)?.as_str())
+                    .flatten()
+            })
+            .map(|value| PublicKey::parse(value).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let event_id = raw["id"]
+            .as_str()
+            .ok_or("private calendar event id is missing")?;
+        let tombstone_tags = vec![
+            vec!["e".into(), event_id.into()],
+            vec!["a".into(), coordinate.clone()],
+            vec!["k".into(), kind.to_string()],
+        ];
+        let mut builder =
+            EventBuilder::new(Kind::from(5), "Calendar event withdrawn by its author");
+        for tag in tombstone_tags {
+            builder = builder.tag(Tag::parse(tag).map_err(|error| error.to_string())?);
+        }
+        let tombstone = builder.finalize_unsigned(owner_key);
+        publish_private_rumor(owner, owner_key, tombstone, recipients, relay_url)?;
+    } else {
+        let event_id = raw["id"].as_str().ok_or("calendar event id is missing")?;
+        let tags = vec![
+            vec!["e".into(), event_id.into()],
+            vec!["a".into(), coordinate.clone()],
+            vec!["k".into(), kind.to_string()],
+        ];
+        let signed = match send_request::<_, evermore_common::Response>(
+            &evermore_common::runtime_socket_path(),
+            &evermore_common::Request::SignEvent {
+                identity: owner.clone(),
+                kind: 5,
+                content: String::new(),
+                tags,
+                created_at: None,
+            },
+        )? {
+            evermore_common::Response::Ok { data } => data,
+            evermore_common::Response::Err { message } => return Err(message),
+        };
+        publish_event_to_relay(relay_url, &signed, "calendar relay deletion request")?;
+        publish_event_to_relay(
+            &configured_relay_url(),
+            &signed,
+            "local control-plane deletion request",
+        )?;
+    }
+    Ok(serde_json::json!({
+        "event_id": raw["id"],
+        "coordinate": coordinate,
+        "visibility": if private { "private" } else { "public" },
+        "relay_url": relay_url,
+        "deletion_requested": !private,
+        "private_withdrawal_sent": private
+    }))
+}
+
+fn publish_private_rumor(
+    owner: &str,
+    owner_key: PublicKey,
+    mut rumor: UnsignedEvent,
+    mut recipients: Vec<PublicKey>,
+    relay_url: &str,
+) -> Result<Vec<String>, String> {
+    rumor.ensure_id();
+    recipients.push(owner_key);
+    recipients.sort_by_key(PublicKey::to_hex);
+    recipients.dedup();
+    let rumor_json = rumor.as_json();
+    let rumor_time = rumor.created_at.as_secs();
+    let mut wrap_ids = Vec::new();
+    for recipient in recipients {
+        let ephemeral = Keys::generate();
+        let randomness =
+            u64::from_be_bytes(ephemeral.public_key().to_bytes()[..8].try_into().unwrap());
+        let wrap_timestamp = unix_time().saturating_sub(randomness % 172_800);
+        let seal_randomness = u64::from_be_bytes(
+            rumor
+                .id
+                .as_ref()
+                .ok_or("private rumor is missing its id")?
+                .to_bytes()[..8]
+                .try_into()
+                .unwrap(),
+        ) ^ randomness;
+        let seal_timestamp = unix_time().saturating_sub(seal_randomness % 172_800);
+        let encrypted = signer_nip44_encrypt(owner, &recipient.to_hex(), &rumor_json)?;
+        let seal = match send_request::<_, evermore_common::Response>(
+            &evermore_common::runtime_socket_path(),
+            &evermore_common::Request::SignEvent {
+                identity: owner.into(),
+                kind: 13,
+                content: encrypted,
+                tags: Vec::new(),
+                created_at: Some(seal_timestamp.min(rumor_time)),
+            },
+        )? {
+            evermore_common::Response::Ok { data } => {
+                Event::from_json(data.to_string()).map_err(|error| error.to_string())?
+            }
+            evermore_common::Response::Err { message } => return Err(message),
+        };
+        let ciphertext = nip44::encrypt(
+            ephemeral.secret_key(),
+            &recipient,
+            seal.as_json(),
+            nip44::Version::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let wrap = EventBuilder::new(Kind::GiftWrap, ciphertext)
+            .tag(Tag::public_key(recipient))
+            .custom_created_at(Timestamp::from(wrap_timestamp.min(rumor_time)))
+            .finalize(&ephemeral)
+            .map_err(|error| error.to_string())?;
+        let value = serde_json::to_value(&wrap).map_err(|error| error.to_string())?;
+        publish_event_to_relay(relay_url, &value, "calendar relay")?;
+        if recipient == owner_key {
+            publish_event_to_relay(&configured_relay_url(), &value, "local control-plane relay")?;
+        }
+        wrap_ids.push(wrap.id.to_hex());
+    }
+    Ok(wrap_ids)
+}
+
+fn event_coordinate(raw: &Value) -> Result<String, String> {
+    let kind = raw["kind"]
+        .as_u64()
+        .ok_or("calendar event kind is missing")?;
+    let pubkey = raw["pubkey"]
+        .as_str()
+        .ok_or("calendar event author is missing")?;
+    let d = raw["tags"]
+        .as_array()
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == "d")
+                    .then(|| tag.get(1)?.as_str())
+                    .flatten()
+            })
+        })
+        .ok_or("calendar event d tag is missing")?;
+    Ok(format!("{kind}:{pubkey}:{d}"))
+}
+
+fn set_calendar_tag(tags: &mut Vec<Vec<String>>, name: &str, replacement: Option<Vec<String>>) {
+    tags.retain(|tag| tag.first().map(String::as_str) != Some(name));
+    if let Some(replacement) = replacement {
+        tags.push(replacement);
+    }
+}
+
+fn validate_calendar_event_arguments(arguments: &Value) -> Result<(), String> {
+    arguments["title"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("calendar event title is missing")?;
+    let start = arguments["start"]
+        .as_u64()
+        .ok_or("calendar event start must be Unix seconds")?;
+    let end = arguments["end"]
+        .as_u64()
+        .ok_or("calendar event end must be Unix seconds")?;
+    if end <= start || end.saturating_sub(start) > 366 * 86400 {
+        return Err("calendar event end must follow start and span no more than 366 days".into());
+    }
+    if !matches!(arguments["visibility"].as_str(), Some("public" | "private")) {
+        return Err("calendar visibility must be public or private".into());
+    }
+    let relay_url = arguments["relay_url"]
+        .as_str()
+        .ok_or("calendar relay destination is missing")?;
+    if !(relay_url.starts_with("wss://")
+        || relay_url.starts_with("ws://127.0.0.1:")
+        || relay_url.starts_with("ws://localhost:")
+        || relay_url.starts_with("ws://[::1]:"))
+    {
+        return Err("calendar relays must use wss://; unencrypted ws:// is allowed only for loopback testing".into());
+    }
+    if !std::env::var("EVERMORE_CALENDAR_RELAYS")
+        .unwrap_or_default()
+        .split([',', ';'])
+        .map(str::trim)
+        .any(|configured| configured == relay_url)
+    {
+        return Err("relay destination is not in EVERMORE_CALENDAR_RELAYS".into());
+    }
+    let timezone = arguments["timezone"]
+        .as_str()
+        .ok_or("calendar event time zone is missing")?;
+    if !valid_time_zone(timezone) {
+        return Err("calendar time zone must name an installed IANA time zone".into());
+    }
+    if let Some(coordinate) = arguments.get("calendar").and_then(Value::as_str)
+        && !coordinate.is_empty()
+    {
+        let parts: Vec<_> = coordinate.splitn(3, ':').collect();
+        if parts.len() != 3
+            || parts[0] != "31924"
+            || parts[2].is_empty()
+            || PublicKey::parse(parts[1]).is_err()
+            || coordinate.contains(['\n', '\r', '\0'])
+        {
+            return Err("calendar must be a valid kind-31924 address coordinate".into());
+        }
+    }
+    if let Some(participants) = arguments.get("participants").and_then(Value::as_array) {
+        for participant in participants {
+            let pubkey = participant
+                .as_str()
+                .ok_or("participant pubkey must be a string")?;
+            PublicKey::parse(pubkey)
+                .map_err(|error| format!("invalid participant pubkey: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_time_zone(value: &str) -> bool {
+    if value.is_empty()
+        || value.starts_with('/')
+        || !value.contains('/')
+        || value.contains(['\\', '\n', '\r', '\0'])
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+'))
+    {
+        return false;
+    }
+    std::path::Path::new("/usr/share/zoneinfo")
+        .join(value)
+        .is_file()
 }
 
 fn execute_sway_command(
@@ -1380,6 +2235,39 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
     }
 
     let data = match name {
+        "calendar.list" => calendar::list(
+            arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|limit| limit as usize)
+                .unwrap_or(30),
+            OWNER_IDENTITY
+                .get()
+                .ok_or("owner identity is unavailable")?,
+            &load_public_key(
+                OWNER_IDENTITY
+                    .get()
+                    .ok_or("owner identity is unavailable")?,
+            )?,
+        )?,
+        "calendar.get" => {
+            let identifier = arguments["event_id"].as_str().expect("validated string");
+            let owner = OWNER_IDENTITY
+                .get()
+                .ok_or("owner identity is unavailable")?;
+            let pubkey = load_public_key(owner)?;
+            let records = calendar::list(100, owner, &pubkey)?;
+            records
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("event_id").and_then(Value::as_str) == Some(identifier)
+                            || item.get("coordinate").and_then(Value::as_str) == Some(identifier)
+                    })
+                })
+                .cloned()
+                .ok_or_else(|| format!("calendar event '{identifier}' was not found"))?
+        }
         "identity.get_public_key" => {
             let request = evermore_common::Request::GetPublicKey {
                 identity: arguments["identity"]

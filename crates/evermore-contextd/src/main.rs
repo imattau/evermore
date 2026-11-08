@@ -83,6 +83,7 @@ fn execute(request: ai_context::Request) -> Result<ai_context::Event, String> {
                 "notifications:local" => notification_context("local")?,
                 "notifications:mention" => notification_context("mention")?,
                 "packages:installed" => installed_packages()?,
+                "calendar:events" => calendar_events()?,
                 _ => return Err("unsupported context source".into()),
             };
             Ok(ai_context::Event::Context { source, data })
@@ -193,6 +194,7 @@ fn allowed_sources() -> Result<Vec<String>, String> {
             "notifications:local",
             "notifications:mention",
             "packages:installed",
+            "calendar:events",
         ]
         .contains(&s.as_str())
     }) {
@@ -201,6 +203,22 @@ fn allowed_sources() -> Result<Vec<String>, String> {
     sources.sort();
     sources.dedup();
     Ok(sources)
+}
+
+fn calendar_events() -> Result<Value, String> {
+    match request_socket::<
+        evermore_common::operations::Request,
+        evermore_common::operations::Response,
+    >(
+        evermore_common::operations::runtime_socket_path(),
+        &evermore_common::operations::Request::Invoke {
+            name: "calendar.list".into(),
+            arguments: json!({"limit": 30}),
+        },
+    )? {
+        evermore_common::operations::Response::Ok { data } => Ok(redact_value(data)),
+        evermore_common::operations::Response::Err { message } => Err(message),
+    }
 }
 
 fn installed_packages() -> Result<Value, String> {

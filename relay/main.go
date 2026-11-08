@@ -47,6 +47,10 @@ var allowedKinds = struct {
 	// covers a per-directory addressable manifest of {filename: {sha256, size}}
 	32267: true, // Software application (Phase 5 npack) -- package metadata
 	30063: true, // Release artifact set (Phase 5 npack) -- version pointer + Blossom URL/hash
+	31922: true, // NIP-52 date-based calendar events
+	31923: true, // NIP-52 time-based calendar events
+	31924: true, // NIP-52 calendars
+	31925: true, // NIP-52 RSVPs
 }}
 
 func isKindAllowed(kind int) bool {

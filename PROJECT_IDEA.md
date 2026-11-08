@@ -2726,16 +2726,15 @@ revocation mid-task, and daemon restart covered; and a task-level screenshot in
 
 ## Addendum: Nostr Calendar Integration — Design Note
 
-**Status:** exploration and proposed architecture, not an implementation
-commitment. It adds no milestones or acceptance gates. The first implementation
-should prove one end-to-end read and one owner-approved calendar write before
-adding broad application compatibility.
+**Status:** public and private event vertical slice implemented; broader NIP-52
+operations and application interoperability remain staged work.
 
 **Goal:** make NIP-52 calendars useful to the owner, local applications, and
-Evermore AI through one local service and the existing operation control
-plane. Calendar records should be ordinary NIP-52 events on explicitly chosen
-Nostr relays; the local control-plane relay remains a local coordination and
-audit bus, not an implicit public-calendar publisher.
+Evermore AI through the existing operation control plane. Calendar records
+are ordinary NIP-52 events on explicitly chosen external relays. The local
+control-plane relay stores a local copy for offline reads and applications;
+this does not publish an event to an external relay unless the owner has
+selected that destination.
 
 ### Protocol mapping
 
@@ -2785,33 +2784,37 @@ list, with one wrap per recipient and a self-addressed wrap for the owner's
 other devices. Unwrap and verify the kind-13 seal before trusting the inner
 author or tags. Locally deduplicate and resolve revisions using the inner
 `kind:pubkey:d` coordinate and signed seal provenance; relay addressable-event
-replacement does not apply to the outer kind-1059 wraps. Private deletion,
-revocation of previously delivered copies, and participant changes require
-their own defined sync behavior: deletion cannot erase data a recipient has
-already retained. Until those rules and multi-client fixtures are specified,
-ship public NIP-52 events and private gift-wrapped events as explicitly
-separate visibility choices, and do not claim private-calendar interoperability
-with other Nostr clients.
+replacement does not apply to the outer kind-1059 wraps. Private edits send a
+new rumor to the existing recipient set. Private deletion sends an encrypted
+kind-5 withdrawal rumor to each recipient, and Evermore-aware clients hide the
+matching event locally. This cannot remove copies already retained by a
+recipient, and does not claim private-calendar interoperability with other
+Nostr clients. Changing an event's recipient set remains a separate invite
+and revocation flow.
 
 ### Service and data flow
 
-Add a headless `evermore-calendard` only when implementation begins. It owns
-the normalized local calendar projection, validation, selected-relay sync,
-and NIP-52 event construction. It uses `evermore-signer` for signatures; it
-never receives or persists an `nsec`. Store the local projection and sync
-cursors in the user's private data directory so search, agenda views, and
-availability reads remain useful offline. Keep source event JSON/tags so
-round-trips do not erase fields the first version does not understand.
+Keep signed calendar events in the existing local control-plane relay, which
+already provides durable storage, event verification, subscriptions, and
+NIP-86 kind policy. Add NIP-52 kinds `31922`–`31925` to its allowlist. The
+control-plane relay is the local offline cache; configured external relays
+carry the user's cross-device events. Do not keep a second JSON event store.
+Initially, `evermore-operationsd` can own calendar queries, projection, and a
+small background sync loop alongside its existing operation recovery loop.
+It uses `evermore-signer` for signatures and never receives or persists an
+`nsec`. Extract a separate calendar sync service only if its lifecycle or
+failure isolation becomes a demonstrated need.
 
 Use these boundaries:
 
 1. Configured external relays carry public NIP-52 events and kind-1059 wraps
-   addressed to the owner or invited recipients. Network sync is explicit,
-   scoped to chosen calendars/relays, and reports partial/offline results.
-2. A per-user Unix socket exposes typed calendar reads and service commands to
-   the panel, local applications, and CLI. It returns normalized event data
-   plus source coordinates and freshness; clients do not each implement relay
-   queries or NIP-52 parsing. AI and MCP go through `evermore-operationsd`.
+   addressed to the owner or invited recipients. Sync is scoped to
+   owner-selected relays; the local control-plane relay stores verified events
+   for offline reads and local applications.
+2. `evermore-operationsd` exposes the normalized calendar query surface via
+   its existing Unix socket. Panel, CLI, MCP, and other local clients consume
+   the same `calendar.list`/`calendar.get` operations rather than each
+   implementing relay queries and NIP-52 parsing.
 3. `evermore-operationsd` remains the only AI/application path for actions
    requiring authority. Add catalogue reads such as `calendar.list`,
    `calendar.get`, and `calendar.find_availability`, plus approval-required
@@ -2821,18 +2824,16 @@ Use these boundaries:
    `evermore-common`; MCP then exposes the same definitions automatically.
 4. Writes become signed requests bound to canonical event fields and target
    calendar coordinates and visibility. The owner approval is recorded in the
-   existing operation lifecycle; only after approval does calendard publish
-   the public NIP-52 event or construct the recipient gift wraps. Public
-   deletions use NIP-09 deletion events and require the same explicit review.
-   Private deletion and update delivery must follow the private-event sync
-   rules above. Retries are idempotent by operation ID and event coordinate.
+   existing operation lifecycle; only after approval does operationsd publish
+   the public NIP-52 event to the selected remote relay and local relay, or
+   construct recipient gift wraps. Public deletions use NIP-09 deletion events
+   and require the same explicit review. Private deletion and update delivery
+   must follow the private-event sync rules above. Retries are idempotent by
+   operation ID and event coordinate.
 
-Do not mirror complete public NIP-52 records onto the local relay just to make
-them discoverable to local clients. The local relay can carry small
-Evermore-local sync/refresh or notification signals if needed, tagged and
-documented as local control events; it is not the source of truth for remote
-calendar state. Avoid inventing Evermore event kinds for events, calendars,
-or RSVPs.
+The local relay is the local canonical event cache, while selected external
+relays provide cross-device distribution. Do not invent Evermore event kinds
+for events, calendars, or RSVPs.
 
 ### AI and application use
 
@@ -2862,23 +2863,38 @@ not change the AI and panel contracts.
 
 ### Suggested delivery order
 
+**Implementation status (2026-11-08):** the calendar event and mutation vertical slice is implemented.
+The local control-plane relay accepts NIP-52 kinds `31922`–`31925`;
+`calendar.list` and `calendar.get` read and normalize events from that existing
+store, and MCP consumes the same catalogue. A background operationsd worker
+pulls public events, deletions, and recipient-addressed private wraps from
+configured external relays into the local relay. AI access is an explicit `calendar:events` context source, off by
+default, with the panel's existing one-turn/pinned scope controls. The
+catalogue includes owner-approved calendar create, update, and delete
+operations. Operationsd publishes public kind-31923 events and NIP-09 deletion
+requests, or seals and gift-wraps private kind-31923 rumors and private
+withdrawal rumors for each participant and the owner. Edits retain the same
+addressable coordinate and private recipient set. Private wraps sync from
+configured relays and are unwrapped and verified through the owner signer
+before appearing in local reads; private withdrawals hide matching events in
+Evermore-aware clients. Date-based event creation, RSVP and
+calendar-list writes, agenda UI, and app bridges remain to be implemented.
+
 1. Validate NIP-52 parsing/serialization and preservation against fixture
 events for all four kinds; handle date-only versus timestamp semantics,
 exclusive end dates, TZIDs, `D` tags, and address coordinates.
-2. Build a local read-only projection and panel agenda over imported fixtures;
-   add configured-relay read sync and offline/freshness states.
+2. Validate configured-relay public and private sync into the local relay;
+   verify offline reads and NIP-09 replacement/deletion handling.
 3. Expose catalogue reads to the panel and MCP; test AI agenda and availability
    with a deterministic fixture set, including overlapping events and DST
    boundaries.
-4. Add public event creation and RSVP as separately granted, owner-approved
-   operations. Validate signed relay publication, retries, denial, and restart
-   recovery in the VM.
-5. Specify and fixture-test the private kind-1059 profile, including recipient
-   delivery, unwrap verification, updates, duplicate delivery, and explicit
-   visibility in the UI; then add its approved create/RSVP operations.
-6. Add public edit/delete and incoming calendar inclusion requests after
-   conflict handling, NIP-09 behavior, and destructive-review wording are
-   settled. Private deletion remains a separate supported behavior to define.
+4. Add public RSVP as a separately granted, owner-approved operation and
+   validate signed relay publication, retries, denial, and restart recovery in
+   the VM.
+5. Fixture-test private kind-1059 updates, duplicate delivery, withdrawal
+   behavior, and recipient visibility; then add approved private RSVP.
+6. Add incoming calendar inclusion requests and conflict handling after
+   destructive-review wording and NIP-09 behavior are validated in the VM.
 7. Evaluate one real calendar application for `.ics` or a standards bridge;
    implement only the adapter that proves useful.
 

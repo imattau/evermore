@@ -149,6 +149,134 @@ pub mod operations {
     pub fn catalog() -> Vec<Definition> {
         let mut definitions = vec![
             definition(
+                "calendar.create_event",
+                "Create a timed NIP-52 calendar event. Public events publish in the clear; private events use recipient-specific NIP-59 gift wraps. Requires owner approval.",
+                Access::Write,
+                "calendar.write",
+                Approval::Required,
+                object_schema(
+                    json!({
+                        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "start": { "type": "integer", "minimum": 1, "description": "Inclusive Unix timestamp in seconds." },
+                        "end": { "type": "integer", "minimum": 1, "description": "Exclusive Unix timestamp in seconds; must follow start." },
+                        "timezone": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Installed IANA time zone, such as Australia/Melbourne." },
+                        "description": { "type": "string", "maxLength": 8192 },
+                        "calendar": { "type": "string", "maxLength": 256 },
+                        "visibility": { "type": "string", "enum": ["public", "private"] },
+                        "relay_url": { "type": "string", "minLength": 9, "maxLength": 2048, "description": "Owner-selected relay from EVERMORE_CALENDAR_RELAYS; shown in the approval review." },
+                        "participants": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 64, "maxLength": 64 } }
+                    }),
+                    &[
+                        "title",
+                        "start",
+                        "end",
+                        "timezone",
+                        "visibility",
+                        "relay_url",
+                    ],
+                ),
+                object_schema(
+                    json!({ "event_id": { "type": "string" }, "coordinate": { "type": "string" }, "kind": { "type": "integer" }, "visibility": { "type": "string" }, "relay_url": { "type": "string" }, "published": { "type": "boolean" } }),
+                    &[
+                        "event_id",
+                        "coordinate",
+                        "kind",
+                        "visibility",
+                        "relay_url",
+                        "published",
+                    ],
+                ),
+                Redaction::None,
+            ),
+            definition(
+                "calendar.update_event",
+                "Edit an owner-authored NIP-52 event by publishing a new version at the same addressable coordinate. For kind 31923, provide Unix start/end and timezone; for kind 31922, provide date_start/date_end (exclusive). Private events are re-wrapped for their existing recipients. Requires owner approval.",
+                Access::Write,
+                "calendar.write",
+                Approval::Required,
+                object_schema(
+                    json!({
+                        "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "expected_title": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Current title shown in the approval review, to guard against editing a stale or mismatched event." },
+                        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "start": { "type": "integer", "minimum": 1 },
+                        "end": { "type": "integer", "minimum": 1 },
+                        "timezone": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "date_start": { "type": "string", "minLength": 10, "maxLength": 10, "description": "Inclusive YYYY-MM-DD for a kind-31922 event." },
+                        "date_end": { "type": "string", "minLength": 10, "maxLength": 10, "description": "Optional exclusive YYYY-MM-DD for a kind-31922 event." },
+                        "description": { "type": "string", "maxLength": 8192 },
+                        "relay_url": { "type": "string", "minLength": 9, "maxLength": 2048 },
+                        "participants": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 64, "maxLength": 64 } }
+                    }),
+                    &["event_id", "expected_title", "title", "relay_url"],
+                ),
+                object_schema(
+                    json!({ "event_id": { "type": "string" }, "coordinate": { "type": "string" }, "kind": { "type": "integer" }, "visibility": { "type": "string" }, "relay_url": { "type": "string" }, "published": { "type": "boolean" } }),
+                    &[
+                        "event_id",
+                        "coordinate",
+                        "kind",
+                        "visibility",
+                        "relay_url",
+                        "published",
+                    ],
+                ),
+                Redaction::None,
+            ),
+            definition(
+                "calendar.delete_event",
+                "Delete an owner-authored NIP-52 event. Public events use a NIP-09 deletion request; private events send a recipient-specific encrypted withdrawal, which cannot revoke retained copies. Requires owner approval.",
+                Access::Write,
+                "calendar.write",
+                Approval::Required,
+                object_schema(
+                    json!({
+                        "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "expected_title": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Current title shown in the approval review, to guard against deleting a stale or mismatched event." },
+                        "relay_url": { "type": "string", "minLength": 9, "maxLength": 2048 }
+                    }),
+                    &["event_id", "expected_title", "relay_url"],
+                ),
+                object_schema(
+                    json!({ "event_id": { "type": "string" }, "coordinate": { "type": "string" }, "visibility": { "type": "string" }, "relay_url": { "type": "string" }, "deletion_requested": { "type": "boolean" }, "private_withdrawal_sent": { "type": "boolean" } }),
+                    &[
+                        "event_id",
+                        "coordinate",
+                        "visibility",
+                        "relay_url",
+                        "deletion_requested",
+                        "private_withdrawal_sent",
+                    ],
+                ),
+                Redaction::None,
+            ),
+            definition(
+                "calendar.get",
+                "Read one cached calendar event by its local event identifier.",
+                Access::Read,
+                "calendar.read",
+                Approval::None,
+                object_schema(
+                    json!({ "event_id": { "type": "string", "minLength": 1, "maxLength": 128 } }),
+                    &["event_id"],
+                ),
+                json!({ "type": "object" }),
+                Redaction::SecretShapedValues,
+            ),
+            definition(
+                "calendar.list",
+                "List public NIP-52 calendar events and private events gift-wrapped to the owner and stored on the local control-plane relay. Optionally cap results; records include event timestamps and time zones.",
+                Access::Read,
+                "calendar.read",
+                Approval::None,
+                object_schema(
+                    json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 100 } }),
+                    &[],
+                ),
+                json!({ "type": "array", "items": { "type": "object" } }),
+                Redaction::SecretShapedValues,
+            ),
+            definition(
                 "identity.get_public_key",
                 "Return the public key for a loaded identity; never returns a secret key.",
                 Access::Read,
@@ -431,7 +559,7 @@ pub mod operations {
                 Approval::None,
                 object_schema(
                     json!({
-                    "source": { "type": "string", "enum": ["compositor", "settings:theme", "notifications:local", "notifications:mention", "packages:installed"] }
+                    "source": { "type": "string", "enum": ["compositor", "settings:theme", "notifications:local", "notifications:mention", "packages:installed", "calendar:events"] }
                     }),
                     &["source"],
                 ),
@@ -942,6 +1070,46 @@ pub mod operations {
                     .unwrap_err()
                     .contains("too long")
             );
+        }
+
+        #[test]
+        fn calendar_mutations_are_approval_gated_and_review_bound() {
+            for name in ["calendar.update_event", "calendar.delete_event"] {
+                let definition = find(name).expect("calendar mutation in catalogue");
+                assert_eq!(definition.access, Access::Write);
+                assert_eq!(definition.approval, Approval::Required);
+                assert_eq!(definition.required_grants, vec!["calendar.write"]);
+            }
+
+            let identifier = "a".repeat(64);
+            let update = json!({
+                "event_id": identifier.clone(),
+                "expected_title": "Planning",
+                "title": "Planning updated",
+                "relay_url": "wss://calendar.example"
+            });
+            assert_eq!(
+                canonicalize_input("calendar.update_event", &update).unwrap(),
+                update
+            );
+            assert!(
+                canonicalize_input(
+                    "calendar.delete_event",
+                    &json!({"event_id": identifier, "relay_url": "wss://calendar.example"})
+                )
+                .is_err()
+            );
+
+            let private_create = json!({
+                "title": "Private planning",
+                "start": 1_800_000_000_u64,
+                "end": 1_800_003_600_u64,
+                "timezone": "Australia/Melbourne",
+                "visibility": "private",
+                "relay_url": "wss://calendar.example",
+                "participants": ["b".repeat(64)]
+            });
+            assert!(canonicalize_input("calendar.create_event", &private_create).is_ok());
         }
     }
 }

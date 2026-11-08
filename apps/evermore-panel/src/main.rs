@@ -1,13 +1,17 @@
 mod ai_context_client;
 mod ai_drawer;
+mod ai_handoff;
 mod ai_index_client;
 mod ai_infer_client;
 mod ai_session_client;
 mod launcher_ai;
+mod nostr_feed;
+mod nostr_feed_client;
 mod npack_client;
 mod operations_client;
 mod settings_client;
 mod signer_client;
+mod sway_windows;
 
 use ai_session_client::{ContextGrant, ContextScope, RefreshPolicy, Session};
 use eframe::egui;
@@ -41,6 +45,7 @@ fn main() -> eframe::Result {
     }
     let command_palette = arguments.iter().any(|arg| arg == "--command-palette");
     let open_ai_tab = arguments.iter().any(|arg| arg == "--ai");
+    let open_nostr_feed = arguments.iter().any(|arg| arg == "--nostr-feed");
     let capture_clipboard = arguments.iter().any(|arg| arg == "--capture-clipboard");
     let approval_review_id = arguments
         .iter()
@@ -64,6 +69,8 @@ fn main() -> eframe::Result {
                 [620.0, 460.0]
             } else if open_ai_tab {
                 [400.0, 680.0]
+            } else if open_nostr_feed {
+                [340.0, 680.0]
             } else {
                 // Full-mode minimum per the Evermore Graphite design note is
                 // 760x520; stay comfortably above the 760px rail breakpoint.
@@ -75,6 +82,8 @@ fn main() -> eframe::Result {
                 "Review operation request"
             } else if open_ai_tab {
                 "Evermore AI"
+            } else if open_nostr_feed {
+                "Evermore feed"
             } else {
                 "Evermore"
             }),
@@ -92,6 +101,7 @@ fn main() -> eframe::Result {
             app.command_palette = command_palette;
             app.approval_review_id = approval_review_id;
             app.ai_drawer = open_ai_tab;
+            app.nostr_feed_drawer = open_nostr_feed;
             if let Some(path) = selected_file.as_deref() {
                 app.ai_drawer = true;
                 app.tab = Tab::Ai;
@@ -451,8 +461,8 @@ struct PanelApp {
     command_palette: bool,
     ai_drawer: bool,
     ai_drawer_collapsed: bool,
-    ai_focused_output: Option<String>,
-    ai_next_output_poll: Option<std::time::Instant>,
+    drawer_focused_output: Option<String>,
+    drawer_next_output_poll: Option<std::time::Instant>,
     palette_query: String,
     proposal_status: Option<String>,
     proposal_error: Option<String>,
@@ -497,6 +507,21 @@ struct PanelApp {
     ai_chat_loading: bool,
     ai_chat_error: Option<String>,
     pending_ai_file: Option<String>,
+    nostr_feed_drawer: bool,
+    nostr_feed_notes: Vec<nostr_feed_client::Note>,
+    nostr_feed_receiver: Option<std::sync::mpsc::Receiver<nostr_feed_client::Note>>,
+    nostr_feed_handle: Option<nostr_feed_client::FeedHandle>,
+    nostr_feed_loaded: bool,
+    nostr_feed_error: Option<String>,
+    nostr_feed_positioned: bool,
+    nostr_feed_position_deadline: Option<std::time::Instant>,
+    nostr_attached_note: Option<nostr_feed_client::Note>,
+    nostr_drag_note: Option<nostr_feed_client::Note>,
+    nostr_drag_pos: Option<egui::Pos2>,
+    nostr_compose_text: String,
+    nostr_post_identity: String,
+    nostr_post_status: Option<String>,
+    nostr_post_error: Option<String>,
 }
 
 impl PanelApp {
@@ -567,6 +592,29 @@ impl PanelApp {
         }
     }
 
+    /// Attaches one note from the Nostr feed as this chat's context, as a
+    /// snapshot grant (the content was already fetched live, so there's
+    /// nothing to resolve later). Only one note is attached at a time --
+    /// "draft a reply to this" is unambiguous that way -- so a new
+    /// attachment replaces whatever note was attached before. The feed
+    /// drawer leaves the note in the runtime handoff, which `ai_drawer_ui`
+    /// consumes.
+    fn attach_note_for_ai(&mut self, note: &nostr_feed_client::Note) {
+        self.ai_context_grants
+            .retain(|grant| !grant.source.starts_with("note:"));
+        self.ai_context_grants.push(ContextGrant {
+            source: format!("note:{}", note.id),
+            scope: ContextScope::Turn,
+            refresh: RefreshPolicy::Snapshot,
+            snapshot: Some(serde_json::json!({
+                "author_pubkey": note.pubkey,
+                "content": note.content,
+                "created_at": note.created_at,
+            })),
+        });
+        self.save_ai_session();
+    }
+
     fn context_prompt_suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
         for grant in &self.ai_context_grants {
@@ -576,6 +624,8 @@ impl PanelApp {
                     .unwrap_or_default()
                     .to_string_lossy();
                 Some(format!("Summarize {name} and list its key points."))
+            } else if grant.source.starts_with("note:") {
+                Some("Draft a short, friendly reply to this note.".into())
             } else {
                 match grant.source.as_str() {
                     "compositor" => {
@@ -879,15 +929,15 @@ impl PanelApp {
         self.save_ai_session();
     }
 
-    fn poll_ai_output_focus(&mut self, ctx: &egui::Context) -> bool {
+    fn poll_drawer_output_focus(&mut self, ctx: &egui::Context) -> bool {
         let now = std::time::Instant::now();
-        if let Some(next) = self.ai_next_output_poll
+        if let Some(next) = self.drawer_next_output_poll
             && now < next
         {
             ctx.request_repaint_after(next.duration_since(now));
             return false;
         }
-        self.ai_next_output_poll = Some(now + std::time::Duration::from_millis(750));
+        self.drawer_next_output_poll = Some(now + std::time::Duration::from_millis(750));
         ctx.request_repaint_after(std::time::Duration::from_millis(750));
 
         let Ok(output) = std::process::Command::new("swaymsg")
@@ -902,8 +952,8 @@ impl PanelApp {
         let Some(focused) = focused_output_name(&output.stdout) else {
             return false;
         };
-        match &self.ai_focused_output {
-            None => self.ai_focused_output = Some(focused),
+        match &self.drawer_focused_output {
+            None => self.drawer_focused_output = Some(focused),
             Some(previous) if previous != &focused => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return true;
@@ -1370,7 +1420,7 @@ impl eframe::App for PanelApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_ai_chat();
-        if self.ai_drawer && self.poll_ai_output_focus(ui.ctx()) {
+        if (self.ai_drawer || self.nostr_feed_drawer) && self.poll_drawer_output_focus(ui.ctx()) {
             return;
         }
         if self.ai_chat_loading {
@@ -1383,6 +1433,10 @@ impl eframe::App for PanelApp {
         }
         if self.approval_review_id.is_some() {
             self.approval_review_ui(ui);
+            return;
+        }
+        if self.nostr_feed_drawer {
+            self.nostr_feed_ui(ui);
             return;
         }
         if self.ai_drawer {

@@ -74,6 +74,8 @@ vm/
   phase8-send-to-ai.sh      <- validate file-manager AI handoff and .no-ai refusal in Sway
   phase8-ai-output-focus.sh <- verify the AI drawer closes when focused Sway output changes
   phase8-ai-window-focus.sh <- verify the AI drawer survives same-output window focus
+  phase8-drawer-edges.sh <- verify AI/left and Nostr feed/right drawer placement
+  phase8-feed-drag.sh <- verify feed note clipboard copy and AI handoff
   screenshot.sh         <- grab a PNG of the VM's Sway session via grim+SSH (committed)
   destroy-vm.sh           <- gracefully stop the VM, optionally wipe the disk (committed)
   .gitignore           <- ignores everything under .local/

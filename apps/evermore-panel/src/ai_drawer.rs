@@ -9,9 +9,8 @@ use eframe::egui;
 use evermore_common::ai::Role;
 
 use crate::{
-    ai_context_client, ai_infer_client, parse_ai_operation_proposal,
-    validate_ai_operation_proposal, AiOperationProposal, ContextGrant, ContextScope, PanelApp,
-    RefreshPolicy,
+    AiOperationProposal, ContextGrant, ContextScope, PanelApp, RefreshPolicy, ai_context_client,
+    ai_handoff, ai_infer_client, parse_ai_operation_proposal, validate_ai_operation_proposal,
 };
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(110, 168, 254);
@@ -39,6 +38,14 @@ impl PanelApp {
         if !self.identities_loaded {
             self.refresh_identities();
         }
+        // A note attached in the separate feed drawer arrives through this
+        // runtime handoff; poll it while the drawer is idle so the grant
+        // shows up without waiting for another input event.
+        if let Some(note) = ai_handoff::take_note() {
+            self.attach_note_for_ai(&note);
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
 
         let dragging_file = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
         let dropped_files = ui.ctx().input(|input| input.raw.dropped_files.clone());
@@ -218,10 +225,11 @@ impl PanelApp {
                                 .changed();
                         }
                         if changed {
-                            let _ = ai_infer_client::save_preferences(&ai_infer_client::Preferences {
-                                model: Some(self.ai_model_selected.clone()),
-                                backend: Some(self.ai_backend),
-                            });
+                            let _ =
+                                ai_infer_client::save_preferences(&ai_infer_client::Preferences {
+                                    model: Some(self.ai_model_selected.clone()),
+                                    backend: Some(self.ai_backend),
+                                });
                         }
                     }
                 });
@@ -233,23 +241,33 @@ impl PanelApp {
     /// giving the AI a file is visible where you're about to type - not
     /// something you have to go dig for in a collapsed settings section.
     fn ai_attachment_chips(&mut self, ui: &mut egui::Ui) {
-        let file_grants: Vec<_> = self
+        let chip_grants: Vec<_> = self
             .ai_context_grants
             .iter()
-            .filter(|grant| grant.source.starts_with("file:"))
+            .filter(|grant| grant.source.starts_with("file:") || grant.source.starts_with("note:"))
             .cloned()
             .collect();
-        if file_grants.is_empty() {
+        if chip_grants.is_empty() {
             return;
         }
         ui.horizontal_wrapped(|ui| {
-            for grant in file_grants {
-                let path = grant.source.trim_start_matches("file:");
-                let label = std::path::Path::new(path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+            for grant in chip_grants {
+                let label = if let Some(path) = grant.source.strip_prefix("file:") {
+                    std::path::Path::new(path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    let author = grant
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.get("author_pubkey"))
+                        .and_then(|value| value.as_str())
+                        .map(|pubkey| pubkey.chars().take(8).collect::<String>())
+                        .unwrap_or_default();
+                    format!("Note from {author}\u{2026}")
+                };
                 egui::Frame::new()
                     .fill(ui.visuals().faint_bg_color)
                     .corner_radius(10)
@@ -270,7 +288,8 @@ impl PanelApp {
     /// The input row: a text box that visibly accepts a dropped file (the
     /// border lights up with the accent while you're dragging one over the
     /// window) plus an explicit "Attach" menu for picking a file without
-    /// drag-and-drop. One way in, not two mechanisms doing the same thing.
+    /// drag-and-drop. Notes from the feed drawer arrive through the runtime
+    /// handoff instead, because egui cannot drag across native windows.
     fn ai_input_row(&mut self, ui: &mut egui::Ui, dragging_file: bool) {
         let border = if dragging_file {
             egui::Stroke::new(2.0, ACCENT)
@@ -648,16 +667,30 @@ impl PanelApp {
 /// and system notices sit centered as plain weak text (no bubble - they're
 /// not part of the conversation).
 fn chat_bubble(ui: &mut egui::Ui, role: Role, content: &str, loading_placeholder: bool) {
-    let text = if loading_placeholder { "Thinking…" } else { content };
+    let text = if loading_placeholder {
+        "Thinking…"
+    } else {
+        content
+    };
     match role {
         Role::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                bubble_frame(ui, ACCENT.gamma_multiply(0.22), ui.visuals().strong_text_color(), text);
+                bubble_frame(
+                    ui,
+                    ACCENT.gamma_multiply(0.22),
+                    ui.visuals().strong_text_color(),
+                    text,
+                );
             });
         }
         Role::Assistant => {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                bubble_frame(ui, ui.visuals().faint_bg_color, ui.visuals().text_color(), text);
+                bubble_frame(
+                    ui,
+                    ui.visuals().faint_bg_color,
+                    ui.visuals().text_color(),
+                    text,
+                );
             });
         }
         Role::System => {

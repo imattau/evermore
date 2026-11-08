@@ -6,7 +6,7 @@ Comment=Open Evermore settings, inbox, AI drawer, and local files
 Exec=evermore-panel
 Terminal=false
 Categories=Utility;
-Actions=Settings;Notifications;AI;Files;
+Actions=Settings;Notifications;AI;NostrFeed;Files;
 
 [Desktop Action Settings]
 Name=Settings
@@ -19,6 +19,10 @@ Exec=evermore-panel --notifications
 [Desktop Action AI]
 Name=AI drawer
 Exec=evermore-panel --ai
+
+[Desktop Action NostrFeed]
+Name=Nostr feed drawer
+Exec=evermore-panel --nostr-feed
 
 [Desktop Action Files]
 Name=Search selected files

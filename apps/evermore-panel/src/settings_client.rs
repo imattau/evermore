@@ -14,6 +14,33 @@ pub fn get_domain(domain: &str) -> Result<serde_json::Map<String, serde_json::Va
     }
 }
 
+pub fn external_relay_urls() -> Vec<String> {
+    // Development/VM tests can point the feed at a disposable relay without
+    // running evermore-settingsd. Production reads the user's settings.
+    if let Some(value) = std::env::var_os("EVERMORE_EXTERNAL_RELAYS") {
+        return value
+            .to_string_lossy()
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    match get_domain("relays") {
+        Ok(map) => map
+            .get("external")
+            .and_then(|v| v.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub fn set(domain: &str, key: &str, value: serde_json::Value) -> Result<(), String> {
     match request(Request::Set {
         domain: domain.to_string(),

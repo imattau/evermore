@@ -1421,6 +1421,19 @@ receives focus, opens on the currently focused second output, and closes when
 focus then moves back. This validates Sway placement and focus lifecycle across
 two headless outputs; final interactive usability review can still refine
 sizing and visual placement.
+
+The Nostr feed is a separate right-edge drawer (`evermore-panel
+--nostr-feed`, 340×680, `Super+Shift+N`) beside the left-edge AI drawer; each
+is its own window and closes on output-focus change. The feed positions itself
+against the right edge of the workspace because Sway has no right-anchor rule.
+Attaching a note hands it to the AI drawer through a user-private runtime
+snapshot and opens the AI drawer if it is not already running. Dragging a note
+also copies its text to the Wayland clipboard; a release over the AI window
+attaches the note as one-turn context, detected through Sway's window
+rectangles because egui cannot drag across native surfaces. The feed requires
+configured external relays and explains the missing setting instead of
+connecting implicitly.
+
 The `ai-indexd`
 search path has been exercised end to
 end in a Bubblewrap network-isolated Arch VM using the installed signed BGE

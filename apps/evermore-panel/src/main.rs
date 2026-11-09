@@ -1,3 +1,4 @@
+mod agent_client;
 mod ai_context_client;
 mod ai_drawer;
 mod ai_handoff;
@@ -15,7 +16,7 @@ mod sway_windows;
 use ai_session_client::{ContextGrant, ContextScope, RefreshPolicy, Session};
 use eframe::egui;
 use evermore_common::ai::{Backend, Message, Role};
-use evermore_common::operations::{Access, Approval, Definition};
+use evermore_common::operations::Definition;
 use signer_client::Identity;
 
 // Lucide icons (ISC license, see assets/icons/LICENSE), 24px / 2px-stroke
@@ -27,11 +28,21 @@ const ICON_SPARKLES: &[u8] = include_bytes!("../assets/icons/sparkles.svg");
 const ICON_PACKAGE: &[u8] = include_bytes!("../assets/icons/package.svg");
 const ICON_COPY: &[u8] = include_bytes!("../assets/icons/copy.svg");
 
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AiOperationProposal {
-    operation: String,
-    arguments: serde_json::Value,
+pub(crate) use evermore_common::agent::ProposalDraft as AiOperationProposal;
+
+fn operation_proposal_instructions(prompt: &str, catalog: &[Definition]) -> Option<String> {
+    evermore_common::agent::write_proposal_instructions(prompt, catalog)
+}
+
+fn parse_ai_operation_proposal(content: &str) -> Result<Option<AiOperationProposal>, String> {
+    evermore_common::agent::parse_proposal_marker(content)
+}
+
+fn validate_ai_operation_proposal(
+    proposal: &AiOperationProposal,
+    _catalog: &[Definition],
+) -> Result<(Definition, serde_json::Value), String> {
+    evermore_common::agent::validate_write_proposal(proposal)
 }
 
 fn main() -> eframe::Result {
@@ -321,90 +332,6 @@ fn open_indexed_file(path: &str, paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn operation_proposal_instructions(prompt: &str, catalog: &[Definition]) -> Option<String> {
-    let terms = prompt_terms(prompt);
-    if terms.is_empty() {
-        return None;
-    }
-    let mut relevant: Vec<(usize, &Definition)> = catalog
-        .iter()
-        .filter(|definition| {
-            definition.access == Access::Write && definition.approval == Approval::Required
-        })
-        .filter_map(|definition| {
-            let searchable = format!("{} {}", definition.name, definition.description);
-            let score = prompt_terms(&searchable).intersection(&terms).count();
-            (score > 0).then_some((score, definition))
-        })
-        .collect();
-    relevant.sort_by(|(score_a, a), (score_b, b)| {
-        score_b.cmp(score_a).then_with(|| a.name.cmp(&b.name))
-    });
-    relevant.truncate(5);
-    if relevant.is_empty() {
-        return None;
-    }
-    let catalogue: Vec<_> = relevant
-        .into_iter()
-        .map(|(_, definition)| {
-            serde_json::json!({
-                "operation": definition.name,
-                "description": definition.description,
-                "arguments_schema": definition.input_schema,
-            })
-        })
-        .collect();
-    Some(format!(
-        "You may suggest a system change only when the user clearly requests one. Use only the approval-gated write operations in this catalogue, and provide arguments that match the schema. A suggestion is not an action: do not claim it was submitted, approved, or executed. If a change is clearly requested and its arguments are known, finish with one exact marker line containing JSON in this shape: EVERMORE_PROPOSAL: {{\"operation\":\"catalogue.name\",\"arguments\":{{}}}}. Otherwise do not emit the marker. The UI will validate the proposal and the owner must still approve it. Relevant operation catalogue: {}",
-        serde_json::to_string(&catalogue).unwrap_or_else(|_| "[]".into())
-    ))
-}
-
-fn parse_ai_operation_proposal(content: &str) -> Result<Option<AiOperationProposal>, String> {
-    let Some(line) = content
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with("EVERMORE_PROPOSAL:"))
-    else {
-        return Ok(None);
-    };
-    let json = line
-        .trim_start()
-        .strip_prefix("EVERMORE_PROPOSAL:")
-        .unwrap_or_default()
-        .trim();
-    serde_json::from_str(json)
-        .map(Some)
-        .map_err(|error| format!("invalid operation proposal JSON: {error}"))
-}
-
-fn validate_ai_operation_proposal(
-    proposal: &AiOperationProposal,
-    catalog: &[Definition],
-) -> Result<(Definition, serde_json::Value), String> {
-    let definition = catalog
-        .iter()
-        .find(|definition| definition.name == proposal.operation)
-        .ok_or_else(|| "operation is not in the current catalogue".to_string())?;
-    if definition.access != Access::Write || definition.approval != Approval::Required {
-        return Err("only approval-gated write operations can be proposed".into());
-    }
-    let arguments =
-        evermore_common::operations::canonicalize_input(&proposal.operation, &proposal.arguments)?;
-    Ok((definition.clone(), arguments))
-}
-
-fn prompt_terms(text: &str) -> std::collections::HashSet<String> {
-    const STOP_WORDS: &[&str] = &[
-        "about", "after", "also", "and", "are", "for", "from", "help", "into", "make", "please",
-        "that", "the", "this", "with", "would",
-    ];
-    text.split(|character: char| !character.is_alphanumeric())
-        .map(str::to_ascii_lowercase)
-        .filter(|term| term.chars().count() > 2 && !STOP_WORDS.contains(&term.as_str()))
-        .collect()
-}
-
 fn focused_output_name(outputs_json: &[u8]) -> Option<String> {
     serde_json::from_slice::<Vec<serde_json::Value>>(outputs_json)
         .ok()?
@@ -449,6 +376,17 @@ struct PanelApp {
     configured_owner_pubkey: Option<String>,
     pending_operations: Vec<operations_client::PendingOperation>,
     operation_history: Vec<operations_client::OperationHistoryEntry>,
+    agent_recipes: Vec<evermore_common::agent::RecipeSummary>,
+    agent_recipes_loaded: bool,
+    agent_recipes_error: Option<String>,
+    agent_tasks: Vec<evermore_common::agent::Task>,
+    agent_tasks_loaded: bool,
+    agent_tasks_error: Option<String>,
+    agent_recipe_id: String,
+    agent_inputs: String,
+    agent_status: Option<String>,
+    agent_error: Option<String>,
+    agent_next_poll: Option<std::time::Instant>,
     approval_identity: String,
     approval_review_id: Option<String>,
     approval_error: Option<String>,
@@ -456,6 +394,12 @@ struct PanelApp {
     proposal_identity: String,
     proposal_operation: String,
     proposal_arguments: String,
+    proposal_prompt: String,
+    proposal_prompt_status: Option<String>,
+    proposal_prompt_error: Option<String>,
+    proposal_generation:
+        Option<std::sync::mpsc::Receiver<Result<evermore_common::agent::Proposal, String>>>,
+    proposal_generating: bool,
     command_palette: bool,
     ai_drawer: bool,
     ai_drawer_collapsed: bool,
@@ -1066,6 +1010,217 @@ impl PanelApp {
         }
     }
 
+    fn refresh_agent(&mut self) {
+        self.agent_recipes_loaded = true;
+        match agent_client::fetch_recipes() {
+            Ok(recipes) => {
+                self.agent_recipes = recipes;
+                self.agent_recipes_error = None;
+                if !self
+                    .agent_recipes
+                    .iter()
+                    .any(|recipe| recipe.id == self.agent_recipe_id)
+                {
+                    self.agent_recipe_id = self
+                        .agent_recipes
+                        .iter()
+                        .find(|recipe| recipe.id == "audit.digest")
+                        .or_else(|| self.agent_recipes.first())
+                        .map(|recipe| recipe.id.clone())
+                        .unwrap_or_default();
+                }
+            }
+            Err(error) => {
+                self.agent_recipes.clear();
+                self.agent_recipes_error = Some(error);
+            }
+        }
+        self.refresh_agent_tasks();
+    }
+
+    fn refresh_agent_tasks(&mut self) {
+        self.agent_tasks_loaded = true;
+        match agent_client::fetch_tasks(20) {
+            Ok(tasks) => {
+                self.agent_tasks = tasks;
+                self.agent_tasks_error = None;
+            }
+            Err(error) => self.agent_tasks_error = Some(error),
+        }
+        self.agent_next_poll = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    }
+
+    fn run_agent_recipe(&mut self) {
+        self.agent_status = None;
+        self.agent_error = None;
+        if self.agent_recipe_id.is_empty() {
+            self.agent_error = Some("Select a recipe first.".into());
+            return;
+        }
+        let inputs = if self.agent_inputs.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(&self.agent_inputs) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.agent_error = Some(format!("Recipe inputs must be JSON: {error}"));
+                    return;
+                }
+            }
+        };
+        match agent_client::run_recipe(&self.agent_recipe_id, inputs) {
+            Ok(task) => {
+                self.agent_status = Some(format!(
+                    "Started {} ({})",
+                    task.recipe_id,
+                    task_status_name(task.status)
+                ));
+                self.refresh_agent_tasks();
+            }
+            Err(error) => self.agent_error = Some(error),
+        }
+    }
+
+    fn agent_tasks_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_label("Recipe")
+                .selected_text(if self.agent_recipe_id.is_empty() {
+                    "No recipe available"
+                } else {
+                    &self.agent_recipe_id
+                })
+                .show_ui(ui, |ui| {
+                    for recipe in &self.agent_recipes {
+                        ui.selectable_value(
+                            &mut self.agent_recipe_id,
+                            recipe.id.clone(),
+                            format!("{} · {}", recipe.id, recipe.source),
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(!self.agent_recipe_id.is_empty(), egui::Button::new("Run"))
+                .clicked()
+            {
+                self.run_agent_recipe();
+            }
+        });
+        if let Some(recipe) = self
+            .agent_recipes
+            .iter()
+            .find(|recipe| recipe.id == self.agent_recipe_id)
+        {
+            ui.weak(&recipe.description);
+            ui.weak(format!(
+                "Budget: {} steps, {} writes, {}s · operations: {}",
+                recipe.budget.steps,
+                recipe.budget.writes,
+                recipe.budget.seconds,
+                if recipe.operations.is_empty() {
+                    "journal only".to_string()
+                } else {
+                    recipe.operations.join(", ")
+                }
+            ));
+            if recipe.inputs_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| !properties.is_empty())
+            {
+                ui.label("Inputs (JSON)");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.agent_inputs)
+                        .desired_rows(2)
+                        .code_editor()
+                        .hint_text("{\"workspace\": 2}"),
+                );
+            }
+        }
+        if let Some(status) = &self.agent_status {
+            ui.weak(status);
+        }
+        if let Some(error) = &self.agent_error {
+            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+        }
+        if let Some(error) = &self.agent_recipes_error {
+            ui.weak(error);
+        }
+        if let Some(error) = &self.agent_tasks_error {
+            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+        }
+        if self.agent_tasks.is_empty() {
+            ui.weak("No tasks recorded.");
+        }
+        for task in self.agent_tasks.clone() {
+            let title = self
+                .agent_recipes
+                .iter()
+                .find(|recipe| recipe.id == task.recipe_id)
+                .map(|recipe| recipe.title.as_str())
+                .unwrap_or(&task.recipe_id);
+            let header = format!("{} · {}", title, task_status_name(task.status));
+            egui::CollapsingHeader::new(header)
+                .id_salt(format!("task-{}", task.task_id))
+                .show(ui, |ui| {
+                    ui.weak(format!(
+                        "{} · {} · agent {} · created {}",
+                        task.recipe_id,
+                        task.recipe_source,
+                        task.agent_pubkey.chars().take(12).collect::<String>(),
+                        task.created_at
+                    ));
+                    ui.weak(format!(
+                        "Task {} · budget {} steps / {}s",
+                        task.task_id, task.budget.steps, task.budget.seconds
+                    ));
+                    for step in &task.steps {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("#{} {}", step.index, step.id));
+                            ui.weak(step_status_name(step.status));
+                            if let Some(operation) = &step.operation {
+                                ui.label(operation);
+                            }
+                            if let Some(operation_id) = &step.operation_id {
+                                ui.weak(format!("operation {operation_id}"));
+                            }
+                        });
+                        if let Some(error) = &step.error {
+                            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                        }
+                    }
+                    if let Some(result) = &task.result {
+                        if let Some(text) = result.as_str() {
+                            ui.monospace(text);
+                        } else {
+                            ui.monospace(serde_json::to_string_pretty(result).unwrap_or_default());
+                        }
+                    }
+                    if let Some(error) = &task.error {
+                        ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    }
+                    if matches!(
+                        task.status,
+                        evermore_common::agent::TaskStatus::Pending
+                            | evermore_common::agent::TaskStatus::Running
+                    ) && !task.cancel_requested
+                    {
+                        if ui.button("Cancel task").clicked() {
+                            match agent_client::cancel_task(&task.task_id) {
+                                Ok(task) => {
+                                    self.agent_status = Some(format!(
+                                        "Task {}: {}",
+                                        task.task_id,
+                                        task_status_name(task.status)
+                                    ));
+                                    self.refresh_agent_tasks();
+                                }
+                                Err(error) => self.agent_error = Some(error),
+                            }
+                        }
+                    }
+                });
+        }
+    }
+
     fn refresh_ai_index(&mut self) {
         self.ai_index_loaded = true;
         match ai_index_client::list_scopes() {
@@ -1091,6 +1246,95 @@ impl PanelApp {
                 self.ai_context_sources.clear();
                 self.ai_context_error = Some(error);
             }
+        }
+    }
+
+    fn generate_proposal(&mut self) {
+        self.proposal_prompt_status = None;
+        self.proposal_prompt_error = None;
+        let prompt = self.proposal_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.proposal_prompt_error = Some("Describe the change you want first.".into());
+            return;
+        }
+        if self.proposal_generating {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(agent_client::propose_operation(&prompt));
+        });
+        self.proposal_generation = Some(receiver);
+        self.proposal_generating = true;
+        self.proposal_prompt_status = Some(
+            "Generating a proposal with the local model; the owner still approves any request."
+                .into(),
+        );
+    }
+
+    fn poll_proposal_generation(&mut self) {
+        let Some(receiver) = self.proposal_generation.as_ref() else {
+            return;
+        };
+        let received = match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("proposal generation stopped unexpectedly".into()))
+            }
+        };
+        let Some(result) = received else {
+            return;
+        };
+        self.proposal_generation = None;
+        self.proposal_generating = false;
+        match result {
+            Ok(proposal) => {
+                self.proposal_operation = proposal.operation;
+                self.proposal_arguments =
+                    serde_json::to_string_pretty(&proposal.arguments).unwrap_or_default();
+                self.proposal_prompt_status = Some(format!(
+                    "Generated with {} after {} attempt(s) · {} prompt + {} completion tokens of {} budget · request: \"{}\". Review the arguments, then submit for owner approval.",
+                    proposal.model,
+                    proposal.attempts,
+                    proposal.prompt_tokens.unwrap_or(0),
+                    proposal.completion_tokens.unwrap_or(0),
+                    proposal.context_budget,
+                    proposal.triggering_prompt
+                ));
+            }
+            Err(error) => self.proposal_prompt_error = Some(error),
+        }
+    }
+
+    fn proposal_prompt_ui(&mut self, ui: &mut egui::Ui) {
+        self.poll_proposal_generation();
+        ui.label("Describe the change");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.proposal_prompt)
+                    .hint_text("e.g. switch the theme to dark")
+                    .desired_width(320.0),
+            );
+            if ui
+                .add_enabled(
+                    !self.proposal_prompt.trim().is_empty() && !self.proposal_generating,
+                    egui::Button::new(if self.proposal_generating {
+                        "Generating…"
+                    } else {
+                        "Generate proposal"
+                    }),
+                )
+                .clicked()
+            {
+                self.generate_proposal();
+            }
+        });
+        if let Some(status) = &self.proposal_prompt_status {
+            ui.weak(status);
+        }
+        if let Some(error) = &self.proposal_prompt_error {
+            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
         }
     }
 
@@ -1133,6 +1377,8 @@ impl PanelApp {
             egui::TextEdit::singleline(&mut self.palette_query)
                 .hint_text("Search settings, packages, notifications, or Sway"),
         );
+        self.proposal_prompt_ui(ui);
+        ui.add_space(6.0);
         let writable: Vec<_> = self
             .operations
             .iter()
@@ -1309,6 +1555,15 @@ impl PanelApp {
             pending.expires_at
         ));
         ui.monospace(serde_json::to_string_pretty(&pending.arguments).unwrap_or_default());
+        if let Some(task_id) = &pending.task_id {
+            ui.weak(format!(
+                "Task {task_id} · step {}",
+                pending
+                    .step_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "?".into())
+            ));
+        }
         if pending.status_source.is_some() {
             ui.colored_label(
                 egui::Color32::from_rgb(230, 170, 110),
@@ -1666,6 +1921,15 @@ impl eframe::App for PanelApp {
                 if !self.operations_loaded {
                     self.refresh_operations();
                 }
+                if !self.agent_recipes_loaded {
+                    self.refresh_agent();
+                }
+                if self
+                    .agent_next_poll
+                    .map_or(true, |deadline| std::time::Instant::now() >= deadline)
+                {
+                    self.refresh_agent_tasks();
+                }
                 if !self.identities_loaded {
                     self.refresh_identities();
                 }
@@ -1880,6 +2144,8 @@ impl eframe::App for PanelApp {
                             );
                         }
                     });
+                self.proposal_prompt_ui(ui);
+                ui.add_space(6.0);
                 let writable: Vec<_> = self
                     .operations
                     .iter()
@@ -1976,6 +2242,15 @@ impl eframe::App for PanelApp {
                                 "Offline journal snapshot · decisions require the operation daemon",
                             );
                         }
+                        if let Some(task_id) = &pending.task_id {
+                            ui.weak(format!(
+                                "Task {task_id} · step {}",
+                                pending
+                                    .step_index
+                                    .map(|index| index.to_string())
+                                    .unwrap_or_else(|| "?".into())
+                            ));
+                        }
                         ui.monospace(
                             serde_json::to_string_pretty(&pending.arguments).unwrap_or_default(),
                         );
@@ -2056,10 +2331,29 @@ impl eframe::App for PanelApp {
                     });
                 }
                 ui.collapsing("Recent activity", |ui| {
+                    ui.strong("Tasks");
+                    self.agent_tasks_ui(ui);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.strong("Operation history");
                     if self.operation_history.is_empty() {
                         ui.weak("No operation requests recorded.");
                     }
+                    let grouped: std::collections::BTreeSet<String> = self
+                        .agent_tasks
+                        .iter()
+                        .map(|task| task.task_id.clone())
+                        .collect();
+                    let mut grouped_count = 0;
                     for entry in &self.operation_history {
+                        if entry
+                            .task_id
+                            .as_deref()
+                            .is_some_and(|task_id| grouped.contains(task_id))
+                        {
+                            grouped_count += 1;
+                            continue;
+                        }
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(&entry.operation).strong());
@@ -2072,6 +2366,15 @@ impl eframe::App for PanelApp {
                                 entry.operation_version,
                                 entry.created_at
                             ));
+                            if let Some(task_id) = &entry.task_id {
+                                ui.weak(format!(
+                                    "Task {task_id} · step {}",
+                                    entry
+                                        .step_index
+                                        .map(|index| index.to_string())
+                                        .unwrap_or_else(|| "?".into())
+                                ));
+                            }
                             if entry.status_source.as_deref() == Some("local_journal_offline") {
                                 ui.weak("Offline journal snapshot");
                             }
@@ -2101,6 +2404,11 @@ impl eframe::App for PanelApp {
                                 ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
                             }
                         });
+                    }
+                    if grouped_count > 0 {
+                        ui.weak(format!(
+                            "{grouped_count} operation step(s) grouped under their tasks above."
+                        ));
                     }
                 });
                 });
@@ -2715,6 +3023,39 @@ fn resolve_context_grant(
         Ok(data)
     } else {
         Ok(grant.snapshot.clone().unwrap_or(serde_json::Value::Null))
+    }
+}
+
+fn task_status_name(status: evermore_common::agent::TaskStatus) -> &'static str {
+    use evermore_common::agent::TaskStatus;
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::Succeeded => "succeeded",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Denied => "denied",
+        TaskStatus::Expired => "expired",
+        TaskStatus::Cancelled => "cancelled",
+        TaskStatus::PartiallyCompleted => "partially completed",
+        TaskStatus::ExecutionUnknown => "execution unknown",
+        TaskStatus::Replanned => "replanned",
+        TaskStatus::Unknown => "unknown",
+    }
+}
+
+fn step_status_name(status: evermore_common::agent::StepStatus) -> &'static str {
+    use evermore_common::agent::StepStatus;
+    match status {
+        StepStatus::Pending => "pending",
+        StepStatus::Running => "running",
+        StepStatus::Succeeded => "succeeded",
+        StepStatus::Failed => "failed",
+        StepStatus::Denied => "denied",
+        StepStatus::Expired => "expired",
+        StepStatus::Cancelled => "cancelled",
+        StepStatus::AwaitingApproval => "awaiting approval",
+        StepStatus::ExecutionUnknown => "execution unknown",
+        StepStatus::Unknown => "unknown",
     }
 }
 

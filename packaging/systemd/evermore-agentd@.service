@@ -1,0 +1,27 @@
+[Unit]
+Description=Evermore bounded agent task runner for owner identity %i
+Documentation=https://github.com/imattau/evermore
+After=evermore-signer.service evermore-relay.service evermore-operationsd@%i.service
+Wants=evermore-signer.service evermore-relay.service evermore-operationsd@%i.service
+
+[Service]
+Type=simple
+# The assistant identity is distinct from the owner. It never signs an
+# approval and never holds execution authority; every write would still go
+# through evermore-operationsd and owner approval.
+ExecStart=/usr/bin/evermore-agentd serve --agent-identity %i-assistant
+Restart=on-failure
+RestartSec=2
+UMask=0077
+RuntimeDirectory=evermore
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/evermore
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=default.target

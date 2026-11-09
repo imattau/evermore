@@ -2189,3 +2189,522 @@ pub mod notifications {
         }
     }
 }
+
+/// Task and recipe protocol for the deterministic agent runner
+/// (`evermore-agentd`). Tasks group existing catalogue operations; a task is
+/// never execution authority and never introduces a second operation
+/// lifecycle.
+pub mod agent {
+    use crate::operations::{self, Access, Approval, Definition};
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    pub const SOCKET_RELATIVE_PATH: &str = "evermore/agentd.sock";
+    pub const PROTOCOL_VERSION: u32 = 1;
+    pub const TASK_TAG: &str = "task";
+    pub const STEP_TAG: &str = "step";
+    pub const TASKS_FILE: &str = "evermore/tasks/tasks.json";
+    pub const MAX_LOCAL_RECIPE_BYTES: u64 = 256 * 1024;
+    pub const MAX_RECIPE_STEPS: u32 = 32;
+    pub const MAX_RECIPE_SECONDS: u64 = 300;
+    pub const PROPOSAL_MARKER: &str = "EVERMORE_PROPOSAL:";
+    pub const PROPOSAL_CONTEXT_TOKENS: u32 = 4096;
+
+    pub fn runtime_socket_path() -> PathBuf {
+        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+    }
+
+    pub fn tasks_file_path() -> Result<PathBuf, String> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+        Ok(base.join(TASKS_FILE))
+    }
+
+    pub fn recipes_dir() -> Result<PathBuf, String> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+        Ok(base.join("evermore/recipes"))
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "method", content = "params", rename_all = "snake_case")]
+    pub enum Request {
+        Health,
+        ConfiguredAgent,
+        ListRecipes,
+        RunRecipe {
+            recipe_id: String,
+            #[serde(default)]
+            inputs: Value,
+        },
+        /// Generate one validated approval-gated write proposal from a natural
+        /// language request. This never submits an operation request.
+        ProposeOperation {
+            prompt: String,
+        },
+        TaskStatus {
+            task_id: String,
+        },
+        ListTasks {
+            limit: usize,
+        },
+        CancelTask {
+            task_id: String,
+        },
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    pub enum Response {
+        Ok { data: Value },
+        Err { message: String },
+    }
+
+    impl Response {
+        pub fn ok(data: impl Serialize) -> Self {
+            Response::Ok {
+                data: serde_json::to_value(data).unwrap_or(Value::Null),
+            }
+        }
+
+        pub fn err(message: impl Into<String>) -> Self {
+            Response::Err {
+                message: message.into(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum TaskStatus {
+        Pending,
+        Running,
+        Succeeded,
+        Failed,
+        Denied,
+        Expired,
+        Cancelled,
+        PartiallyCompleted,
+        ExecutionUnknown,
+        Replanned,
+        #[serde(other)]
+        Unknown,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum StepStatus {
+        Pending,
+        Running,
+        Succeeded,
+        Failed,
+        Denied,
+        Expired,
+        Cancelled,
+        AwaitingApproval,
+        ExecutionUnknown,
+        #[serde(other)]
+        Unknown,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum StepKind {
+        Select,
+        Read,
+        Journal,
+        Render,
+        #[serde(other)]
+        Unknown,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TaskBudget {
+        pub steps: u32,
+        pub writes: u32,
+        pub seconds: u64,
+        /// Maximum model-context tokens a recipe may use. Recipes with no model
+        /// step ignore it; M11.2's L1 generation enforces the same cap directly.
+        #[serde(default = "default_context_tokens")]
+        pub context_tokens: u32,
+    }
+
+    fn default_context_tokens() -> u32 {
+        4096
+    }
+
+    impl Default for TaskBudget {
+        fn default() -> Self {
+            Self {
+                steps: 8,
+                writes: 0,
+                seconds: 30,
+                context_tokens: default_context_tokens(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TaskStep {
+        pub index: u32,
+        pub id: String,
+        pub kind: StepKind,
+        pub operation: Option<String>,
+        #[serde(default)]
+        pub arguments: Option<Value>,
+        #[serde(default)]
+        pub operation_id: Option<String>,
+        pub status: StepStatus,
+        #[serde(default)]
+        pub result: Option<Value>,
+        #[serde(default)]
+        pub error: Option<String>,
+        #[serde(default)]
+        pub started_at: Option<u64>,
+        #[serde(default)]
+        pub finished_at: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Task {
+        pub task_id: String,
+        pub recipe_id: String,
+        pub recipe_version: u32,
+        /// `builtin` or `local`; local recipes are unsigned and recorded so the
+        /// audit trail can distinguish them.
+        pub recipe_source: String,
+        pub recipe_sha256: String,
+        pub agent_pubkey: String,
+        pub owner_pubkey: String,
+        pub status: TaskStatus,
+        #[serde(default)]
+        pub inputs: Value,
+        pub budget: TaskBudget,
+        pub steps: Vec<TaskStep>,
+        #[serde(default)]
+        pub cancel_requested: bool,
+        #[serde(default)]
+        pub result: Option<Value>,
+        #[serde(default)]
+        pub error: Option<String>,
+        #[serde(default)]
+        pub status_source: Option<String>,
+        pub created_at: u64,
+        pub updated_at: u64,
+        pub expires_at: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct RecipeSummary {
+        pub id: String,
+        pub version: u32,
+        pub title: String,
+        pub description: String,
+        pub source: String,
+        pub operations: Vec<String>,
+        pub budget: TaskBudget,
+        /// Object schema for the recipe's `select` inputs, generated from the
+        /// recipe's declared slots. The panel renders a simple form from it.
+        pub inputs_schema: Value,
+    }
+
+    /// The one-operation shape emitted by the panel's proposal marker and by
+    /// L1 generation.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct ProposalDraft {
+        pub operation: String,
+        pub arguments: Value,
+    }
+
+    /// A validated L1 proposal. It has not been submitted; the owner still
+    /// approves the resulting operation request.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Proposal {
+        pub operation: String,
+        pub arguments: Value,
+        pub model: String,
+        pub attempts: u32,
+        pub prompt_tokens: Option<u64>,
+        pub completion_tokens: Option<u64>,
+        pub context_budget: u32,
+        /// The request text shown to the model, surfaced next to the proposal
+        /// so a steered or injected proposal is visible at review time.
+        pub triggering_prompt: String,
+    }
+
+    /// Build the system instructions for one catalogue-constrained write
+    /// proposal. Returns `None` when no write operation matches the request.
+    pub fn write_proposal_instructions(prompt: &str, catalog: &[Definition]) -> Option<String> {
+        write_proposal_prompt(prompt, catalog, false)
+    }
+
+    /// Constrained variant used by L1 generation, where the model output is
+    /// grammar-limited to one proposal or a refusal object.
+    pub fn write_constrained_proposal_instructions(
+        prompt: &str,
+        catalog: &[Definition],
+    ) -> Option<String> {
+        write_proposal_prompt(prompt, catalog, true)
+    }
+
+    fn write_proposal_prompt(
+        prompt: &str,
+        catalog: &[Definition],
+        constrained: bool,
+    ) -> Option<String> {
+        let terms = prompt_terms(prompt);
+        if terms.is_empty() {
+            return None;
+        }
+        let mut relevant: Vec<(usize, &Definition)> = catalog
+            .iter()
+            .filter(|definition| {
+                definition.access == Access::Write && definition.approval == Approval::Required
+            })
+            .filter_map(|definition| {
+                let searchable = format!("{} {}", definition.name, definition.description);
+                let score = prompt_terms(&searchable).intersection(&terms).count();
+                (score > 0).then_some((score, definition))
+            })
+            .collect();
+        relevant.sort_by(|(score_a, a), (score_b, b)| {
+            score_b.cmp(score_a).then_with(|| a.name.cmp(&b.name))
+        });
+        relevant.truncate(5);
+        if relevant.is_empty() {
+            return None;
+        }
+        let catalogue: Vec<_> = relevant
+            .into_iter()
+            .map(|(_, definition)| {
+                serde_json::json!({
+                    "operation": definition.name,
+                    "description": definition.description,
+                    "arguments_schema": definition.input_schema,
+                })
+            })
+            .collect();
+        let ending = if constrained {
+            "Otherwise only emit {\"refusal\":\"short reason\"}."
+        } else {
+            "Otherwise do not emit the marker."
+        };
+        Some(format!(
+            "You may suggest a system change only when the user clearly requests one. Use only the approval-gated write operations in this catalogue, and provide arguments that match the schema. A suggestion is not an action: do not claim it was submitted, approved, or executed. If a change is clearly requested and its arguments are known, finish with one exact marker line containing JSON in this shape: {} {{\"operation\":\"catalogue.name\",\"arguments\":{{}}}}. {} The UI will validate the proposal and the owner must still approve it. Relevant operation catalogue: {}",
+            PROPOSAL_MARKER,
+            ending,
+            serde_json::to_string(&catalogue).unwrap_or_else(|_| "[]".into())
+        ))
+    }
+
+    /// Parse the last proposal marker in model output. A refusal object is
+    /// reported as an error so the caller can show it without treating it as a
+    /// proposal.
+    pub fn parse_proposal_marker(content: &str) -> Result<Option<ProposalDraft>, String> {
+        if let Some(line) = content
+            .lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with(PROPOSAL_MARKER))
+        {
+            let json = line
+                .trim_start()
+                .strip_prefix(PROPOSAL_MARKER)
+                .unwrap_or_default()
+                .trim();
+            return serde_json::from_str(json)
+                .map(Some)
+                .map_err(|error| format!("invalid operation proposal JSON: {error}"));
+        }
+        let trimmed = content.trim();
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(reason) = value.get("refusal").and_then(Value::as_str) {
+                return Err(format!("Model declined: {reason}"));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Validate a draft against the live catalogue and return its canonical
+    /// arguments. Only approval-gated write operations are accepted.
+    pub fn validate_write_proposal(draft: &ProposalDraft) -> Result<(Definition, Value), String> {
+        let definition = operations::find(&draft.operation)
+            .ok_or_else(|| "operation is not in the current catalogue".to_string())?;
+        if definition.access != Access::Write || definition.approval != Approval::Required {
+            return Err("only approval-gated write operations can be proposed".into());
+        }
+        let arguments = operations::canonicalize_input(&draft.operation, &draft.arguments)?;
+        Ok((definition, arguments))
+    }
+
+    fn prompt_terms(text: &str) -> std::collections::HashSet<String> {
+        const STOP_WORDS: &[&str] = &[
+            "about", "after", "also", "and", "are", "for", "from", "help", "into", "make",
+            "please", "that", "the", "this", "with", "would",
+        ];
+        text.split(|character: char| !character.is_alphanumeric())
+            .map(str::to_ascii_lowercase)
+            .filter(|term| term.chars().count() > 2 && !STOP_WORDS.contains(&term.as_str()))
+            .collect()
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AgentHealth {
+        pub protocol_version: u32,
+        pub agent_pubkey: String,
+        pub owner_pubkey: String,
+    }
+
+    /// Tag pair marking a request event as a step of a task.
+    pub fn task_tag(task_id: &str) -> Vec<String> {
+        vec![TASK_TAG.to_string(), task_id.to_string()]
+    }
+
+    /// Tag pair carrying a task step's zero-based index.
+    pub fn step_tag(index: u32) -> Vec<String> {
+        vec![STEP_TAG.to_string(), index.to_string()]
+    }
+
+    /// Read the private task store without requiring the agent daemon. Running
+    /// tasks are reported as `execution_unknown` and are never replayed.
+    pub fn read_local_tasks(limit: usize) -> Result<Vec<Task>, String> {
+        let path = tasks_file_path()?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!("couldn't read local task store {}: {error}", path.display())
+        })?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("local task store must be a regular file with private permissions".into());
+        }
+        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+        let file: TaskFile = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("couldn't parse local task store: {error}"))?;
+        let now = unix_time();
+        let mut tasks: Vec<Task> = file
+            .tasks
+            .into_values()
+            .map(|task| normalize_offline_task(task, now))
+            .collect();
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
+        tasks.truncate(limit.clamp(1, 100));
+        Ok(tasks)
+    }
+
+    fn normalize_offline_task(mut task: Task, now: u64) -> Task {
+        let interrupted = task.status == TaskStatus::Running
+            || task
+                .steps
+                .iter()
+                .any(|step| step.status == StepStatus::Running);
+        if interrupted {
+            task.status = TaskStatus::ExecutionUnknown;
+            task.error = Some(
+                "agent daemon is unavailable after a step was claimed; outcome requires review and must not be replayed".into(),
+            );
+            for step in &mut task.steps {
+                if step.status == StepStatus::Running {
+                    step.status = StepStatus::ExecutionUnknown;
+                    step.error = Some(
+                        "step was claimed when the agent daemon stopped; outcome requires review"
+                            .into(),
+                    );
+                }
+            }
+        } else if task.status == TaskStatus::Pending && now >= task.expires_at {
+            task.status = TaskStatus::Expired;
+        }
+        task.status_source = Some("local_store_offline".into());
+        task
+    }
+
+    #[derive(Default, Serialize, Deserialize)]
+    struct TaskFile {
+        #[serde(default)]
+        tasks: BTreeMap<String, Task>,
+    }
+
+    fn unix_time() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn task_and_step_tags_are_stable() {
+            assert_eq!(task_tag("abc"), vec!["task".to_string(), "abc".to_string()]);
+            assert_eq!(step_tag(2), vec!["step".to_string(), "2".to_string()]);
+        }
+
+        #[test]
+        fn task_status_round_trips() {
+            let status = TaskStatus::PartiallyCompleted;
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, "\"partially_completed\"");
+            assert_eq!(
+                serde_json::from_str::<TaskStatus>(&json).unwrap(),
+                TaskStatus::PartiallyCompleted
+            );
+            assert_eq!(
+                serde_json::from_str::<TaskStatus>("\"future_state\"").unwrap(),
+                TaskStatus::Unknown
+            );
+        }
+
+        #[test]
+        fn proposal_marker_parses_and_validates() {
+            let draft = parse_proposal_marker(
+                "Preparing.\nEVERMORE_PROPOSAL: {\"operation\":\"settings.set\",\"arguments\":{\"domain\":\"theme\",\"key\":\"mode\",\"value\":\"dark\"}}",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(draft.operation, "settings.set");
+            let (_, arguments) = validate_write_proposal(&draft).unwrap();
+            assert_eq!(arguments["domain"], "theme");
+        }
+
+        #[test]
+        fn proposal_refusal_and_read_operations_are_rejected() {
+            let refusal = parse_proposal_marker("{\"refusal\":\"no matching write\"}").unwrap_err();
+            assert!(refusal.contains("no matching write"));
+
+            let read = ProposalDraft {
+                operation: "settings.get".into(),
+                arguments: serde_json::json!({"domain": "theme", "key": "mode"}),
+            };
+            assert!(validate_write_proposal(&read).is_err());
+        }
+
+        #[test]
+        fn proposal_instructions_include_matching_writes() {
+            let catalog = operations::catalog();
+            let instructions =
+                write_proposal_instructions("change the theme to dark", &catalog).unwrap();
+            assert!(instructions.contains("settings.set"));
+            assert!(instructions.contains(PROPOSAL_MARKER));
+            assert!(!instructions.contains("\"refusal\""));
+            let constrained =
+                write_constrained_proposal_instructions("change the theme to dark", &catalog)
+                    .unwrap();
+            assert!(constrained.contains("\"refusal\""));
+        }
+    }
+}

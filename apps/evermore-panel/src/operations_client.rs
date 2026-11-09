@@ -12,6 +12,10 @@ pub struct PendingOperation {
     pub operation_id: String,
     pub actor_pubkey: String,
     pub operation: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub step_index: Option<u32>,
     pub arguments: Value,
     pub created_at: u64,
     pub expires_at: u64,
@@ -26,6 +30,10 @@ pub struct OperationHistoryEntry {
     pub actor_pubkey: String,
     pub operation: String,
     pub operation_version: u32,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub step_index: Option<u32>,
     pub arguments: Value,
     pub status: String,
     pub result: Option<Value>,

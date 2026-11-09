@@ -87,6 +87,7 @@ evermore/
     evermore-npack/             <- Phase 5: package manager core
     evermore-inferd/            <- Phase 7.5: llama.cpp supervisor and model store
     evermore-mcp/               <- Phase 7: MCP server exposing daemons to AI agents
+    evermore-agentd/            <- Phase 11: deterministic recipe and task runner
   apps/
     evermore-panel/             <- egui control panel and desktop launcher/drawers
   tools/
@@ -834,7 +835,7 @@ streamed inference request.
 | `ai-contextd` | Provides selected session context such as focused window, workspace, theme settings, and non-DM notification metadata. | Observes only; serves only sources enabled by the user-session allowlist. |
 | `ai-indexd` | Builds and searches a local semantic index for explicitly selected text files. | Searches only; indexes only per-file selections and redacts secret-shaped values. |
 | `evermore-operationsd` | Owns the operation catalogue, authorization checks, approval state, execution, result redaction, and audit events. | The only path for AI-requested mutations; executes writes only after required approval. |
-| `ai-agentd` (future optional) | Could coordinate multi-step tasks using inference, context, and registered operations. External agents use MCP in the initial implementation. | No shell or execution authority; not shipped in this phase. |
+| `ai-agentd` (Phase 11) | Coordinates multi-step tasks using recipes, inference, context, and registered operations. External agents use MCP in the initial implementation. | No shell or execution authority; submits only catalogue operations through the existing approval path. |
 | `ai-policyd` (future optional) | Could supply advisory risk and trust summaries to the human approval flow. | No grant or approval authority; not shipped in this phase. |
 | `evermore-mcp` | Adapts registered operations to MCP tools and transports. | Interface only; contains no policy or execution authority. |
 
@@ -1952,6 +1953,133 @@ comparison and explicit pin/recent behavior; add settings actions after the
 basic invocation flow is stable. Side drawers and animation work follow only
 when their own surface usability is tested.
 
+### Phase 11: Agentic AI — Bounded Agency
+
+**Goal:** Ship an agent that proposes and executes desktop work through the
+catalogue, grant, approval, and audit path Phase 7 already built, without
+widening any authority. The agent is a deterministic recipe runner in the
+reserved `ai-agentd` slot: control flow stays in Rust, the model fills declared
+slots and branch choices, GBNF and catalogue validation constrain its output,
+and the owner approves every write. The full rationale and limits are in the
+"Agentic AI — Bounded Agency" addendum below; this phase turns that design into
+milestones.
+
+**Implementation status (2026-11-09):** M11.1 and M11.2 are implemented.
+`evermore-common::agent` defines the v1 socket/task protocol, tag helpers,
+offline task read, and shared proposal instructions, marker parsing, and
+validation; `evermore-agentd` serves the deterministic runner with a private
+resumable task store, the built-in `audit.digest` recipe, validated local TOML
+recipes, a CLI, and L1 generation. `evermore-operationsd` records optional
+`task`/`step` tags on request events; the panel folds recipe runs, task and step
+state, and task cancellation into Recent Activity.
+
+L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,
+validates it against the catalogue, repairs malformed or out-of-catalogue
+output at most once, returns a refusal as a refusal, and enforces a 4096-token
+context budget. It never submits an operation; the panel's "Describe the
+change" field fills the existing owner-approval form. L1 is a direct generation
+request rather than a persisted task because the resulting operation request is
+the durable artifact. Task budgets now carry `context_tokens` for the first
+model-backed recipe step.
+
+Local recipes are read-only in this version: write steps and non-zero write
+budgets are refused, so an unsigned recipe cannot drive a mutation yet. Host
+unit tests pass, and an end-to-end digest, local-recipe, repair, and refusal run
+against stub signer, operations, and inference sockets produced zero write or
+invoke calls with a `0600` task store. VM acceptance remains. M11.3-M11.5 are
+not started. Phase 7's operation baseline and Phase 7.5's inference runtime are
+unchanged.
+
+**Architecture:**
+
+```
+panel (Recent Activity) / CLI
+        │  Unix socket
+        ▼
+  evermore-agentd  ──reads──►  evermore-operationsd (catalogue reads)
+        │                    └─►  local operation journal (offline)
+        ├─ recipe registry: built-in + validated local TOML
+        ├─ task store: private, durable, resumable
+        └─ step submit ──►  existing signed kind:1 request + task/step tags
+                              └─►  owner approval in the existing inbox
+```
+
+The agent never executes an operation itself. Every mutating step becomes an
+ordinary signed operation request, so the existing approval, expiry,
+cancellation, `execution_unknown`, and exactly-once recovery behavior applies
+to steps without a second lifecycle.
+
+**Milestones:**
+
+- **M11.1 — Task primitive and audit digest.** Add `evermore-common::agent`
+  (socket, protocol v1, task types, tag helpers, offline task read). Add
+  `crates/evermore-agentd` as a deterministic recipe runner with a private task
+  store and CLI. Extend `evermore-operationsd` records with optional
+  `task_id`/`step_index` parsed from `task`/`step` tags; the operation lifecycle
+  is unchanged. Compile in a read-only `audit.digest` recipe and load validated
+  local TOML recipes from `$XDG_DATA_HOME/evermore/recipes` (regular files,
+  size-capped, operation allowlist within the agent grant, local provenance
+  recorded). v1 refuses write steps. Fold task and step state into the panel's
+  existing Recent Activity section rather than adding a tab, with a recipe
+  picker, inputs, run, and task-level cancel. Add the user unit. Acceptance:
+  digest runs against a stub operations socket with zero
+  `SubmitSignedRequest` calls; task tags round-trip through pending/history;
+  restart after a claimed step reports `execution_unknown` without replay;
+  panel grouping shows standalone operations unchanged.
+- **M11.2 — L1 generation.** Constrained JSON from `ai-inferd`, validated
+  against the catalogue, with the bounded two-attempt repair loop. Add the
+  context-token budget to task records at the same time, since this is the
+  first milestone that gives a model any task content. Replace the manual
+  single-operation form with "describe what you want"; out-of-catalogue and
+  out-of-grant proposals are refusals, not attempts.
+- **M11.3 — First writes and plan approval.** Add `notifications.set_dnd` and
+  the workspace composer and settings concierge recipes. Introduce plan
+  preview and approval bound to the canonical argument list, while keeping
+  per-step approval available. Revalidate grant, recipe, and arguments at
+  execution; no session-wide permission.
+- **M11.4 — Package doctor and update planner.** Read-heavy multi-step recipes
+  over installed/available/dependency operations, with `partially_completed` as
+  a normal outcome and `install_pinned` or `remove` only as owner-approved
+  proposals.
+- **M11.5 — Opt-in routines.** Scheduled recipes with dedicated identities and
+  short expiring grants, visible in the audit trail. Never a general background
+  agent switch; revocation stops the next write.
+- **M11.6 — Adapter coverage for agent-shaped output.** Extend the existing
+  catalogue-derived dataset with recipe slot extraction and task-summary
+  records, and evaluate them in the same held-out split. Keep one adapter (see
+  the decision below); add no per-agent or per-routine LoRA.
+
+**LoRA decision — one adapter, not one per agent.** Evermore ships one
+Qwen2.5-1.5B-Instruct base plus one multi-task tool-use LoRA covering catalogue
+proposals, MCP `tools/call`, and recipe slot filling. An agent is a keypair and
+an expiring grant, not a different model: the authority boundary is
+`grant ∩ recipe` enforced in code plus owner approval, and a separate adapter
+would imply a boundary the weights cannot provide. Per-agent adapters would also
+multiply signed-package provenance, evaluation, and `registry.lock` maintenance,
+while a `llama-server` child holds one active adapter scale, so concurrent
+per-agent selection would need duplicated base weights or serialized switching.
+Split adapters by query class (structured tool-call vs. conversation) only if a
+held-out evaluation shows interference; never by identity or routine.
+
+**Validation:** With the executor stopped, run the digest recipe and confirm it
+reads the durable journal and renders a digest without any pending request.
+With the executor running and a relay-acknowledged grant, run the digest and
+confirm task and step records correlate to the operation history. Install a
+local recipe and confirm duplicate IDs, unknown operations, write steps,
+oversized files, symlinks, and out-of-grant operations are refused with
+specific errors. Restart the daemon mid-step and confirm no replay. For L1,
+feed a stub inference socket malformed then valid output and confirm exactly
+one repair, then a refusal and confirm no proposal or request is created. Run
+`cargo fmt --all -- --check`, `cargo check --workspace`,
+`cargo test --workspace`, and `git diff --check`, then repeat in the Arch VM.
+
+**Build order:** M11.1 first: common types, operationsd linkage, agentd store
+and runner, digest, panel grouping, unit file. M11.2 follows once the task view
+shows real tasks. M11.3 introduces writes and plan approval together; never
+ship one without the other. M11.4 and M11.5 follow only after the approval
+surface has been exercised on the simple writes. M11.6 tracks the catalogue
+fingerprint and re-evaluates on every operation change.
+
 ## Key Design Decisions and Risks
 
 A few decisions will shape the entire project and are worth resolving early:
@@ -2448,11 +2576,12 @@ after the surfaces, not before.
 
 ## Addendum: Agentic AI — Bounded Agency (Design Note)
 
-**Status:** design note, not a phase. It refines the reserved `ai-agentd` slot
-in Phase 7's service table into a concrete shape and records what agentic
-behaviour Evermore should ship, why, and under which limits. Phase 7's
-implemented baseline is unchanged, and nothing here is a prerequisite for it.
-It adds no milestones, services, or acceptance gates.
+**Status:** design note; now specified as **Phase 11**. It refines the reserved
+`ai-agentd` slot in Phase 7's service table into a concrete shape and records
+what agentic behaviour Evermore should ship, why, and under which limits. Phase
+7's implemented baseline is unchanged, and nothing here is a prerequisite for
+it. Phase 11 adds the milestones and acceptance gates that this note
+deliberately omitted.
 
 **Scope:** the assistant surface in `evermore-panel`, the inference and
 operation services an agent consumes, and the audit and approval surfaces it

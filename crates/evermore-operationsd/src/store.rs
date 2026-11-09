@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use evermore_common::agent;
 use evermore_common::operations::{self, Access};
 use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,12 @@ pub struct OperationRecord {
     pub actor_pubkey: String,
     pub operation: String,
     pub operation_version: u32,
+    /// Task grouping metadata. These do not change the operation lifecycle;
+    /// they only let the agent task view correlate a step with its request.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub step_index: Option<u32>,
     pub arguments: Value,
     pub request_event: Value,
     pub approval_event: Option<Value>,
@@ -169,6 +176,7 @@ impl OperationStore {
         if !has_tag(&event, "p", &self.owner_pubkey.to_hex()) {
             return Err("request must identify the configured owner in a p tag".to_string());
         }
+        let (task_id, step_index) = parse_task_tags(&event)?;
 
         let payload: Value = serde_json::from_str(plaintext_content)
             .map_err(|e| format!("request content must be JSON: {e}"))?;
@@ -210,6 +218,8 @@ impl OperationStore {
             actor_pubkey,
             operation: name.to_string(),
             operation_version: definition.version,
+            task_id,
+            step_index,
             arguments,
             request_event: event_value,
             approval_event: None,
@@ -789,6 +799,62 @@ fn has_tag(event: &Event, tag_name: &str, expected: &str) -> bool {
     })
 }
 
+fn parse_task_tags(event: &Event) -> Result<(Option<String>, Option<u32>), String> {
+    let mut task_ids: Vec<&str> = Vec::new();
+    let mut step_indexes: Vec<&str> = Vec::new();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        match values.first().map(String::as_str) {
+            Some(agent::TASK_TAG) => {
+                let value = values.get(1).map(String::as_str).unwrap_or("");
+                if values.len() != 2
+                    || value.is_empty()
+                    || value.len() > 128
+                    || !value.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || character == '-' || character == '_'
+                    })
+                {
+                    return Err("task tag must carry one bounded identifier".to_string());
+                }
+                task_ids.push(value);
+            }
+            Some(agent::STEP_TAG) => {
+                let value = values.get(1).map(String::as_str).unwrap_or("");
+                if values.len() != 2
+                    || value.is_empty()
+                    || value.len() > 6
+                    || !value.chars().all(|character| character.is_ascii_digit())
+                {
+                    return Err("step tag must carry a zero-based numeric index".to_string());
+                }
+                step_indexes.push(value);
+            }
+            _ => {}
+        }
+    }
+    if task_ids.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err("request carries conflicting task tags".to_string());
+    }
+    if step_indexes.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err("request carries conflicting step tags".to_string());
+    }
+    let task_id = task_ids.first().map(|value| (*value).to_string());
+    let step_index = match step_indexes.first() {
+        Some(raw) => Some(
+            raw.parse::<u32>()
+                .map_err(|_| "step tag index is invalid".to_string())?,
+        ),
+        None => None,
+    };
+    if task_id.is_none() && step_index.is_some() {
+        return Err("a step tag requires a matching task tag".to_string());
+    }
+    if step_index.is_some_and(|index| index >= 1024) {
+        return Err("step tag index is out of range".to_string());
+    }
+    Ok((task_id, step_index))
+}
+
 fn has_operation_grant(data: &StoreFile, agent_pubkey: &str, operation: &str) -> bool {
     data.grants.values().any(|grant| {
         grant.agent_pubkey == agent_pubkey
@@ -841,4 +907,62 @@ fn unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(tags: &[&[&str]]) -> Event {
+        let keys = Keys::generate();
+        let tags: Vec<Tag> = tags
+            .iter()
+            .map(|tag| {
+                Tag::parse(tag.iter().map(|part| part.to_string()).collect::<Vec<_>>()).unwrap()
+            })
+            .collect();
+        EventBuilder::new(Kind::TextNote, "")
+            .tags(tags)
+            .finalize(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn parses_a_task_step_pair() {
+        let event = event(&[&["task", "abc123"], &["step", "2"]]);
+        assert_eq!(
+            parse_task_tags(&event).unwrap(),
+            (Some("abc123".into()), Some(2))
+        );
+    }
+
+    #[test]
+    fn absent_tags_are_none() {
+        let event = event(&[&["t", "evermore-operation-request"]]);
+        assert_eq!(parse_task_tags(&event).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn rejects_a_step_without_a_task() {
+        let event = event(&[&["step", "1"]]);
+        assert!(parse_task_tags(&event).unwrap_err().contains("requires"));
+    }
+
+    #[test]
+    fn rejects_conflicting_task_tags() {
+        let event = event(&[&["task", "one"], &["task", "two"]]);
+        assert!(parse_task_tags(&event).unwrap_err().contains("conflicting"));
+    }
+
+    #[test]
+    fn rejects_malformed_task_identifier() {
+        let event = event(&[&["task", "not a valid id"]]);
+        assert!(parse_task_tags(&event).unwrap_err().contains("identifier"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_step_index() {
+        let event = event(&[&["task", "abc"], &["step", "9999"]]);
+        assert!(parse_task_tags(&event).unwrap_err().contains("range"));
+    }
 }

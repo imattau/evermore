@@ -2149,12 +2149,18 @@ rather than invent a second one.
 **Build order:** M12.1 reconciles `nscript`'s typed NIP-01/44/51/78/98 records
 with how Evermore actually represents those NIPs — mostly the external
 `nostr` (rust-nostr) crate's primitives plus Evermore's own grant/audit-aware
-catalogue types layered on top in `evermore-common` and each daemon — via a
-thin host-trait adapter, with no change to either project's trust boundary —
-read-only, upstream-facing. M12.2 wires
-that adapter into `evermore-operationsd`'s existing read path so `nscript`'s
-NIP modules get a real (not simulated) target for reads evermore already
-grants. M12.3 builds the `nscript → evermore-agentd` recipe compiler that
+catalogue types layered on top in `evermore-common` and each daemon — with no
+change to either project's trust boundary — read-only, upstream-facing.
+**M12.2 turned out to need no adapter at all:** `nscript`'s read path is
+`RelayHost`/`SubscriptionHost` (generic NIP-01 `subscribe`/`poll`), which
+`nscript deploy` already implements for real against any relay; pointing it
+at Evermore's own local relay and confirming a real event round-trips end to
+end (see [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md))
+is the whole milestone. `nscript`'s NIP-module *operation* calls
+(`publish_*`, `encrypt_text`, ...) remain hardcoded to its own simulator in
+`nscript-cli` with no extension point for a real host today — that gap is
+upstream `nscript` work, not something Evermore can close from its side.
+M12.3 builds the `nscript → evermore-agentd` recipe compiler that
 emits the same validated TOML/IR `evermore-agentd` already runs today,
 inferring `operations=[]` and budgets from `nscript`'s static permission
 analysis instead of requiring the author to hand-write them. M12.4, authoring
@@ -3265,8 +3271,10 @@ never as a runtime inside a privileged process:
 - Give `nscript` a live signer handle, a grant it did not already hold, or any
   write path that does not go through the existing signed-request/approval
   chain.
-- Treat `nscript`'s simulated-unless-wired NIP operations as equivalent to a
-  real deploy result before the host adapter in M12.1/M12.2 actually exists.
+- Treat `nscript`'s simulated NIP module *operation* calls (`publish_*`,
+  `encrypt_text`, ...) as real — M12.2 confirmed `nscript-cli` hardcodes its
+  simulator for these with no extension point today, so they stay simulated
+  regardless of what Evermore does on its own side.
 - Fork or vendor `nscript` into the Evermore workspace as a way to move faster
   than its own release cadence; the point is a real-usage conformance
   relationship with an external project, not absorbing it.
@@ -3281,14 +3289,23 @@ never as a runtime inside a privileged process:
    documentation and, where useful, upstream `nscript` conformance fixtures
    generated from Evermore's own test data. No Evermore code path changes.
    **Done (2026-11-09):** [`docs/nscript-type-reconciliation.md`](docs/nscript-type-reconciliation.md).
-2. **M12.2 — Read-only deploy host.** Implement `nscript`'s host trait against
-   `evermore-operationsd`'s existing Unix-socket read path for a narrow set of
-   already-granted read operations (start with `calendar.list`/`calendar.get`
-   or `packages.list_installed`, which already have stable catalogue
-   contracts). This is the "evermore helps nscript mature" half: it is a real
-   target nscript can run its conformance suite against, with no change to
-   Evermore's authority model since reads already execute under the
-   caller's grant without owner prompting.
+2. **M12.2 — Read-only deploy host.** Originally scoped as implementing
+   `nscript`'s host trait against `evermore-operationsd`'s read socket for
+   catalogue reads (`calendar.list`, `packages.list_installed`). Investigation
+   showed that premise doesn't hold: no `nscript` NIP module declares a
+   read/query operation (every module operation is a write), and `nscript`'s
+   actual read path — `RelayHost`/`SubscriptionHost`'s generic NIP-01
+   `subscribe`/`poll` — is already implemented for real in `nscript deploy`,
+   needing no adapter. **Done (2026-11-09):** built `evermore-relay-supervisor`
+   and `nscript`'s CLI, published one real event into the running relay with
+   an independent publisher, and ran `nscript deploy --relay ws://127.0.0.1:4869`
+   with a read-only handler program that received and printed it — a genuine
+   end-to-end round trip with zero code changes on either side. Full
+   writeup, including why the originally planned adapter was never
+   buildable and the part of this that *is* upstream `nscript` work (its
+   module-operation calls stay simulated in its own CLI with no real-host
+   extension point), in
+   [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md).
 3. **M12.3 — Recipe compiler.** Build the `nscript → evermore-agentd` TOML/IR
    emitter. Validate it by compiling `nscript` versions of Phase 11's existing
    built-in recipes (`audit.digest` is the right first target — zero
@@ -3315,11 +3332,11 @@ never as a runtime inside a privileged process:
   `render` templating) that `nscript` calls out to rather than reimplements.
   Favor the escape hatch until there is a concrete recipe that needs richer
   native control flow.
-- **Whether M12.2's host adapter is contributed upstream to `nscript` or kept
-  as an Evermore-side crate that implements `nscript`'s trait.** Upstream is
-  preferable if `nscript`'s RFC process can absorb it at the pace this phase
-  needs; otherwise it starts Evermore-side and is offered upstream once
-  proven.
+- **Whether to raise an `nscript` issue/RFC for a pluggable `OperationHost`
+  in `nscript-cli`'s `deploy` command.** M12.2 found that module operation
+  calls are hardcoded to the simulator with no extension point; closing that
+  is upstream `nscript` work Evermore cannot do unilaterally, and is worth
+  proposing there rather than attempting inside this repo.
 
 ### Risks
 

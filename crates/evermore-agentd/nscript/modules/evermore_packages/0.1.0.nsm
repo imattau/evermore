@@ -1,0 +1,13 @@
+module evermore_packages @ 0.1.0
+language ">=0.1.0 <0.2.0"
+reference "https://github.com/imattau/evermore/blob/main/crates/evermore-common/src/lib.rs"
+
+record PackageListing {
+    field count: Integer
+}
+
+error PackagesError {
+    field message: Text
+}
+
+operation list_installed() -> Result<PackageListing,PackagesError> effect Storage permission packages_read

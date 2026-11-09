@@ -3306,12 +3306,27 @@ never as a runtime inside a privileged process:
    module-operation calls stay simulated in its own CLI with no real-host
    extension point), in
    [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md).
-3. **M12.3 — Recipe compiler.** Build the `nscript → evermore-agentd` TOML/IR
-   emitter. Validate it by compiling `nscript` versions of Phase 11's existing
-   built-in recipes (`audit.digest` is the right first target — zero
-   authority, already specified) and diffing the emitted recipe's behaviour
-   against the hand-written one under `evermore-agentd`'s existing test
-   harness.
+3. **M12.3 — Recipe compiler.** Recipes are authored directly as `nscript`
+   source, not compiled to an intermediate TOML text format: `evermore-agentd`
+   parses and checks a `.ns` file with `nscript`'s own front end and projects
+   the checked program straight into the existing `Recipe`/`RecipeStep`
+   structs, which its loader validates exactly as a hand-written TOML recipe
+   today. **In progress (2026-11-09):**
+   [`crates/evermore-agentd/nscript/README.md`](crates/evermore-agentd/nscript/README.md)
+   prototypes the type-checking half — a non-NIP `evermore_packages.nsm`
+   module declaring `packages.list_installed` as a typed operation, and a
+   read-only `packages.doctor.ns` recipe that checks and simulates cleanly —
+   and records two open gaps found doing it: `nscript` has no native
+   primitive for a typed form input the host collects before running (so a
+   recipe's `select` step, which most built-ins have, has no faithful
+   translation yet), and neither `nscript inspect --json` nor
+   `nscript compile --emit ir` exposes the statement-by-statement structure a
+   real projector needs — that means `evermore-agentd` depending on
+   `nscript`'s own library crates (`nscript-syntax`, `nscript-semantics`) and
+   walking the checked AST in Rust, not shelling out to the built binary.
+   Validate the eventual projector by compiling `nscript` versions of Phase
+   11's existing built-in recipes and diffing behaviour against the
+   hand-written ones under `evermore-agentd`'s existing test harness.
 4. **M12.4 — First real authored recipe.** Only after M12.3's emitted
    `audit.digest` passes every check the hand-written one does: author one
    genuinely new recipe (a notification-triage or settings-concierge variant)

@@ -1,0 +1,22 @@
+// Prototype for Phase 12 / M12.3: can a real evermore-agentd recipe be
+// authored as nscript source instead of hand-written TOML?
+//
+// This mirrors the read-only slice of the built-in `packages.doctor` recipe
+// (crates/evermore-agentd/recipes/packages.doctor.toml): one catalogue read
+// (`packages.list_installed`) and a rendered report. It deliberately leaves
+// out `packages.doctor`'s `choose` step (publisher/name form input) and its
+// second read (`packages.explain_dependencies`, which needs that input) --
+// nscript has no native primitive for "a typed value the host's own UI
+// collects before the program runs" (its `key = host("label")` mechanism is
+// typed for opaque signing-key material, not a reusable form-input slot),
+// so that half of `packages.doctor` has no faithful nscript translation yet.
+// See ../README.md for what this does and does not prove.
+use evermore_packages
+
+permissions {
+    packages_read
+    log
+}
+
+let installed = evermore_packages.list_installed()?
+print("Installed packages: " + text(installed.count))

@@ -7,5 +7,6 @@ pub mod infer;
 pub mod propose;
 pub mod recipe;
 pub mod render;
+pub mod routine;
 pub mod runner;
 pub mod store;

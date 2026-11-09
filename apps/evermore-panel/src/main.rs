@@ -1270,6 +1270,11 @@ impl PanelApp {
                         "Task {} · budget {} steps / {}s",
                         task.task_id, task.budget.steps, task.budget.seconds
                     ));
+                    if let Some(routine_id) = &task.routine_id {
+                        ui.weak(format!(
+                            "Standing routine {routine_id} · dedicated agent identity"
+                        ));
+                    }
                     for step in &task.steps {
                         ui.horizontal(|ui| {
                             ui.monospace(format!("#{} {}", step.index, step.id));

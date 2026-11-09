@@ -3,8 +3,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
-use evermore_agentd::{clients, propose, recipe, runner::Runner, store::TaskStore};
-use evermore_common::agent::{self, AgentHealth, Request, Response, Task};
+use evermore_agentd::{
+    clients, propose, recipe, render, routine::RoutineStore, runner::Runner, store::TaskStore,
+};
+use evermore_common::agent::{self, AgentHealth, Request, Response, Routine, Task};
 use serde_json::{Value, json};
 
 fn main() {
@@ -16,8 +18,15 @@ fn main() {
         Some("tasks") => tasks_cli(),
         Some("status") => status_cli(),
         Some("cancel") => cancel_cli(),
+        Some("routines") => routines_cli(),
+        Some("routine-add") => routine_add_cli(),
+        Some("routine-enable") => routine_toggle_cli(true),
+        Some("routine-disable") => routine_toggle_cli(false),
+        Some("routine-remove") => routine_remove_cli(),
         _ => {
-            eprintln!("usage: evermore-agentd <serve|recipes|run|propose|tasks|status|cancel>");
+            eprintln!(
+                "usage: evermore-agentd <serve|recipes|run|propose|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove>"
+            );
             eprintln!("  serve --agent-identity NAME [--owner-pubkey HEX]");
             eprintln!("  serve    run the deterministic recipe task runner");
             eprintln!("  recipes  list built-in and local recipes");
@@ -26,6 +35,11 @@ fn main() {
             eprintln!("  tasks    list recent tasks");
             eprintln!("  status   show a task: status TASK_ID");
             eprintln!("  cancel   request task cancellation: cancel TASK_ID");
+            eprintln!("  routines list standing routines");
+            eprintln!(
+                "  routine-add ID RECIPE --interval SECONDS --agent-identity NAME [--inputs JSON] [--disabled]"
+            );
+            eprintln!("  routine-enable ID | routine-disable ID | routine-remove ID");
             std::process::exit(2);
         }
     };
@@ -50,6 +64,7 @@ fn serve() -> std::io::Result<()> {
         None => clients::configured_owner().map_err(std::io::Error::other)?,
     };
     let store = Arc::new(TaskStore::open().map_err(std::io::Error::other)?);
+    let routines = Arc::new(RoutineStore::open().map_err(std::io::Error::other)?);
     let runner = Arc::new(Runner {
         store: Arc::clone(&store),
         agent_identity: agent_identity.clone(),
@@ -67,6 +82,7 @@ fn serve() -> std::io::Result<()> {
             }
         });
     }
+    spawn_routine_scheduler(Arc::clone(&runner), Arc::clone(&routines));
 
     let socket_path = agent::runtime_socket_path();
     if let Some(parent) = socket_path.parent() {
@@ -80,7 +96,7 @@ fn serve() -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &runner) {
+                if let Err(error) = handle_connection(stream, &runner, &routines) {
                     eprintln!("evermore-agentd: request failed: {error}");
                 }
             }
@@ -90,14 +106,18 @@ fn serve() -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_connection(mut stream: UnixStream, runner: &Arc<Runner>) -> std::io::Result<()> {
+fn handle_connection(
+    mut stream: UnixStream,
+    runner: &Arc<Runner>,
+    routines: &Arc<RoutineStore>,
+) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
     if line.trim().is_empty() {
         return Ok(());
     }
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => handle_request(request, runner),
+        Ok(request) => handle_request(request, runner, routines),
         Err(error) => Response::err(format!("invalid request: {error}")),
     };
     let mut output = serde_json::to_string(&response)
@@ -107,7 +127,11 @@ fn handle_connection(mut stream: UnixStream, runner: &Arc<Runner>) -> std::io::R
     stream.flush()
 }
 
-fn handle_request(request: Request, runner: &Arc<Runner>) -> Response {
+fn handle_request(
+    request: Request,
+    runner: &Arc<Runner>,
+    routines: &Arc<RoutineStore>,
+) -> Response {
     match request {
         Request::Health => Response::ok(AgentHealth {
             protocol_version: agent::PROTOCOL_VERSION,
@@ -128,7 +152,7 @@ fn handle_request(request: Request, runner: &Arc<Runner>) -> Response {
         Request::RunRecipe { recipe_id, inputs } => {
             let inputs = if inputs.is_null() { json!({}) } else { inputs };
             match recipe::find(&recipe_id) {
-                Ok(recipe) => match runner.create_task(&recipe, inputs) {
+                Ok(recipe) => match runner.create_task(None, &recipe, inputs) {
                     Ok(task) => {
                         let task_id = task.task_id.clone();
                         let runner = Arc::clone(runner);
@@ -156,7 +180,148 @@ fn handle_request(request: Request, runner: &Arc<Runner>) -> Response {
             Ok(task) => Response::ok(task),
             Err(error) => Response::err(error),
         },
+        Request::ListRoutines => match routines.list() {
+            Ok(routines) => Response::ok(routines),
+            Err(error) => Response::err(error),
+        },
+        Request::AddRoutine {
+            id,
+            recipe_id,
+            inputs,
+            interval_seconds,
+            agent_identity,
+            enabled,
+        } => match add_routine(
+            runner,
+            routines,
+            id,
+            recipe_id,
+            inputs,
+            interval_seconds,
+            agent_identity,
+            enabled,
+        ) {
+            Ok(routine) => Response::ok(routine),
+            Err(error) => Response::err(error),
+        },
+        Request::SetRoutineEnabled {
+            routine_id,
+            enabled,
+        } => match routines.set_enabled(&routine_id, enabled) {
+            Ok(routine) => Response::ok(routine),
+            Err(error) => Response::err(error),
+        },
+        Request::RemoveRoutine { routine_id } => match routines.remove(&routine_id) {
+            Ok(()) => Response::ok(json!({ "removed": routine_id })),
+            Err(error) => Response::err(error),
+        },
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_routine(
+    runner: &Runner,
+    routines: &RoutineStore,
+    id: String,
+    recipe_id: String,
+    inputs: Value,
+    interval_seconds: u64,
+    agent_identity: String,
+    enabled: bool,
+) -> Result<Routine, String> {
+    if !valid_id(&id) {
+        return Err("routine id must be lowercase ASCII letters, digits, '.', '_' or '-'".into());
+    }
+    if interval_seconds == 0 {
+        return Err("routine interval must be at least one second".into());
+    }
+    let recipe = recipe::find(&recipe_id)?;
+    let inputs = if inputs.is_null() { json!({}) } else { inputs };
+    render::validate_inputs(&recipe.inputs_schema(), &inputs)?;
+    let agent_pubkey = clients::signer_public_key(&agent_identity)?;
+    if agent_pubkey == runner.owner_pubkey {
+        return Err("a routine must not run as the owner identity".into());
+    }
+    if agent_pubkey == runner.agent_pubkey {
+        return Err(
+            "a routine needs its own identity, distinct from the interactive assistant".into(),
+        );
+    }
+    if enabled && !recipe.operation_names().is_empty() {
+        clients::require_grant(&agent_pubkey, &recipe.operation_names())?;
+    }
+    routines.add(Routine {
+        id,
+        recipe_id,
+        inputs,
+        interval_seconds,
+        agent_identity,
+        enabled,
+        last_run_at: None,
+        last_task_id: None,
+        last_error: None,
+        created_at: unix_time(),
+    })
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || "._-".contains(character)
+        })
+}
+
+fn spawn_routine_scheduler(runner: Arc<Runner>, routines: Arc<RoutineStore>) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let due = match routines.due(unix_time()) {
+                Ok(due) => due,
+                Err(error) => {
+                    eprintln!("evermore-agentd: could not read routines: {error}");
+                    continue;
+                }
+            };
+            for routine in due {
+                match run_routine(&runner, &routine) {
+                    Ok(task_id) => {
+                        let _ = routines.mark_run(&routine.id, Some(task_id), None);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "evermore-agentd: routine '{}' did not start: {error}",
+                            routine.id
+                        );
+                        let _ = routines.mark_run(&routine.id, None, Some(error));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn run_routine(base: &Arc<Runner>, routine: &Routine) -> Result<String, String> {
+    let agent_pubkey = clients::signer_public_key(&routine.agent_identity)?;
+    if agent_pubkey == base.owner_pubkey {
+        return Err("routine identity resolves to the owner identity".into());
+    }
+    if agent_pubkey == base.agent_pubkey {
+        return Err("routine identity duplicates the interactive assistant".into());
+    }
+    let recipe = recipe::find(&routine.recipe_id)?;
+    let runner = Arc::new(Runner {
+        store: Arc::clone(&base.store),
+        agent_identity: routine.agent_identity.clone(),
+        agent_pubkey,
+        owner_pubkey: base.owner_pubkey.clone(),
+    });
+    let task = runner.create_task(Some(routine.id.clone()), &recipe, routine.inputs.clone())?;
+    let task_id = task.task_id.clone();
+    std::thread::spawn(move || runner.run(task_id, recipe));
+    Ok(task.task_id)
 }
 
 fn recipes_cli() -> Result<(), String> {
@@ -248,6 +413,115 @@ fn cancel_cli() -> Result<(), String> {
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
     );
     Ok(())
+}
+
+fn routines_cli() -> Result<(), String> {
+    let value = request(&Request::ListRoutines)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn routine_add_cli() -> Result<(), String> {
+    let arguments: Vec<String> = std::env::args().skip(2).collect();
+    if arguments.len() < 2 {
+        return Err(
+            "routine-add requires ID and RECIPE, then --interval SECONDS --agent-identity NAME"
+                .into(),
+        );
+    }
+    let id = arguments[0].clone();
+    let recipe_id = arguments[1].clone();
+    let mut interval_seconds = None;
+    let mut agent_identity = None;
+    let mut inputs = json!({});
+    let mut enabled = true;
+    let mut index = 2;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--interval" => {
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| "--interval requires a value".to_string())?;
+                interval_seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|error| format!("invalid interval: {error}"))?,
+                );
+                index += 2;
+            }
+            "--agent-identity" => {
+                agent_identity = arguments.get(index + 1).cloned();
+                index += 2;
+            }
+            "--inputs" => {
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| "--inputs requires JSON".to_string())?;
+                inputs = serde_json::from_str(value)
+                    .map_err(|error| format!("invalid inputs JSON: {error}"))?;
+                index += 2;
+            }
+            "--disabled" => {
+                enabled = false;
+                index += 1;
+            }
+            other => return Err(format!("unknown routine-add argument '{other}'")),
+        }
+    }
+    let interval_seconds =
+        interval_seconds.ok_or_else(|| "routine-add requires --interval SECONDS".to_string())?;
+    let agent_identity =
+        agent_identity.ok_or_else(|| "routine-add requires --agent-identity NAME".to_string())?;
+    let value = request(&Request::AddRoutine {
+        id,
+        recipe_id,
+        inputs,
+        interval_seconds,
+        agent_identity,
+        enabled,
+    })?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn routine_toggle_cli(enabled: bool) -> Result<(), String> {
+    let routine_id = std::env::args()
+        .nth(2)
+        .ok_or_else(|| "routine enable/disable requires a routine id".to_string())?;
+    let value = request(&Request::SetRoutineEnabled {
+        routine_id,
+        enabled,
+    })?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn routine_remove_cli() -> Result<(), String> {
+    let routine_id = std::env::args()
+        .nth(2)
+        .ok_or_else(|| "routine-remove requires a routine id".to_string())?;
+    let value = request(&Request::RemoveRoutine { routine_id })?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn request(request: &Request) -> Result<Value, String> {

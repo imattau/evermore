@@ -1964,8 +1964,8 @@ and the owner approves every write. The full rationale and limits are in the
 "Agentic AI — Bounded Agency" addendum below; this phase turns that design into
 milestones.
 
-**Implementation status (2026-11-09):** M11.1-M11.3 and the read-only part of
-M11.4 are implemented.
+**Implementation status (2026-11-09):** M11.1-M11.3, the read-only part of
+M11.4, and M11.5 are implemented.
 `evermore-common::agent` defines the v1 socket/task protocol, tag helpers,
 offline task read, and shared proposal instructions, marker parsing, and
 validation; `evermore-agentd` serves the deterministic runner with a private
@@ -1995,16 +1995,28 @@ operation daemon and completes the task without replaying anything. This is a
 plan-level review surface, not a session-wide permission or a new approval
 event kind.
 
+M11.5 adds opt-in standing routines. A routine is an explicit persisted entry
+(recipe, inputs, interval, and a dedicated signer identity), never a global
+background switch. A routine identity must resolve to a pubkey distinct from
+both the owner and the interactive assistant; its grant is checked when the
+routine is added and again before every run, and a failure is recorded as the
+routine's `last_error` without starting a task. The scheduler runs a due
+routine at most once per interval, and each task records its `routine_id` so
+the panel shows which standing identity created it. Write routines still stop
+at owner approval. The CLI provides `routines`, `routine-add`,
+`routine-enable`, `routine-disable`, and `routine-remove`.
+
 Host unit tests pass. An end-to-end run against stub signer, operations, and
 inference sockets exercised the digest, the read-only `packages.doctor`
 (installed-package and dependency counts), local recipes, L1 repair and
 refusal, the `workspace.compose` plan submitting three writes together and
-reaching `succeeded` after approval statuses, and a denied `notifications.dnd`
-task ending `denied`; the task store stayed `0600`. The catalogue fingerprint
-was updated in `tools/adapter-training/registry.lock` with the new operation;
-the adapter itself still needs a retrain and signed release. VM acceptance
-remains. M11.4's read-only package doctor is implemented; the update planner
-and M11.5 routines are not started. Phase 7's operation baseline and Phase
+reaching `succeeded` after approval statuses, a denied `notifications.dnd`
+task ending `denied`, and a due routine creating a task under its dedicated
+pubkey and stopping after being disabled; the task store stayed `0600`. The
+catalogue fingerprint was updated in
+`tools/adapter-training/registry.lock` with the new operation; the adapter
+itself still needs a retrain and signed release. VM acceptance remains. The
+M11.4 update planner remains open. Phase 7's operation baseline and Phase
 7.5's inference runtime are unchanged.
 
 **Architecture:**
@@ -2090,7 +2102,10 @@ one repair, then a refusal and confirm no proposal or request is created. For
 plan approval, run a write recipe and confirm all pending writes and canonical
 arguments appear together, one owner approval is signed per operation, denial
 ends the task without replay, and cancellation leaves no executable request.
-Run `cargo fmt --all -- --check`, `cargo check --workspace`,
+For routines, add a disabled and then enabled routine under a dedicated
+identity, confirm the owner and interactive identities are refused, confirm a
+due run creates a task with `routine_id`, and confirm disabling stops further
+runs. Run `cargo fmt --all -- --check`, `cargo check --workspace`,
 `cargo test --workspace`, and `git diff --check`, then repeat in the Arch VM.
 
 **Build order:** M11.1 first: common types, operationsd linkage, agentd store

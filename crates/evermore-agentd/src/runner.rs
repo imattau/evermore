@@ -17,7 +17,12 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn create_task(&self, recipe: &Recipe, inputs: Value) -> Result<Task, String> {
+    pub fn create_task(
+        &self,
+        routine_id: Option<String>,
+        recipe: &Recipe,
+        inputs: Value,
+    ) -> Result<Task, String> {
         render::validate_inputs(&recipe.inputs_schema(), &inputs)?;
         let operations = recipe.operation_names();
         if !operations.is_empty() {
@@ -45,6 +50,7 @@ impl Runner {
             .collect();
         let task = Task {
             task_id,
+            routine_id,
             recipe_id: recipe.id.clone(),
             recipe_version: recipe.version,
             recipe_source: recipe.source.clone(),
@@ -558,7 +564,7 @@ template = "workspace {{choose.workspace}}"
         let runner = runner(temp_path("render"));
         let recipe = recipe_with_render();
         let task = runner
-            .create_task(&recipe, json!({"workspace": 4}))
+            .create_task(None, &recipe, json!({"workspace": 4}))
             .unwrap();
         let task_id = task.task_id.clone();
         Arc::clone(&runner).run(task_id.clone(), recipe);
@@ -578,7 +584,7 @@ template = "workspace {{choose.workspace}}"
         let runner = runner(temp_path("cancel"));
         let recipe = recipe_with_render();
         let task = runner
-            .create_task(&recipe, json!({"workspace": 4}))
+            .create_task(None, &recipe, json!({"workspace": 4}))
             .unwrap();
         let task_id = task.task_id.clone();
         runner.store.request_cancel(&task_id).unwrap();
@@ -593,9 +599,9 @@ template = "workspace {{choose.workspace}}"
         let recipe = recipe_with_render();
         assert!(
             runner
-                .create_task(&recipe, json!({"workspace": 40}))
+                .create_task(None, &recipe, json!({"workspace": 40}))
                 .is_err()
         );
-        assert!(runner.create_task(&recipe, json!({})).is_err());
+        assert!(runner.create_task(None, &recipe, json!({})).is_err());
     }
 }

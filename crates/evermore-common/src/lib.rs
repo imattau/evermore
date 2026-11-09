@@ -2219,6 +2219,7 @@ pub mod agent {
     pub const TASK_TAG: &str = "task";
     pub const STEP_TAG: &str = "step";
     pub const TASKS_FILE: &str = "evermore/tasks/tasks.json";
+    pub const ROUTINES_FILE: &str = "evermore/routines/routines.json";
     pub const MAX_LOCAL_RECIPE_BYTES: u64 = 256 * 1024;
     pub const MAX_RECIPE_STEPS: u32 = 32;
     pub const MAX_RECIPE_SECONDS: u64 = 300;
@@ -2238,6 +2239,16 @@ pub mod agent {
             })
             .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
         Ok(base.join(TASKS_FILE))
+    }
+
+    pub fn routines_file_path() -> Result<PathBuf, String> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+        Ok(base.join(ROUTINES_FILE))
     }
 
     pub fn recipes_dir() -> Result<PathBuf, String> {
@@ -2275,6 +2286,48 @@ pub mod agent {
         CancelTask {
             task_id: String,
         },
+        ListRoutines,
+        AddRoutine {
+            id: String,
+            recipe_id: String,
+            #[serde(default)]
+            inputs: Value,
+            interval_seconds: u64,
+            agent_identity: String,
+            #[serde(default = "default_enabled")]
+            enabled: bool,
+        },
+        SetRoutineEnabled {
+            routine_id: String,
+            enabled: bool,
+        },
+        RemoveRoutine {
+            routine_id: String,
+        },
+    }
+
+    fn default_enabled() -> bool {
+        true
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Routine {
+        pub id: String,
+        pub recipe_id: String,
+        #[serde(default)]
+        pub inputs: Value,
+        pub interval_seconds: u64,
+        /// Signer identity this routine runs as. It must be distinct from the
+        /// interactive assistant and the owner.
+        pub agent_identity: String,
+        pub enabled: bool,
+        #[serde(default)]
+        pub last_run_at: Option<u64>,
+        #[serde(default)]
+        pub last_task_id: Option<String>,
+        #[serde(default)]
+        pub last_error: Option<String>,
+        pub created_at: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2394,6 +2447,9 @@ pub mod agent {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Task {
         pub task_id: String,
+        /// Set when the task was created by a standing routine.
+        #[serde(default)]
+        pub routine_id: Option<String>,
         pub recipe_id: String,
         pub recipe_version: u32,
         /// `builtin` or `local`; local recipes are unsigned and recorded so the

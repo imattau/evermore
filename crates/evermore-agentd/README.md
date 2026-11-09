@@ -76,6 +76,29 @@ evermore-agentd status TASK_ID
 evermore-agentd cancel TASK_ID
 ```
 
+## Standing routines
+
+Routines are explicit, per-entry standing tasks. Each runs as a dedicated agent
+identity, must use a distinct identity from both the owner and the interactive
+assistant, and is checked against that identity's grant when added and again
+when each run starts. There is no general "background agent" switch.
+
+```sh
+evermore-agentd routines
+evermore-agentd routine-add daily-digest audit.digest \
+  --interval 86400 --agent-identity routine-digest
+evermore-agentd routine-disable daily-digest
+evermore-agentd routine-remove daily-digest
+```
+
+The daemon persists routines in
+`$XDG_DATA_HOME/evermore/routines/routines.json` (0600) and runs a due routine
+at most once per interval. A routine task records its `routine_id`, so the
+panel's Recent Activity shows which standing identity created it. Write
+routines still stop at `awaiting_approval`; the owner approves each exact
+operation. A missing or expired grant is recorded as the routine's
+`last_error` and no task starts.
+
 `propose` is the L1 generation path: it asks the local chat model for one
 grammar-constrained operation proposal, validates it against the catalogue,
 repairs malformed or out-of-catalogue output at most once, and returns the

@@ -24,6 +24,12 @@
 //!     `+`-concatenated member-access/`text(...)` parts, projected into one
 //!     `render` step (id `report`) whose template uses the same
 //!     `{{step.field}}` placeholder syntax a hand-written TOML recipe does.
+//!     The `render` step is projected at its own position in the schedule
+//!     body, not always last: a `print(...)` before a later write previews
+//!     already-known values ahead of it, which
+//!     [`crate::recipe::validate_recipe`]'s "writes must be final" rule
+//!     allows; a `print(...)` after a write is still refused by that same
+//!     rule.
 //! - optionally, two leading line comments naming the recipe's title and
 //!   description (`nscript` has no such metadata of its own):
 //!   ```text
@@ -61,6 +67,17 @@ const EVERMORE_PACKAGES_NSM: &str = include_str!("../nscript/modules/evermore_pa
 const EVERMORE_NOTIFICATIONS_NSM: &str =
     include_str!("../nscript/modules/evermore_notifications/0.1.0.nsm");
 
+/// Every Evermore-specific, non-NIP `nscript` module this crate bundles, as
+/// `(module name, source text)`. The single list both
+/// [`evermore_module_registry`] registers from and
+/// `tests::bundled_module_signatures_match_the_real_catalogue` cross-checks
+/// against `evermore_common::operations::catalog()` — adding a module here
+/// is enough to get both.
+const BUNDLED_MODULES: &[(&str, &str)] = &[
+    ("evermore_packages", EVERMORE_PACKAGES_NSM),
+    ("evermore_notifications", EVERMORE_NOTIFICATIONS_NSM),
+];
+
 /// A registry carrying `nscript`'s standard modules plus Evermore's own,
 /// bundled from source at compile time rather than read from disk.
 ///
@@ -70,10 +87,7 @@ const EVERMORE_NOTIFICATIONS_NSM: &str =
 /// CI before it could reach a built daemon.
 fn evermore_module_registry() -> ModuleRegistry {
     let mut registry = ModuleRegistry::with_builtins();
-    for (name, source) in [
-        ("evermore_packages", EVERMORE_PACKAGES_NSM),
-        ("evermore_notifications", EVERMORE_NOTIFICATIONS_NSM),
-    ] {
+    for &(name, source) in BUNDLED_MODULES {
         let (descriptor, diagnostics) = parse_module(source);
         assert!(
             diagnostics.is_empty(),
@@ -372,7 +386,7 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
         schedule_body.ok_or("recipe needs exactly one every/at block containing its steps")?;
 
     let mut operations = Vec::new();
-    let mut render: Option<String> = None;
+    let mut seen_render = false;
     for item in body {
         match item {
             Item::Let(declaration) => {
@@ -459,16 +473,36 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                             .into(),
                     );
                 }
-                if render.is_some() {
+                if seen_render {
                     return Err("a recipe may have only one `print(...)` statement".into());
                 }
+                seen_render = true;
                 let ExprKind::Call { arguments, .. } = &expr.value else {
                     unreachable!("is_print_call checked this");
                 };
                 let [argument] = arguments.as_slice() else {
                     return Err("`print(...)` in a recipe takes exactly one argument".into());
                 };
-                render = Some(render_template(argument, &input_names)?);
+                let template = render_template(argument, &input_names)?;
+                // Pushed at its own position in the schedule body, not
+                // deferred to the end: a `print(...)` written before a
+                // later write call previews already-known values ahead of
+                // it, which `validate_recipe`'s "writes must be final"
+                // rule allows (see nscript/README.md). A `print(...)`
+                // written after a write is still refused by that same
+                // rule, exactly as a hand-written TOML recipe's `render`
+                // step would be.
+                steps.push(RecipeStep {
+                    id: "report".to_owned(),
+                    kind: StepKind::Render,
+                    operation: None,
+                    args: None,
+                    schema: None,
+                    template: Some(template),
+                    view: None,
+                    limit: None,
+                    from: None,
+                });
             }
             _ => {
                 return Err(
@@ -478,19 +512,6 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                 );
             }
         }
-    }
-    if let Some(template) = render {
-        steps.push(RecipeStep {
-            id: "report".to_owned(),
-            kind: StepKind::Render,
-            operation: None,
-            args: None,
-            schema: None,
-            template: Some(template),
-            view: None,
-            limit: None,
-            from: None,
-        });
     }
 
     let writes = steps
@@ -601,10 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn notifications_triage_ns_projects_a_read_then_a_write_step() {
+    fn notifications_triage_ns_projects_a_read_then_a_render_then_a_write_step() {
         // M12.4: a genuinely new recipe with no hand-written TOML
         // counterpart, exercising the projector's write-step path for the
-        // first time (packages.doctor only ever produced read + render).
+        // first time (packages.doctor only ever produced read + render),
+        // plus a render step placed at its own source position (previewing
+        // the write) rather than always forced to the end.
         let recipe = parse_ns_recipe(
             NOTIFICATIONS_TRIAGE_NS.as_bytes(),
             "builtin",
@@ -617,11 +640,11 @@ mod tests {
             recipe.operations,
             ["notifications.list_recent", "notifications.dismiss"]
         );
-        assert_eq!(recipe.budget.steps, 3);
+        assert_eq!(recipe.budget.steps, 4);
         assert_eq!(recipe.budget.writes, 1);
 
         let ids: Vec<&str> = recipe.steps.iter().map(|step| step.id.as_str()).collect();
-        assert_eq!(ids, ["choose", "recent", "result"]);
+        assert_eq!(ids, ["choose", "recent", "report", "result"]);
 
         assert_eq!(recipe.steps[0].kind, StepKind::Select);
         assert_eq!(
@@ -639,15 +662,90 @@ mod tests {
         );
         assert_eq!(recipe.steps[1].args, None);
 
-        assert_eq!(recipe.steps[2].kind, StepKind::Write);
+        assert_eq!(recipe.steps[2].kind, StepKind::Render);
         assert_eq!(
-            recipe.steps[2].operation.as_deref(),
+            recipe.steps[2].template.as_deref(),
+            Some("About to dismiss notification {{choose.notification_id}}")
+        );
+
+        assert_eq!(recipe.steps[3].kind, StepKind::Write);
+        assert_eq!(
+            recipe.steps[3].operation.as_deref(),
             Some("notifications.dismiss")
         );
         assert_eq!(
-            recipe.steps[2].args,
+            recipe.steps[3].args,
             Some(json!({ "notification_id": "{{choose.notification_id}}" }))
         );
+    }
+
+    #[test]
+    fn bundled_module_signatures_match_the_real_catalogue() {
+        // Guards against the drift M12.1 flagged as a risk: each bundled
+        // `.nsm` module's own operation signatures are a second, hand-
+        // maintained copy of evermore_common::operations::catalog()'s real
+        // ones. Nothing else cross-checks parameter names, counts, or
+        // types between the two -- nscript's own checker only validates a
+        // call against the module's *own* declared signature, never
+        // against the real catalogue.
+        for &(module_name, source) in BUNDLED_MODULES {
+            let (descriptor, diagnostics) = parse_module(source);
+            assert!(diagnostics.is_empty(), "{module_name}: {diagnostics:?}");
+            let descriptor = descriptor.expect("a valid module has a descriptor");
+            let prefix = catalogue_prefix(module_name)
+                .expect("bundled modules follow the evermore_<prefix> convention");
+            for operation in &descriptor.operations {
+                let real_name = format!("{prefix}.{}", operation.name);
+                let definition = operations::find(&real_name).unwrap_or_else(|| {
+                    panic!(
+                        "{module_name}.{}: no catalogue operation `{real_name}`",
+                        operation.name
+                    )
+                });
+
+                let required: BTreeSet<String> = definition
+                    .input_schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect();
+                let declared: BTreeSet<String> = operation
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect();
+                assert_eq!(
+                    declared, required,
+                    "`{real_name}`: nscript declares parameters {declared:?}, the catalogue \
+                     requires {required:?}"
+                );
+
+                let properties = definition.input_schema.get("properties");
+                for parameter in &operation.parameters {
+                    let expected = json_schema_type(&parameter.type_name).unwrap_or_else(|error| {
+                        panic!("`{real_name}.{}`: {error}", parameter.name)
+                    });
+                    let actual = properties
+                        .and_then(|properties| properties.get(&parameter.name))
+                        .and_then(|property| property.get("type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "`{real_name}`: catalogue property `{}` has no `type`",
+                                parameter.name
+                            )
+                        });
+                    assert_eq!(
+                        actual, expected,
+                        "`{real_name}.{}`: nscript declares `{}` (JSON type `{expected}`), \
+                         catalogue property has JSON type `{actual}`",
+                        parameter.name, parameter.type_name
+                    );
+                }
+            }
+        }
     }
 
     #[test]

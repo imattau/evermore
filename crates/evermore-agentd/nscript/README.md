@@ -18,6 +18,17 @@ as a typed front end — the same way any compiler uses a parser library
 without running the program it parses. Execution, grant checks, and the
 owner-approval path are entirely `evermore-agentd`'s own, unchanged.
 
+**Every bundled `.nsm` module's own operation signatures are a second,
+hand-maintained copy of the real catalogue's.** Nothing about `nscript`'s
+own checker catches the two drifting apart — it only validates a call
+against the module's *own* declared signature, never against
+`evermore_common::operations::catalog()`. `nscript_recipe::tests::bundled_module_signatures_match_the_real_catalogue`
+cross-checks every bundled module's declared parameter names, counts, and
+JSON-schema-equivalent types against the real catalogue entry each
+operation claims to stand for, so a future change to either side that
+silently diverges fails CI instead of surfacing as a confusing recipe
+validation error (or, worse, a wrong one that still validates).
+
 ## What this directory contains
 
 - `modules/evermore_packages/0.1.0.nsm` — a **non-NIP**, Evermore-specific
@@ -40,14 +51,12 @@ owner-approval path are entirely `evermore-agentd`'s own, unchanged.
 - `modules/evermore_notifications/0.1.0.nsm` and
   `recipes/notifications.triage.ns` — **M12.4's genuinely new recipe**, with
   no hand-written TOML counterpart: review recent notifications
-  (`notifications.list_recent`, a read), then dismiss one by its local ID
-  (`notifications.dismiss`, a write owner approval already gates — see
-  `evermore_common::operations::catalog()`). This is the first recipe to
-  exercise the projector's **write** path: `select` → `read` → `write`, no
-  `render` (`validate_recipe` requires write steps to be a recipe's final
-  steps, so a write-containing recipe cannot also render a summary — this
-  rules out the shape the earlier read-only prototype used). Asserted by
-  `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_write_step`.
+  (`notifications.list_recent`, a read), preview which one is about to be
+  dismissed, then dismiss it by local ID (`notifications.dismiss`, a write
+  owner approval already gates — see `evermore_common::operations::catalog()`).
+  This is the first recipe to exercise the projector's **write** path:
+  `select` → `read` → `render` → `write`. Asserted by
+  `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_render_then_a_write_step`.
 
 ## The conventions the projector requires
 
@@ -70,23 +79,35 @@ fixes a convention for each rather than guessing:
   `write` step, step id = the `let` name, kind decided by looking the real
   operation up in `evermore_common::operations` — never by the script) plus
   at most one `print(...)` (→ one `render` step, id `report`, built from the
-  `+`-concatenated literal/`text(...)`/field-reference parts). Anything else
-  in the schedule body — an `if`, a `for`, a second `print`, a second
-  schedule — is refused with a specific message.
+  `+`-concatenated literal/`text(...)`/field-reference parts), **projected
+  at its own position in the schedule body** rather than always last. Since
+  `crate::recipe::validate_recipe` requires `write`/`each` to be a recipe's
+  own final step, a `print(...)` written before a later write previews
+  already-known values (M12.4's `notifications.triage.ns` does this); one
+  written after a write is refused the same way a hand-written TOML
+  recipe's would be — `render` cannot follow a write either way, so a
+  write-containing recipe's only choice is to put its `print(...)` earlier
+  or omit it. Anything else in the schedule body — an `if`, a `for`, a
+  second `print`, a second schedule — is refused with a specific message.
 - **Operation arguments are positional**, matching the bundled `.nsm`
   module's own declared parameter order (read from the resolved module
   graph, not the catalogue's `input_schema`, whose JSON key order is not
   guaranteed to match either). A bare identifier argument must name a
   declared `input`; anything else is refused.
-- **A write-containing recipe cannot also `render`.** The projector always
-  appends the `render` step last (if a `print(...)` is present), regardless
-  of where it appears in the source relative to the schedule body's `let`
-  statements; `crate::recipe::validate_recipe` separately requires every
-  `write`/`each` step to be a recipe's final step. Put the two together and
-  a schedule body with both a write operation call and a `print(...)` will
-  always fail validation — the `render` step lands after the write either
-  way. `notifications.triage.ns` (M12.4) is `select` → `read` → `write`
-  with no `print(...)` for exactly this reason.
+- **A write-containing recipe can `render`, but only to preview, never to
+  summarise.** This was a real projector bug, now fixed: the projector used
+  to always append the `render` step last regardless of where `print(...)`
+  appeared in the source, so any schedule body with both a write and a
+  `print(...)` failed `crate::recipe::validate_recipe`'s "write/each must
+  be a recipe's final step" rule no matter where the `print(...)` was
+  written. The projector now places `render` at its own position, so a
+  `print(...)` before the write (as in `notifications.triage.ns`, M12.4)
+  projects and validates. What's left is `validate_recipe`'s own rule, not
+  a projector bug: a `print(...)` *after* the write is still refused,
+  because `render` is not itself a `write`/`each` step and so cannot follow
+  one. A write-heavy recipe that wants to report what it actually did,
+  rather than what it's about to do, needs a different mechanism than
+  `print(...)` — this projector doesn't invent one.
 
 ## A real, non-obvious finding along the way
 

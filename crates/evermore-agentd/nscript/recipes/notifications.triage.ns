@@ -3,18 +3,23 @@
 //
 // A genuinely new recipe (no hand-written TOML counterpart) authored
 // directly as nscript for M12.4. Where packages.doctor.ns only exercised
-// the projector's read + render path, this one is select -> read -> write:
-// crates/evermore-agentd/src/nscript_recipe.rs's first exercise of
-// projecting a write step out of a real checked nscript program. Projected
-// into the same Recipe/RecipeStep structs that
-// crates/evermore-agentd/src/recipe.rs's loader validates and
-// evermore-operationsd executes -- nscript's own runtime never runs here.
-// See crates/evermore-agentd/nscript/README.md.
+// the projector's read + render path, this one is select -> read -> render
+// -> write: crates/evermore-agentd/src/nscript_recipe.rs's first exercise
+// of projecting a write step out of a real checked nscript program, and of
+// a render step that previews a write rather than summarising a read. The
+// print(...) below is projected to a render step at this position, before
+// the write, because recipe::validate_recipe requires write/each to be a
+// recipe's own final step -- a render after the write is refused the same
+// way a hand-written TOML recipe's would be. Projected into the same
+// Recipe/RecipeStep structs that crates/evermore-agentd/src/recipe.rs's
+// loader validates and evermore-operationsd executes -- nscript's own
+// runtime never runs here. See crates/evermore-agentd/nscript/README.md.
 use evermore_notifications
 
 permissions {
     notifications_read
     notifications_write
+    log
     clock
 }
 
@@ -22,5 +27,6 @@ input notification_id: Text
 
 every 1d {
     let recent = evermore_notifications.list_recent()?
+    print("About to dismiss notification " + notification_id)
     let result = evermore_notifications.dismiss(notification_id)?
 }

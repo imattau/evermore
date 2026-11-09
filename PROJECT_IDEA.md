@@ -3348,21 +3348,40 @@ never as a runtime inside a privileged process:
    [`crates/evermore-agentd/nscript/modules/evermore_notifications/0.1.0.nsm`](crates/evermore-agentd/nscript/modules/evermore_notifications/0.1.0.nsm)
    and
    [`crates/evermore-agentd/nscript/recipes/notifications.triage.ns`](crates/evermore-agentd/nscript/recipes/notifications.triage.ns):
-   review recent notifications, then dismiss one by local ID (owner approval
-   still gates the dismiss, unchanged). M12.3's only proof so far
-   (`packages.doctor.ns`) mirrored an existing hand-written recipe and only
-   ever produced a `read`+`render` `Recipe` — it could not show the
-   projector handles a `write` step, since nothing forced one into
-   existence. `notifications.triage` does: `select` → `read` → `write`,
-   asserted field-for-field by
-   `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_write_step`.
-   One real constraint surfaced doing this: a write-containing recipe cannot
-   also `render`, because the projector always places the `render` step last
-   while `validate_recipe` requires `write`/`each` to be a recipe's own last
-   step — so `notifications.triage.ns` ends at the write, with no summary
-   `print(...)` (see the README for detail). Kept deliberately light —
-   exactly one write, no standing schedule semantics — per the explicit
-   "don't skip to write-heavy" scoping for this milestone.
+   review recent notifications, preview which one is about to be dismissed,
+   then dismiss it by local ID (owner approval still gates the dismiss,
+   unchanged). M12.3's only proof so far (`packages.doctor.ns`) mirrored an
+   existing hand-written recipe and only ever produced a `read`+`render`
+   `Recipe` — it could not show the projector handles a `write` step, since
+   nothing forced one into existence. `notifications.triage` does: `select`
+   → `read` → `render` → `write`, asserted field-for-field by
+   `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_render_then_a_write_step`.
+   Kept deliberately light — exactly one write, no standing schedule
+   semantics — per the explicit "don't skip to write-heavy" scoping for
+   this milestone.
+
+   Two real gaps surfaced doing this, both fixed in the same change set
+   (2026-11-09):
+   - **The projector always placed `render` last**, regardless of where
+     `print(...)` appeared in the source, so any schedule body combining a
+     write with a `print(...)` failed `validate_recipe`'s "write/each must
+     be a recipe's own final step" rule no matter where the `print(...)`
+     was written — a projector bug, not that rule being too strict. Fixed
+     to project `render` at its own position; a `print(...)` before a
+     later write now previews it (what `notifications.triage.ns` does). A
+     `print(...)` *after* a write is still refused, correctly: `render`
+     isn't a `write`/`each` step, so it still can't follow one, and this
+     projector doesn't invent a "report what the write just did" mechanism.
+   - **Nothing cross-checked a bundled `.nsm` module's operation signatures
+     against the real catalogue** they stand in for — only against each
+     module's own self-consistency, since `nscript`'s checker validates a
+     call against the module's own declared signature, never against
+     `evermore_common::operations::catalog()`. This is exactly the
+     "duplicate type drift" risk below, now also true of evermore's own
+     non-NIP operations, not just the NIP ones M12.1 reconciled. Closed by
+     `nscript_recipe::tests::bundled_module_signatures_match_the_real_catalogue`,
+     which asserts parameter names, counts, and JSON-schema-equivalent
+     types match for every bundled module.
 
 ### Open decisions
 
@@ -3394,7 +3413,16 @@ never as a runtime inside a privileged process:
   and `evermore-common`'s NIP types can silently diverge. Treat
   `evermore-common` as canonical in any conflict, since its types already
   encode grant/audit semantics that a general-purpose Nostr language
-  correctly does not bake in.
+  correctly does not bake in. The same risk applies to every bundled
+  non-NIP `.nsm` module's operation signatures, which are a second,
+  hand-maintained copy of the real catalogue's — M12.4 closed that half
+  with a cross-check test
+  (`nscript_recipe::tests::bundled_module_signatures_match_the_real_catalogue`),
+  but it only runs against the two modules bundled today; a third module's
+  author still has to know to add its operations to `BUNDLED_MODULES` and
+  rely on the same test to catch drift, not a build-time guarantee that
+  every catalogue operation an `.nsm` module claims to wrap stays in sync
+  automatically.
 - **Authority creep through the compiler.** The single most important
   invariant in this whole design is that compiled output is validated exactly
   like hand-written input. Any change to `evermore-agentd`'s loader that

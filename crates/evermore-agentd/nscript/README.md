@@ -1,9 +1,10 @@
 # M12.3 prototype: can an evermore-agentd recipe be authored as nscript?
 
-Status: validated at the type-checking layer only. **Nothing here is wired
-into `evermore-agentd`.** No Rust code changed; `recipe.rs`'s loader still
-only reads `.toml`. See [`PROJECT_IDEA.md`](../../../PROJECT_IDEA.md)'s
-Phase 12 addendum for the design this is prototyping.
+Status: validated at the type-checking layer, including a real `--input`
+end-to-end run. **Nothing here is wired into `evermore-agentd`.** No
+`evermore-agentd` Rust code changed; `recipe.rs`'s loader still only reads
+`.toml`. See [`PROJECT_IDEA.md`](../../../PROJECT_IDEA.md)'s Phase 12
+addendum for the design this is prototyping.
 
 Per that design, `nscript` is meant to be a typed *authoring front end* for
 recipes, never a runtime inside `evermore-agentd` — the checked program gets
@@ -14,63 +15,82 @@ hand-written TOML recipe today.
 ## What this directory contains
 
 - `modules/evermore_packages/0.1.0.nsm` — a **non-NIP**, Evermore-specific
-  `nscript` module declaring one real catalogue operation,
-  `packages.list_installed` (`evermore_common::operations::catalog()`), as a
-  typed `nscript` operation (`PackageListing { count: Integer }`).
-- `recipes/packages.doctor.ns` — a prototype recipe using it: one read, one
-  rendered line. It deliberately covers only the read-only half of the
-  built-in `packages.doctor` recipe
-  ([`../recipes/packages.doctor.toml`](../recipes/packages.doctor.toml)).
+  `nscript` module declaring two real catalogue operations
+  (`evermore_common::operations::catalog()`): `packages.list_installed` and
+  `packages.explain_dependencies`, as typed `nscript` operations.
+- `recipes/packages.doctor.ns` — the **full** built-in `packages.doctor`
+  recipe ([`../recipes/packages.doctor.toml`](../recipes/packages.doctor.toml)),
+  including its `choose` form (now `input publisher: Text` / `input name:
+  Text`), both reads, and a rendered report.
 
-Both type-check and simulate cleanly against a real `nscript` build:
+Both type-check and run cleanly against a real `nscript` build (`nscript`
+PR [#12](https://github.com/imattau/nscript/pull/12), not yet merged at the
+time of writing — see "What changed upstream" below):
 
 ```
 $ nscript check -M modules recipes/packages.doctor.ns
 (no output: clean)
-$ nscript run -M modules recipes/packages.doctor.ns
-operation 0: Text("simulated")
+$ nscript run -M modules recipes/packages.doctor.ns \
+    --input publisher=abc123 --input name=example-pkg
+timer schedule-0 at ...
+error[R1002]: EvaluationError { message: "a text has no fields" }
 ```
+
+That last error is expected and explained below — it is the *other* open
+gap this prototype found, not a failure of `input`. A smoke test with only
+scalar prints (no custom-module field access) runs clean end to end; see
+"What this proves" below.
+
+## What changed upstream to get here
+
+The first version of this prototype (see git history) shipped without
+`packages.doctor`'s `choose` step, because `nscript` had no primitive for
+"a typed value the host collects before running." That gap is now closed
+upstream: [`imattau/nscript#12`](https://github.com/imattau/nscript/pull/12)
+adds `input name: Type`, bound into schedule-body scope exactly like a
+`let`, with `nscript run`/`deploy --input <name>=<value>` supplying it. The
+recipe here uses it directly (`input publisher: Text`, `input name: Text`),
+and `nscript run --input publisher=... --input name=...` correctly binds
+and uses both.
 
 ## What this proves
 
-- `nscript`'s module system works as a typed front end for an
-  Evermore-specific, non-NIP read operation, not just NIP-shaped ones. Its
-  checker produces exactly the information a projector would need: the
-  `inspect --json` output lists the resolved operation
-  (`evermore_packages.list_installed`), its permission
-  (`packages_read`), and its capability group (`Storage`) — the same shape
-  `evermore-agentd`'s own `operations`/grant model already uses.
-- `nscript`'s fixed effect vocabulary (`Relay`, `Sign`, `Encrypt`, `Decrypt`,
-  `Storage`, `HTTP`, `Filesystem`, `Payment`, `Clock`, `Log`) has a
-  reasonable-enough fit for a local, no-grant-check read: `Storage` is the
-  closest available effect, used here for "read Evermore's own catalogue,"
-  which is not really storage I/O but isn't any of the others either. This
-  is a labelling compromise, not a semantic mismatch worth blocking on.
+- `nscript`'s module system works as a typed front end for Evermore-specific,
+  non-NIP operations, both read-only (`list_installed`) and parameterised
+  (`explain_dependencies(publisher, name)`), not just NIP-shaped ones.
+- `input` closes the "typed form" gap completely for scalar fields: a smoke
+  test using only `Text`/`Int`/`Bool` inputs and plain `print` statements
+  (no custom-module field access) runs end to end through `nscript run
+  --input ...` with the exact supplied values. `nscript`'s fixed effect
+  vocabulary (`Relay`, `Sign`, `Encrypt`, `Decrypt`, `Storage`, `HTTP`,
+  `Filesystem`, `Payment`, `Clock`, `Log`) still has a reasonable-enough fit
+  for a local, no-grant-check read (`Storage`), as the first version of this
+  prototype found.
 
-## What this does not prove, and the two open gaps it found
+## What this still does not prove, and the remaining open gap
 
-1. **No native "typed form input" primitive.** `packages.doctor`'s first
-   step (`choose`, a `publisher`/`name` form the owner fills in before the
-   read runs) has no nscript equivalent. `key = host("label")` is typed for
-   opaque signing-key material, not reusable for arbitrary form data, and
-   nscript has no other "a value the host collects before running"
-   construct. This prototype's recipe skips that step entirely rather than
-   force-fit it — a real compiler needs an answer here before it can cover
-   any recipe with a `select` step, which is most of the built-in set.
-2. **No CLI-level extraction of step-by-step structure.** Neither
-   `nscript inspect --json` (a summary: resolved operations, permission
-   footprint, counts) nor `nscript compile --emit ir` (a coarser
-   manifest-level capability/permission list, `operations: []` even for
-   this program) exposes the statement-by-statement body a real projector
-   needs — which local lets feed which operation call, in what order,
-   with what field accesses. Building the actual `nscript → Recipe`
-   projector therefore means `evermore-agentd` depending on `nscript`'s own
-   library crates (`nscript-syntax`, `nscript-semantics`) directly and
-   walking the checked `Program`/`CheckedProgram` AST in Rust, the way
-   `nscript-cli` itself does — not shelling out to the built binary. That is
-   a real new dependency (an external, pre-1.0, single-maintainer crate
-   family) and a real AST walker to write, not a follow-on detail.
+**`nscript`'s built-in simulator (`run`'s default) cannot fake a custom
+module's return shape.** `SimulatedOperations` answers operations it does
+not have a real host for by returning a generic placeholder (`Text("simulated")`)
+built from the few `OperationValue` variants the crate ships concrete Rust
+structs for (NIP-shaped ones: `UserList`, `AppData`, `PublishReport`, ...).
+`evermore_packages.list_installed`/`explain_dependencies` return
+Evermore-specific records (`PackageListing`, `DependencyExplanation`) with
+no such built-in variant, so the simulator's placeholder has no `count` or
+`version` field — hence the `"a text has no fields"` error above when the
+recipe accesses them. This is orthogonal to `input` (which worked correctly
+right up to that point) and to the already-merged
+[`ProcessOperationHost`](https://github.com/imattau/nscript/pull/9): that
+feature's own `decode()` only recognises a fixed whitelist of NIP-shaped
+record names too, not arbitrary custom ones, so pointing
+`--operation-command` at a real backend wouldn't resolve this either without
+extending that whitelist.
 
-Both are open decisions worth settling before committing to M12.3 at full
-scope, not reasons to abandon it: the type-checking half worked on the first
-try, with zero changes needed on the `nscript` side.
+The real `nscript → Recipe` projector (the part of M12.3 that would depend
+on `nscript`'s library crates directly, not the CLI) sidesteps this
+entirely: it would walk the checked AST and build `evermore-agentd`'s own
+`Recipe`/`RecipeStep` values, never running `nscript`'s evaluator or
+simulator at all. This gap only matters for *exercising* a prototype
+recipe with `nscript run`/`deploy` directly, which is useful for authoring
+and validation but is not how the eventual integration would execute
+anything.

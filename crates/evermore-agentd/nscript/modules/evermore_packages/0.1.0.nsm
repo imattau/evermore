@@ -6,8 +6,24 @@ record PackageListing {
     field count: Integer
 }
 
+record Dependency {
+    field name: Text
+    field publisher: Option<Text>
+    field requirement: Text
+    field installed: Bool
+    field installed_version: Option<Text>
+}
+
+record DependencyExplanation {
+    field publisher: Text
+    field name: Text
+    field version: Text
+    field dependencies: List<Dependency>
+}
+
 error PackagesError {
     field message: Text
 }
 
 operation list_installed() -> Result<PackageListing,PackagesError> effect Storage permission packages_read
+operation explain_dependencies(publisher: Text, name: Text) -> Result<DependencyExplanation,PackagesError> effect Storage permission packages_read

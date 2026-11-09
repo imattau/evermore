@@ -3314,19 +3314,27 @@ never as a runtime inside a privileged process:
    today. **In progress (2026-11-09):**
    [`crates/evermore-agentd/nscript/README.md`](crates/evermore-agentd/nscript/README.md)
    prototypes the type-checking half — a non-NIP `evermore_packages.nsm`
-   module declaring `packages.list_installed` as a typed operation, and a
-   read-only `packages.doctor.ns` recipe that checks and simulates cleanly —
-   and records two open gaps found doing it: `nscript` has no native
-   primitive for a typed form input the host collects before running (so a
-   recipe's `select` step, which most built-ins have, has no faithful
-   translation yet), and neither `nscript inspect --json` nor
-   `nscript compile --emit ir` exposes the statement-by-statement structure a
-   real projector needs — that means `evermore-agentd` depending on
-   `nscript`'s own library crates (`nscript-syntax`, `nscript-semantics`) and
-   walking the checked AST in Rust, not shelling out to the built binary.
-   Validate the eventual projector by compiling `nscript` versions of Phase
-   11's existing built-in recipes and diffing behaviour against the
-   hand-written ones under `evermore-agentd`'s existing test harness.
+   module declaring `packages.list_installed`/`explain_dependencies` as
+   typed operations, and the full built-in `packages.doctor` recipe
+   (including its `choose` form) translated to `nscript` and checked
+   cleanly. The form-input gap this prototype first found is now closed
+   upstream: [`nscript#12`](https://github.com/imattau/nscript/pull/12)
+   adds `input name: Type`, bound into schedule-body scope like a `let`,
+   with `nscript run`/`deploy --input <name>=<value>` supplying it —
+   verified end to end with a scalar-only smoke test. One gap remains, found
+   while exercising the full recipe with `nscript run`: its built-in
+   simulator cannot fake a custom (non-NIP) module's return shape, so field
+   access on a simulated `evermore_packages` result fails; this does not
+   block the real projector, which would never run `nscript`'s simulator or
+   evaluator at all. The other original gap is unchanged: neither
+   `nscript inspect --json` nor `nscript compile --emit ir` exposes the
+   statement-by-statement structure a real projector needs — that means
+   `evermore-agentd` depending on `nscript`'s own library crates
+   (`nscript-syntax`, `nscript-semantics`) and walking the checked AST in
+   Rust, not shelling out to the built binary. Validate the eventual
+   projector by compiling `nscript` versions of Phase 11's existing
+   built-in recipes and diffing behaviour against the hand-written ones
+   under `evermore-agentd`'s existing test harness.
 4. **M12.4 — First real authored recipe.** Only after M12.3's emitted
    `audit.digest` passes every check the hand-written one does: author one
    genuinely new recipe (a notification-triage or settings-concierge variant)

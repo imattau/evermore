@@ -126,10 +126,19 @@ shown above, which is what this validation actually used.
   script that only reads (subscribes) or publishes plain NIP-01 events. No
   host-trait adapter is needed or buildable today.
 - **The module-operation-call gap (`nscript`'s simulated `OperationHost` in
-  `deploy_program`) is real but is upstream `nscript` work, not Evermore
-  work.** Evermore cannot contribute a real implementation until `nscript`'s
-  CLI has an extension point for one. This should be raised as an `nscript`
-  issue/RFC rather than attempted inside the Evermore repo.
+  `deploy_program`) is already closed upstream — correction, 2026-11-09.**
+  This note originally called for raising an `nscript` issue/RFC for a
+  pluggable `OperationHost` in `deploy`. Checking before actually filing
+  one found `nscript` had already done this, generically, in
+  [`imattau/nscript#9`](https://github.com/imattau/nscript/pull/9):
+  `nscript deploy --operation-command <path>` answers module operation
+  calls via an external subprocess (`ProcessOperationHost`) instead of the
+  simulator. PR #9 merged before `imattau/nscript#12`
+  (`declared-input`, the exact commit `evermore-agentd`'s `Cargo.toml`
+  pins), so the extension point this note asked for was already present in
+  the first commit Evermore ever depended on — Evermore just hadn't gone
+  looking. See `crates/nscript-cli/src/main.rs`'s `DeployOperationHost`
+  enum and its doc comment on `deploy_program` on the pinned revision.
 - **M12.3 (the recipe compiler) is unaffected by this correction** — it was
   always scoped to emit `evermore-agentd`'s existing step IR and let the
   loader re-validate it, not to depend on `nscript`'s `OperationHost`. If

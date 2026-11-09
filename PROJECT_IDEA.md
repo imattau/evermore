@@ -2160,6 +2160,11 @@ is the whole milestone. `nscript`'s NIP-module *operation* calls
 (`publish_*`, `encrypt_text`, ...) remain hardcoded to its own simulator in
 `nscript-cli` with no extension point for a real host today — that gap is
 upstream `nscript` work, not something Evermore can close from its side.
+**Correction (2026-11-09): this gap closed upstream before this paragraph
+was even written** — [`imattau/nscript#9`](https://github.com/imattau/nscript/pull/9)
+added `nscript deploy --operation-command <path>` (`ProcessOperationHost`),
+merged before `#12` (`declared-input`, the exact commit Evermore's
+`Cargo.toml` pins). See the Open decisions correction below.
 M12.3 builds the `nscript → evermore-agentd` recipe compiler that
 emits the same validated TOML/IR `evermore-agentd` already runs today,
 inferring `operations=[]` and budgets from `nscript`'s static permission
@@ -3272,9 +3277,17 @@ never as a runtime inside a privileged process:
   write path that does not go through the existing signed-request/approval
   chain.
 - Treat `nscript`'s simulated NIP module *operation* calls (`publish_*`,
-  `encrypt_text`, ...) as real — M12.2 confirmed `nscript-cli` hardcodes its
-  simulator for these with no extension point today, so they stay simulated
-  regardless of what Evermore does on its own side.
+  `encrypt_text`, ...) as real **without `--operation-command`**. M12.2
+  originally found `nscript-cli` hardcodes its simulator for these with no
+  extension point; that was already wrong when written —
+  [`imattau/nscript#9`](https://github.com/imattau/nscript/pull/9) had
+  already added `nscript deploy --operation-command <path>`
+  (`ProcessOperationHost`) answering them for real via an external
+  subprocess, merged before the exact commit Evermore pins. Still true:
+  nothing here gives `evermore-agentd` a reason to ever pass that flag or
+  run `nscript deploy` itself — the recipe compiler only ever uses
+  `nscript`'s parser/checker, never its runtime (see "What it must never
+  do" above).
 - Fork or vendor `nscript` into the Evermore workspace as a way to move faster
   than its own release cadence; the point is a real-usage conformance
   relationship with an external project, not absorbing it.
@@ -3302,10 +3315,12 @@ never as a runtime inside a privileged process:
    with a read-only handler program that received and printed it — a genuine
    end-to-end round trip with zero code changes on either side. Full
    writeup, including why the originally planned adapter was never
-   buildable and the part of this that *is* upstream `nscript` work (its
-   module-operation calls stay simulated in its own CLI with no real-host
-   extension point), in
-   [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md).
+   buildable, in
+   [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md) —
+   **corrected 2026-11-09:** that writeup originally called the
+   module-operation-call gap upstream work still to be raised; checking
+   before raising it found `nscript#9` had already closed it, before the
+   commit Evermore depends on even existed.
 3. **M12.3 — Recipe compiler.** Recipes are authored directly as `nscript`
    source, not compiled to an intermediate TOML text format: `evermore-agentd`
    parses and checks a `.ns` file with `nscript`'s own front end and projects
@@ -3396,11 +3411,22 @@ never as a runtime inside a privileged process:
   `render` templating) that `nscript` calls out to rather than reimplements.
   Favor the escape hatch until there is a concrete recipe that needs richer
   native control flow.
-- **Whether to raise an `nscript` issue/RFC for a pluggable `OperationHost`
-  in `nscript-cli`'s `deploy` command.** M12.2 found that module operation
-  calls are hardcoded to the simulator with no extension point; closing that
-  is upstream `nscript` work Evermore cannot do unilaterally, and is worth
-  proposing there rather than attempting inside this repo.
+- ~~Whether to raise an `nscript` issue/RFC for a pluggable `OperationHost`
+  in `nscript-cli`'s `deploy` command.~~ **Settled, 2026-11-09: no RFC
+  needed.** M12.2's finding that module operation calls were hardcoded to
+  the simulator with no extension point was stale the moment it was
+  written: [`imattau/nscript#9`](https://github.com/imattau/nscript/pull/9)
+  had already added `nscript deploy --operation-command <path>`
+  (`ProcessOperationHost`, an external subprocess answering operation
+  calls for real), merged before `#12` (`declared-input`) — the exact
+  commit `evermore-agentd`'s `Cargo.toml` pins. Checked before filing
+  anything upstream, per the standing practice of verifying an `nscript`
+  gap against current `main` before treating it as real (the PR #14 fixes
+  were real gaps checked this way; this one wasn't). Corrected in
+  [`docs/nscript-read-only-deploy-host.md`](docs/nscript-read-only-deploy-host.md)
+  and the M12.2 writeup above. This remains moot for Evermore either way:
+  nothing in this design ever has `evermore-agentd` run `nscript deploy`
+  or pass that flag itself (see "What it must never do").
 
 ### Risks
 

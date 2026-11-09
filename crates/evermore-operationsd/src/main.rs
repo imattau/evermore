@@ -742,6 +742,25 @@ fn execute_approved(
                 Err(error) => store.mark_execution_unknown(operation_id, error),
             }
         }
+        "notifications.set_dnd" => {
+            let request = evermore_common::notifications::Request::SetDnd {
+                enabled: record.arguments["enabled"]
+                    .as_bool()
+                    .expect("validated as boolean"),
+            };
+            match send_request::<_, evermore_common::notifications::Response>(
+                &evermore_common::notifications::runtime_socket_path(),
+                &request,
+            ) {
+                Ok(evermore_common::notifications::Response::Ok { data }) => {
+                    store.finish_execution(operation_id, Ok(data))
+                }
+                Ok(evermore_common::notifications::Response::Err { message }) => {
+                    store.finish_execution(operation_id, Err(message))
+                }
+                Err(error) => store.mark_execution_unknown(operation_id, error),
+            }
+        }
         "sway.switch_workspace" => {
             let number = record.arguments["workspace_number"]
                 .as_u64()

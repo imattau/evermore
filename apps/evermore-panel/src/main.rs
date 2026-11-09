@@ -1050,6 +1050,16 @@ impl PanelApp {
         self.agent_next_poll = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
     }
 
+    fn refresh_pending_approvals(&mut self) {
+        match operations_client::pending_operations() {
+            Ok(operations) => {
+                self.pending_operations = operations;
+                self.approval_error = None;
+            }
+            Err(error) => self.approval_error = Some(error),
+        }
+    }
+
     fn run_agent_recipe(&mut self) {
         self.agent_status = None;
         self.agent_error = None;
@@ -1075,6 +1085,94 @@ impl PanelApp {
                     task.recipe_id,
                     task_status_name(task.status)
                 ));
+                self.refresh_agent_tasks();
+            }
+            Err(error) => self.agent_error = Some(error),
+        }
+    }
+
+    fn ensure_owner_identity(&mut self) {
+        if !self.approval_identity.is_empty() {
+            return;
+        }
+        let Some(owner) = &self.configured_owner_pubkey else {
+            return;
+        };
+        if let Some(identity) = self
+            .identities
+            .iter()
+            .find(|identity| &identity.pubkey_hex == owner)
+        {
+            self.approval_identity = identity.name.clone();
+        }
+    }
+
+    fn approve_task_writes(&mut self, task_id: &str) {
+        self.ensure_owner_identity();
+        if self.approval_identity.is_empty() {
+            self.agent_error =
+                Some("Select the configured owner identity in the approval section first.".into());
+            return;
+        }
+        let pending: Vec<_> = self
+            .pending_operations
+            .iter()
+            .filter(|pending| pending.task_id.as_deref() == Some(task_id))
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            self.agent_error = Some(
+                "No pending writes for this task. Refresh approvals or wait for submission.".into(),
+            );
+            return;
+        }
+        let total = pending.len();
+        for (index, pending) in pending.iter().enumerate() {
+            if let Err(error) =
+                operations_client::decide(&self.approval_identity, &pending.operation_id, "approve")
+            {
+                self.agent_error = Some(format!(
+                    "Approved {index} of {total} writes, then failed: {error}"
+                ));
+                self.refresh_operations();
+                self.refresh_agent_tasks();
+                return;
+            }
+        }
+        self.agent_status = Some(format!(
+            "Signed {} exact owner approval(s) for task {task_id}.",
+            pending.len()
+        ));
+        self.refresh_operations();
+        self.refresh_agent_tasks();
+    }
+
+    fn cancel_task_and_writes(&mut self, task_id: &str) {
+        self.ensure_owner_identity();
+        let pending: Vec<_> = self
+            .pending_operations
+            .iter()
+            .filter(|pending| pending.task_id.as_deref() == Some(task_id))
+            .cloned()
+            .collect();
+        if !self.approval_identity.is_empty() {
+            for pending in &pending {
+                let _ = operations_client::decide(
+                    &self.approval_identity,
+                    &pending.operation_id,
+                    "cancel",
+                );
+            }
+        }
+        match agent_client::cancel_task(task_id) {
+            Ok(task) => {
+                self.agent_status = Some(format!(
+                    "Task {}: {}. Cancelled {} pending write(s) where the owner identity was available.",
+                    task.task_id,
+                    task_status_name(task.status),
+                    pending.len()
+                ));
+                self.refresh_operations();
                 self.refresh_agent_tasks();
             }
             Err(error) => self.agent_error = Some(error),
@@ -1183,6 +1281,11 @@ impl PanelApp {
                                 ui.weak(format!("operation {operation_id}"));
                             }
                         });
+                        if let Some(arguments) = &step.arguments {
+                            ui.monospace(
+                                serde_json::to_string_pretty(arguments).unwrap_or_default(),
+                            );
+                        }
                         if let Some(error) = &step.error {
                             ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
                         }
@@ -1197,23 +1300,55 @@ impl PanelApp {
                     if let Some(error) = &task.error {
                         ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
                     }
+                    let pending_count = self
+                        .pending_operations
+                        .iter()
+                        .filter(|pending| pending.task_id.as_deref() == Some(&task.task_id))
+                        .count();
+                    if task.status == evermore_common::agent::TaskStatus::AwaitingApproval
+                        && pending_count > 0
+                    {
+                        if ui
+                            .button(format!("Approve all {pending_count} write(s)"))
+                            .clicked()
+                        {
+                            self.approve_task_writes(&task.task_id);
+                        }
+                        ui.weak(
+                            "Each write is approved by its own exact owner signature; this does not create session-wide permission.",
+                        );
+                    }
                     if matches!(
                         task.status,
                         evermore_common::agent::TaskStatus::Pending
                             | evermore_common::agent::TaskStatus::Running
+                            | evermore_common::agent::TaskStatus::AwaitingApproval
                     ) && !task.cancel_requested
                     {
-                        if ui.button("Cancel task").clicked() {
-                            match agent_client::cancel_task(&task.task_id) {
-                                Ok(task) => {
-                                    self.agent_status = Some(format!(
-                                        "Task {}: {}",
-                                        task.task_id,
-                                        task_status_name(task.status)
-                                    ));
-                                    self.refresh_agent_tasks();
+                        let label = if task.status
+                            == evermore_common::agent::TaskStatus::AwaitingApproval
+                        {
+                            "Cancel task and pending writes"
+                        } else {
+                            "Cancel task"
+                        };
+                        if ui.button(label).clicked() {
+                            if task.status
+                                == evermore_common::agent::TaskStatus::AwaitingApproval
+                            {
+                                self.cancel_task_and_writes(&task.task_id);
+                            } else {
+                                match agent_client::cancel_task(&task.task_id) {
+                                    Ok(task) => {
+                                        self.agent_status = Some(format!(
+                                            "Task {}: {}",
+                                            task.task_id,
+                                            task_status_name(task.status)
+                                        ));
+                                        self.refresh_agent_tasks();
+                                    }
+                                    Err(error) => self.agent_error = Some(error),
                                 }
-                                Err(error) => self.agent_error = Some(error),
                             }
                         }
                     }
@@ -1929,6 +2064,11 @@ impl eframe::App for PanelApp {
                     .map_or(true, |deadline| std::time::Instant::now() >= deadline)
                 {
                     self.refresh_agent_tasks();
+                    if self.agent_tasks.iter().any(|task| {
+                        task.status == evermore_common::agent::TaskStatus::AwaitingApproval
+                    }) {
+                        self.refresh_pending_approvals();
+                    }
                 }
                 if !self.identities_loaded {
                     self.refresh_identities();
@@ -3031,6 +3171,7 @@ fn task_status_name(status: evermore_common::agent::TaskStatus) -> &'static str 
     match status {
         TaskStatus::Pending => "pending",
         TaskStatus::Running => "running",
+        TaskStatus::AwaitingApproval => "awaiting approval",
         TaskStatus::Succeeded => "succeeded",
         TaskStatus::Failed => "failed",
         TaskStatus::Denied => "denied",

@@ -92,6 +92,29 @@ impl Recipe {
             .filter_map(|step| step.operation.clone())
             .collect()
     }
+
+    pub fn write_operations(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter(|step| step.kind == StepKind::Write)
+            .filter_map(|step| step.operation.clone())
+            .collect()
+    }
+
+    pub fn operation_names(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter(|step| matches!(step.kind, StepKind::Read | StepKind::Write))
+            .filter_map(|step| step.operation.clone())
+            .collect()
+    }
+
+    pub fn write_count(&self) -> u32 {
+        self.steps
+            .iter()
+            .filter(|step| step.kind == StepKind::Write)
+            .count() as u32
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +158,7 @@ enum RawStepKind {
     Read,
     Journal,
     Render,
+    Write,
 }
 
 fn default_version() -> u32 {
@@ -187,7 +211,16 @@ pub fn audit_digest() -> Recipe {
 }
 
 pub fn builtins() -> Vec<Recipe> {
-    vec![audit_digest()]
+    vec![
+        audit_digest(),
+        builtin(include_str!("../recipes/settings.concierge.toml")),
+        builtin(include_str!("../recipes/workspace.compose.toml")),
+        builtin(include_str!("../recipes/notifications.dnd.toml")),
+    ]
+}
+
+fn builtin(text: &str) -> Recipe {
+    parse_recipe(text.as_bytes(), "builtin").expect("built-in recipe must be valid")
 }
 
 /// Load built-ins plus every valid local recipe. Invalid local recipes are
@@ -283,6 +316,7 @@ pub fn parse_recipe(bytes: &[u8], source: &str) -> Result<Recipe, String> {
                     RawStepKind::Read => StepKind::Read,
                     RawStepKind::Journal => StepKind::Journal,
                     RawStepKind::Render => StepKind::Render,
+                    RawStepKind::Write => StepKind::Write,
                 },
                 operation: step.operation,
                 args: step.args.map(toml_to_json),
@@ -332,24 +366,39 @@ fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
     for name in &recipe.operations {
         let definition = operations::find(name)
             .ok_or_else(|| format!("recipe declares unknown operation '{name}'"))?;
-        if definition.access != Access::Read {
-            return Err(format!(
-                "'{name}' is a write operation; write steps are not available in this version"
-            ));
-        }
-        if definition.approval == operations::Approval::Required {
-            return Err(format!(
-                "'{name}' unexpectedly requires approval for a read"
-            ));
+        match definition.access {
+            Access::Read => {
+                if definition.approval == operations::Approval::Required {
+                    return Err(format!(
+                        "'{name}' unexpectedly requires approval for a read"
+                    ));
+                }
+            }
+            Access::Write => {
+                if definition.approval != operations::Approval::Required {
+                    return Err(format!(
+                        "'{name}' is a write operation without owner approval"
+                    ));
+                }
+            }
         }
     }
 
     let mut step_ids = BTreeSet::new();
     let mut select_properties: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut seen_write = false;
     for (index, step) in recipe.steps.iter().enumerate() {
         validate_id(&step.id)?;
         if !step_ids.insert(step.id.clone()) {
             return Err(format!("duplicate step id '{}'", step.id));
+        }
+        if step.kind == StepKind::Write {
+            seen_write = true;
+        } else if seen_write {
+            return Err(
+                "write steps must be the final steps of a recipe so the owner can review the whole write plan"
+                    .into(),
+            );
         }
         match step.kind {
             StepKind::Select => {
@@ -434,12 +483,46 @@ fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
                     ));
                 }
             }
+            StepKind::Write => {
+                let name = step
+                    .operation
+                    .as_deref()
+                    .ok_or_else(|| format!("write step '{}' needs an operation", step.id))?;
+                if !declared.contains(name) {
+                    return Err(format!(
+                        "write step '{}' uses operation '{name}' not declared in operations",
+                        step.id
+                    ));
+                }
+                let definition = operations::find(name)
+                    .ok_or_else(|| format!("write step '{}' has an unknown operation", step.id))?;
+                if definition.access != Access::Write
+                    || definition.approval != operations::Approval::Required
+                {
+                    return Err(format!(
+                        "write step '{}' operation '{name}' is not an approval-gated write",
+                        step.id
+                    ));
+                }
+                if let Some(args) = &step.args {
+                    if !args.is_object() {
+                        return Err(format!("write step '{}' args must be a table", step.id));
+                    }
+                }
+            }
             StepKind::Unknown => return Err("recipe uses an unknown step kind".into()),
         }
 
         for reference in step_references(step) {
             validate_reference(&reference, index, &recipe.steps, &select_properties)?;
         }
+    }
+    let writes = recipe.write_count();
+    if writes > 0 && recipe.budget.writes == 0 {
+        return Err("recipe has write steps but a zero write budget".into());
+    }
+    if writes > recipe.budget.writes {
+        return Err("recipe has more write steps than its write budget allows".into());
     }
     Ok(())
 }
@@ -450,8 +533,8 @@ fn validate_budget(budget: &TaskBudget) -> Result<(), String> {
             "step budget must be between 1 and {MAX_RECIPE_STEPS}"
         ));
     }
-    if budget.writes != 0 {
-        return Err("write budget must be 0; write steps are not available in this version".into());
+    if budget.writes > MAX_RECIPE_STEPS {
+        return Err("write budget exceeds the maximum step count".into());
     }
     if budget.seconds == 0 || budget.seconds > MAX_RECIPE_SECONDS {
         return Err(format!(
@@ -616,7 +699,7 @@ fn validate_reference(
                 ));
             }
         }
-        StepKind::Read | StepKind::Render => {}
+        StepKind::Read | StepKind::Render | StepKind::Write => {}
         StepKind::Unknown => {}
     }
     Ok(())
@@ -655,11 +738,72 @@ template = "Theme: {{value.value}}"
         assert_ne!(recipe.sha256, "builtin");
     }
 
+    const WRITE: &str = r#"
+id = "test.write"
+version = 1
+title = "Write demo"
+operations = ["settings.set"]
+budget = { steps = 3, writes = 1, seconds = 10 }
+
+[[step]]
+id = "choose"
+kind = "select"
+schema = { type = "object", properties = { value = { type = "string" } }, required = ["value"] }
+
+[[step]]
+id = "text"
+kind = "render"
+template = "Theme: {{choose.value}}"
+
+[[step]]
+id = "apply"
+kind = "write"
+operation = "settings.set"
+args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
+"#;
+
     #[test]
-    fn rejects_write_operations_in_this_version() {
-        let text = VALID.replace("settings.get", "settings.set");
+    fn parses_a_valid_write_recipe() {
+        let recipe = parse_recipe(WRITE.as_bytes(), "local").unwrap();
+        assert_eq!(recipe.write_count(), 1);
+        assert_eq!(recipe.write_operations(), vec!["settings.set"]);
+    }
+
+    #[test]
+    fn rejects_a_write_without_write_budget() {
+        let text = WRITE.replace("writes = 1", "writes = 0");
         let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
-        assert!(error.contains("write operation"), "{error}");
+        assert!(error.contains("zero write budget"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_non_write_operation_as_a_write_step() {
+        let text = WRITE
+            .replace(
+                "operations = [\"settings.set\"]",
+                "operations = [\"settings.get\"]",
+            )
+            .replace(
+                "operation = \"settings.set\"",
+                "operation = \"settings.get\"",
+            )
+            .replace("writes = 1", "writes = 1");
+        let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
+        assert!(error.contains("not an approval-gated write"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_write_before_a_later_non_write_step() {
+        let text = WRITE.replace(
+            "[[step]]\nid = \"text\"\nkind = \"render\"\ntemplate = \"Theme: {{choose.value}}\"\n\n[[step]]\nid = \"apply\"",
+            "[[step]]\nid = \"apply\"",
+        );
+        let text = text.replace(
+            "args = { domain = \"theme\", key = \"mode\", value = \"{{choose.value}}\" }",
+            "args = { domain = \"theme\", key = \"mode\", value = \"{{choose.value}}\" }\n\n[[step]]\nid = \"text\"\nkind = \"render\"\ntemplate = \"Theme: {{choose.value}}\"",
+        );
+        let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
+        assert!(error.contains("final steps"), "{error}");
     }
 
     #[test]
@@ -677,10 +821,9 @@ template = "Theme: {{value.value}}"
     }
 
     #[test]
-    fn rejects_write_budget() {
+    fn a_write_budget_without_write_steps_is_harmless() {
         let text = VALID.replace("writes = 0", "writes = 2");
-        let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
-        assert!(error.contains("write budget"), "{error}");
+        parse_recipe(text.as_bytes(), "local").unwrap();
     }
 
     #[test]
@@ -689,6 +832,30 @@ template = "Theme: {{value.value}}"
         validate_recipe(&recipe).unwrap();
         assert_eq!(recipe.source, "builtin");
         assert!(!recipe.has_catalogue_reads());
+    }
+
+    #[test]
+    fn builtins_are_valid_and_include_write_recipes() {
+        let recipes = builtins();
+        for recipe in &recipes {
+            validate_recipe(recipe).unwrap();
+        }
+        let workspace = recipes
+            .iter()
+            .find(|recipe| recipe.id == "workspace.compose")
+            .unwrap();
+        assert_eq!(workspace.write_count(), 3);
+        assert_eq!(workspace.budget.writes, 3);
+        let settings = recipes
+            .iter()
+            .find(|recipe| recipe.id == "settings.concierge")
+            .unwrap();
+        assert_eq!(settings.write_count(), 1);
+        let dnd = recipes
+            .iter()
+            .find(|recipe| recipe.id == "notifications.dnd")
+            .unwrap();
+        assert_eq!(dnd.write_count(), 1);
     }
 
     #[test]

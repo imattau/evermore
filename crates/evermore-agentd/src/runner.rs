@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use evermore_common::agent::{StepKind, StepStatus, Task, TaskStatus, TaskStep};
+use evermore_common::agent::{self, StepKind, StepStatus, Task, TaskStatus, TaskStep};
 use evermore_common::operations;
 use serde_json::{Value, json};
 
@@ -11,6 +11,7 @@ use crate::store::TaskStore;
 
 pub struct Runner {
     pub store: Arc<TaskStore>,
+    pub agent_identity: String,
     pub agent_pubkey: String,
     pub owner_pubkey: String,
 }
@@ -18,8 +19,9 @@ pub struct Runner {
 impl Runner {
     pub fn create_task(&self, recipe: &Recipe, inputs: Value) -> Result<Task, String> {
         render::validate_inputs(&recipe.inputs_schema(), &inputs)?;
-        if recipe.has_catalogue_reads() {
-            clients::require_grant(&self.agent_pubkey, &recipe.read_operations())?;
+        let operations = recipe.operation_names();
+        if !operations.is_empty() {
+            clients::require_grant(&self.agent_pubkey, &operations)?;
         }
         let now = unix_time();
         let task_id = new_task_id()?;
@@ -90,8 +92,14 @@ impl Runner {
         let inputs = self.store.get(task_id)?.inputs.clone();
         let mut context = json!({});
         let mut last_render: Option<Value> = None;
+        let mut write_start = None;
 
         for index in 0..recipe.steps.len() {
+            let step = recipe.steps[index].clone();
+            if step.kind == StepKind::Write {
+                write_start = Some(index);
+                break;
+            }
             let task = self.store.get(task_id)?;
             if task.cancel_requested || task.status == TaskStatus::Cancelled {
                 self.store.update(task_id, |task| {
@@ -109,7 +117,6 @@ impl Runner {
                 return Ok(());
             }
 
-            let step = recipe.steps[index].clone();
             self.store.update(task_id, |task| {
                 let step = task
                     .steps
@@ -120,9 +127,9 @@ impl Runner {
                 Ok(())
             })?;
 
-            let rendered_arguments = match (&step.args, step.kind) {
-                (Some(arguments), _) => Some(render::render_value(arguments, &context)?),
-                _ => None,
+            let rendered_arguments = match &step.args {
+                Some(arguments) => Some(render::render_value(arguments, &context)?),
+                None => None,
             };
 
             let result = match step.kind {
@@ -160,6 +167,7 @@ impl Runner {
                         .ok_or_else(|| format!("render step '{}' lost its template", step.id))?;
                     Ok(Value::String(render::render_text(template, &context)?))
                 }
+                StepKind::Write => unreachable!("write steps break before execution"),
                 StepKind::Unknown => Err("recipe uses an unknown step kind".into()),
             };
 
@@ -203,12 +211,220 @@ impl Runner {
             }
         }
 
+        if let Some(index) = write_start {
+            return self.submit_writes(task_id, recipe, index, &context);
+        }
+
         self.store.update(task_id, |task| {
             task.status = TaskStatus::Succeeded;
             task.result = last_render.or_else(|| Some(context.clone()));
             Ok(())
         })?;
         Ok(())
+    }
+
+    fn submit_writes(
+        &self,
+        task_id: &str,
+        recipe: &Recipe,
+        start: usize,
+        context: &Value,
+    ) -> Result<(), String> {
+        let task = self.store.get(task_id)?;
+        if task.cancel_requested || task.status == TaskStatus::Cancelled {
+            self.store.update(task_id, |task| {
+                task.status = TaskStatus::Cancelled;
+                Ok(())
+            })?;
+            return Ok(());
+        }
+        clients::require_grant(&self.agent_pubkey, &recipe.write_operations())?;
+        for index in start..recipe.steps.len() {
+            let step = recipe.steps[index].clone();
+            let name = step
+                .operation
+                .as_deref()
+                .ok_or_else(|| format!("write step '{}' lost its operation", step.id))?;
+            let rendered = match &step.args {
+                Some(arguments) => render::render_value(arguments, context)?,
+                None => json!({}),
+            };
+            let arguments = operations::canonicalize_input(name, &rendered)?;
+            clients::require_grant(&self.agent_pubkey, &[name.to_string()])?;
+            let plaintext = json!({"operation": name, "arguments": arguments}).to_string();
+            let ciphertext =
+                clients::nip44_encrypt(&self.agent_identity, &self.owner_pubkey, &plaintext)?;
+            let event = clients::sign_event(
+                &self.agent_identity,
+                &ciphertext,
+                vec![
+                    vec!["t".into(), "evermore-operation-request".into()],
+                    vec!["p".into(), self.owner_pubkey.clone()],
+                    agent::task_tag(task_id),
+                    agent::step_tag(index as u32),
+                ],
+            )?;
+            let record = clients::submit_request(event)?;
+            let operation_id = record
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "operation daemon omitted operation_id".to_string())?
+                .to_string();
+            self.store.update(task_id, |task| {
+                let step = task
+                    .steps
+                    .get_mut(index)
+                    .ok_or_else(|| "task step vanished".to_string())?;
+                step.arguments = Some(arguments);
+                step.operation_id = Some(operation_id);
+                step.status = StepStatus::AwaitingApproval;
+                step.started_at = Some(unix_time());
+                Ok(())
+            })?;
+        }
+        self.store.update(task_id, |task| {
+            task.status = TaskStatus::AwaitingApproval;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn resume_waiting_tasks(&self) -> Result<(), String> {
+        for task in self.store.list(100)? {
+            if task.status != TaskStatus::AwaitingApproval {
+                continue;
+            }
+            if task.cancel_requested {
+                self.store.update(&task.task_id, |task| {
+                    task.status = if task
+                        .steps
+                        .iter()
+                        .any(|step| step.status == StepStatus::Succeeded)
+                    {
+                        TaskStatus::PartiallyCompleted
+                    } else {
+                        TaskStatus::Cancelled
+                    };
+                    Ok(())
+                })?;
+                continue;
+            }
+            let mut terminal = true;
+            let mut updates = Vec::new();
+            for step in &task.steps {
+                let Some(operation_id) = &step.operation_id else {
+                    continue;
+                };
+                if step.status != StepStatus::AwaitingApproval {
+                    continue;
+                }
+                match clients::operation_status(operation_id) {
+                    Ok(status) => {
+                        if !matches!(
+                            status.status.as_str(),
+                            "succeeded"
+                                | "denied"
+                                | "expired"
+                                | "cancelled"
+                                | "failed"
+                                | "execution_unknown"
+                                | "revoked"
+                        ) {
+                            terminal = false;
+                        }
+                        updates.push((step.index, status));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "evermore-agentd: task {} is waiting; operation status unavailable: {error}",
+                            task.task_id
+                        );
+                        terminal = false;
+                    }
+                }
+            }
+            if !terminal {
+                continue;
+            }
+            for (index, status) in updates {
+                let (step_status, error) = step_status_from_operation(&status);
+                self.store.update(&task.task_id, |task| {
+                    let step = task
+                        .steps
+                        .get_mut(index as usize)
+                        .ok_or_else(|| "task step vanished".to_string())?;
+                    step.status = step_status;
+                    step.result = status.result.clone();
+                    step.error = error.clone();
+                    step.finished_at = Some(unix_time());
+                    Ok(())
+                })?;
+            }
+            self.store.update(&task.task_id, |task| {
+                let write_steps: Vec<_> = task
+                    .steps
+                    .iter()
+                    .filter(|step| step.operation_id.is_some())
+                    .collect();
+                let succeeded = write_steps
+                    .iter()
+                    .filter(|step| step.status == StepStatus::Succeeded)
+                    .count();
+                let total = write_steps.len();
+                task.status = if succeeded == total {
+                    TaskStatus::Succeeded
+                } else if succeeded > 0 {
+                    TaskStatus::PartiallyCompleted
+                } else if write_steps
+                    .iter()
+                    .all(|step| step.status == StepStatus::Denied)
+                {
+                    TaskStatus::Denied
+                } else if write_steps
+                    .iter()
+                    .all(|step| step.status == StepStatus::Expired)
+                {
+                    TaskStatus::Expired
+                } else if write_steps
+                    .iter()
+                    .all(|step| step.status == StepStatus::Cancelled)
+                {
+                    TaskStatus::Cancelled
+                } else {
+                    TaskStatus::Failed
+                };
+                task.result = Some(json!({"writes": total, "succeeded": succeeded}));
+                if succeeded != total {
+                    task.error = Some(format!(
+                        "{} of {total} approved writes completed",
+                        succeeded
+                    ));
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn step_status_from_operation(status: &clients::OperationStatus) -> (StepStatus, Option<String>) {
+    match status.status.as_str() {
+        "succeeded" => (StepStatus::Succeeded, None),
+        "denied" => (StepStatus::Denied, status.error.clone()),
+        "expired" => (
+            StepStatus::Expired,
+            Some("operation request expired before owner approval".into()),
+        ),
+        "cancelled" => (StepStatus::Cancelled, status.error.clone()),
+        "execution_unknown" => (
+            StepStatus::ExecutionUnknown,
+            Some("operation outcome requires review; it was not replayed".into()),
+        ),
+        "failed" | "revoked" => (StepStatus::Failed, status.error.clone()),
+        other => (
+            StepStatus::Failed,
+            Some(format!("unexpected operation status '{other}'")),
+        ),
     }
 }
 
@@ -331,6 +547,7 @@ template = "workspace {{choose.workspace}}"
     fn runner(path: std::path::PathBuf) -> Arc<Runner> {
         Arc::new(Runner {
             store: Arc::new(TaskStore::open_at(path).unwrap()),
+            agent_identity: "test-agent".into(),
             agent_pubkey: "a".repeat(64),
             owner_pubkey: "b".repeat(64),
         })

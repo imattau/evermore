@@ -1,0 +1,23 @@
+id = "settings.concierge"
+version = 1
+title = "Settings concierge"
+description = "Read a settings domain, then propose one exact settings change for owner approval."
+operations = ["settings.get_domain", "settings.set"]
+budget = { steps = 3, writes = 1, seconds = 30, context_tokens = 0 }
+
+[[step]]
+id = "choose"
+kind = "select"
+schema = { type = "object", properties = { domain = { type = "string", minLength = 1, maxLength = 128 }, key = { type = "string", minLength = 1, maxLength = 128 }, value = { type = "string", maxLength = 2048 } }, required = ["domain", "key", "value"] }
+
+[[step]]
+id = "current"
+kind = "read"
+operation = "settings.get_domain"
+args = { domain = "{{choose.domain}}" }
+
+[[step]]
+id = "apply"
+kind = "write"
+operation = "settings.set"
+args = { domain = "{{choose.domain}}", key = "{{choose.key}}", value = "{{choose.value}}" }

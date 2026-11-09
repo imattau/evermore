@@ -15,18 +15,21 @@ operation itself and never holds execution authority.
 - Reuses the existing signed `kind:1` operation request, adding `task` and
   `step` tags so the panel can group a step with its task. There is no second
   lifecycle.
-- Refuses write steps and non-zero write budgets in this version. Writes remain
-  ordinary owner-approved operations when M11.3 lands.
+- Submits approval-gated write steps as ordinary signed operation requests,
+  batching all writes in a recipe so the owner reviews the whole plan together.
+  Each write is still approved by its own exact owner signature.
 - Marks a task `execution_unknown` after a restart if a step was claimed, and
-  never replays it.
+  never replays it. Tasks waiting for approval resume when the operation
+  reaches a terminal state.
 
 ## Recipe format
 
 Local recipes live in `$XDG_DATA_HOME/evermore/recipes/*.toml`, must be regular
 files with no group/world write permission (`chmod 600`), and are capped at
 256 KiB. Unknown operations, undeclared operation use, forward template
-references, write steps, oversized step counts, and budgets over 32 steps or
-300 seconds are refused.
+references, a write step followed by a non-write step, a write beyond the write
+budget, oversized step counts, and budgets over 32 steps or 300 seconds are
+refused.
 
 ```toml
 id = "workspace.open"
@@ -60,6 +63,7 @@ Step kinds in v1:
 | `read` | Invoke one declared read operation through `evermore-operationsd`. Requires a matching owner grant. |
 | `journal` | Read the private operation journal (`pending`, `history`, `summary`). |
 | `render` | Deterministically interpolate earlier step values with `{{step.field}}`. |
+| `write` | Submit one approval-gated operation. Writes must be the final steps so the owner reviews the whole write plan before anything runs. |
 
 ## Usage
 
@@ -80,7 +84,13 @@ change" field uses the same request and fills the existing owner-approval form.
 The proposal path enforces a 4096-token context budget; task recipes carry the
 same field as `budget.context_tokens` for future model steps.
 
-The daemon needs a loaded signer identity for its agent pubkey:
+Built-in recipes include `audit.digest`, `settings.concierge`,
+`workspace.compose`, and `notifications.dnd`. The write recipes submit all their
+writes together, so the panel shows one pending-write plan with canonical
+arguments; "Approve all" signs one owner approval per exact operation.
+
+The daemon needs a loaded signer identity for its agent pubkey and for signing
+write requests:
 
 ```sh
 evermore-agentd serve --agent-identity NAME [--owner-pubkey HEX]

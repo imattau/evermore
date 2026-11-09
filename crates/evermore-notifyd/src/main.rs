@@ -334,6 +334,10 @@ fn handle_connection(stream: UnixStream, store: &NotificationStore) -> std::io::
                 Ok(dismissed) => Response::ok(serde_json::json!({"dismissed": dismissed})),
                 Err(message) => Response::err(message),
             },
+            Ok(Request::SetDnd { enabled }) => match set_dnd(enabled) {
+                Ok(data) => Response::ok(data),
+                Err(message) => Response::err(message),
+            },
             Err(e) => Response::err(format!("invalid request: {e}")),
         };
         let mut out = serde_json::to_string(&response)
@@ -345,10 +349,72 @@ fn handle_connection(stream: UnixStream, store: &NotificationStore) -> std::io::
     Ok(())
 }
 
+fn set_dnd(enabled: bool) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("swaync-client")
+        .args([dnd_flag(enabled), "-sw"])
+        .output()
+        .map_err(|error| format!("couldn't run swaync-client: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(if stderr.is_empty() {
+            format!("swaync-client exited with {}", output.status)
+        } else {
+            format!("swaync-client failed: {stderr}")
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let dnd = parse_dnd_state(&stdout)?;
+    if dnd != enabled {
+        return Err(format!(
+            "swaync-client reported DND {dnd} after requesting {enabled}"
+        ));
+    }
+    Ok(serde_json::json!({ "dnd": dnd }))
+}
+
+fn dnd_flag(enabled: bool) -> &'static str {
+    if enabled { "-dn" } else { "-df" }
+}
+
+fn parse_dnd_state(stdout: &str) -> Result<bool, String> {
+    let state = stdout.trim().to_ascii_lowercase();
+    if state.ends_with("true") || state == "on" {
+        Ok(true)
+    } else if state.ends_with("false") || state == "off" {
+        Ok(false)
+    } else {
+        Err(format!(
+            "swaync-client returned an unexpected DND state: {}",
+            stdout.trim()
+        ))
+    }
+}
+
 fn parse_arg(flag: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dnd_flags_select_the_requested_state() {
+        assert_eq!(dnd_flag(true), "-dn");
+        assert_eq!(dnd_flag(false), "-df");
+    }
+
+    #[test]
+    fn dnd_state_output_is_parsed_conservatively() {
+        assert!(parse_dnd_state("true\n").unwrap());
+        assert!(!parse_dnd_state("DND: false").unwrap());
+        assert!(parse_dnd_state("true").unwrap());
+        assert!(!parse_dnd_state("off").unwrap());
+        assert!(parse_dnd_state("maybe").is_err());
+    }
 }

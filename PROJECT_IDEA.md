@@ -1964,14 +1964,14 @@ and the owner approves every write. The full rationale and limits are in the
 "Agentic AI — Bounded Agency" addendum below; this phase turns that design into
 milestones.
 
-**Implementation status (2026-11-09):** M11.1 and M11.2 are implemented.
+**Implementation status (2026-11-09):** M11.1-M11.3 are implemented.
 `evermore-common::agent` defines the v1 socket/task protocol, tag helpers,
 offline task read, and shared proposal instructions, marker parsing, and
 validation; `evermore-agentd` serves the deterministic runner with a private
-resumable task store, the built-in `audit.digest` recipe, validated local TOML
+resumable task store, built-in read and write recipes, validated local TOML
 recipes, a CLI, and L1 generation. `evermore-operationsd` records optional
 `task`/`step` tags on request events; the panel folds recipe runs, task and step
-state, and task cancellation into Recent Activity.
+state, pending-write plans, approvals, and cancellation into Recent Activity.
 
 L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,
 validates it against the catalogue, repairs malformed or out-of-catalogue
@@ -1979,16 +1979,30 @@ output at most once, returns a refusal as a refusal, and enforces a 4096-token
 context budget. It never submits an operation; the panel's "Describe the
 change" field fills the existing owner-approval form. L1 is a direct generation
 request rather than a persisted task because the resulting operation request is
-the durable artifact. Task budgets now carry `context_tokens` for the first
+the durable artifact. Task budgets carry `context_tokens` for the first
 model-backed recipe step.
 
-Local recipes are read-only in this version: write steps and non-zero write
-budgets are refused, so an unsigned recipe cannot drive a mutation yet. Host
-unit tests pass, and an end-to-end digest, local-recipe, repair, and refusal run
-against stub signer, operations, and inference sockets produced zero write or
-invoke calls with a `0600` task store. VM acceptance remains. M11.3-M11.5 are
-not started. Phase 7's operation baseline and Phase 7.5's inference runtime are
-unchanged.
+M11.3 adds `notifications.set_dnd` (executed by `evermore-notifyd` through
+`swaync-client -dn`/`-df`) and write steps in recipes. A recipe's writes must be
+its final steps; the runner resolves their canonical arguments from the
+non-write context, submits them together as ordinary signed `kind:1` requests
+tagged with the task and step, and leaves the task `awaiting_approval`. The
+panel shows the whole pending-write plan with exact arguments; "Approve all"
+signs one owner approval per operation, and "Cancel task and pending writes"
+cancels the task and the owner-cancellable requests. A resume pass polls the
+operation daemon and completes the task without replaying anything. This is a
+plan-level review surface, not a session-wide permission or a new approval
+event kind.
+
+Host unit tests pass. An end-to-end run against stub signer, operations, and
+inference sockets exercised the digest, local recipes, L1 repair and refusal,
+the `workspace.compose` plan submitting three writes together and reaching
+`succeeded` after approval statuses, and a denied `notifications.dnd` task
+ending `denied`; the task store stayed `0600`. The catalogue fingerprint was
+updated in `tools/adapter-training/registry.lock` with the new operation; the
+adapter itself still needs a retrain and signed release. VM acceptance remains.
+M11.4-M11.5 are not started. Phase 7's operation baseline and Phase 7.5's
+inference runtime are unchanged.
 
 **Architecture:**
 
@@ -2069,8 +2083,11 @@ local recipe and confirm duplicate IDs, unknown operations, write steps,
 oversized files, symlinks, and out-of-grant operations are refused with
 specific errors. Restart the daemon mid-step and confirm no replay. For L1,
 feed a stub inference socket malformed then valid output and confirm exactly
-one repair, then a refusal and confirm no proposal or request is created. Run
-`cargo fmt --all -- --check`, `cargo check --workspace`,
+one repair, then a refusal and confirm no proposal or request is created. For
+plan approval, run a write recipe and confirm all pending writes and canonical
+arguments appear together, one owner approval is signed per operation, denial
+ends the task without replay, and cancellation leaves no executable request.
+Run `cargo fmt --all -- --check`, `cargo check --workspace`,
 `cargo test --workspace`, and `git diff --check`, then repeat in the Arch VM.
 
 **Build order:** M11.1 first: common types, operationsd linkage, agentd store

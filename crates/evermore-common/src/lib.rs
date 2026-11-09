@@ -351,6 +351,16 @@ pub mod operations {
                 Redaction::None,
             ),
             definition(
+                "notifications.set_dnd",
+                "Enable or disable SwayNotificationCenter Do Not Disturb. Approval decisions still require an explicit owner action. Requires owner approval.",
+                Access::Write,
+                "notifications.write",
+                Approval::Required,
+                object_schema(json!({ "enabled": { "type": "boolean" } }), &["enabled"]),
+                object_schema(json!({ "dnd": { "type": "boolean" } }), &["dnd"]),
+                Redaction::None,
+            ),
+            definition(
                 "packages.install_pinned",
                 "Propose installation or update to one exact package version from a trusted, signed npack release (publisher/name, as reported by packages.list_available). The archive hash must match before the current package version changes; a mismatch is removed again rather than left installed.",
                 Access::Write,
@@ -2166,6 +2176,8 @@ pub mod notifications {
         ClearRecent,
         /// Dismiss one non-DM notification by its local identifier.
         Dismiss { notification_id: String },
+        /// Enable or disable SwayNotificationCenter Do Not Disturb.
+        SetDnd { enabled: bool },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2291,6 +2303,7 @@ pub mod agent {
     pub enum TaskStatus {
         Pending,
         Running,
+        AwaitingApproval,
         Succeeded,
         Failed,
         Denied,
@@ -2326,6 +2339,7 @@ pub mod agent {
         Read,
         Journal,
         Render,
+        Write,
         #[serde(other)]
         Unknown,
     }

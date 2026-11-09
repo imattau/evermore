@@ -131,7 +131,7 @@ impl TaskStore {
 
     pub fn request_cancel(&self, task_id: &str) -> Result<Task, String> {
         self.update(task_id, |task| match task.status {
-            TaskStatus::Pending | TaskStatus::Running => {
+            TaskStatus::Pending | TaskStatus::Running | TaskStatus::AwaitingApproval => {
                 task.cancel_requested = true;
                 if task.status == TaskStatus::Pending {
                     task.status = TaskStatus::Cancelled;
@@ -175,6 +175,7 @@ fn status_name(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Pending => "pending",
         TaskStatus::Running => "running",
+        TaskStatus::AwaitingApproval => "awaiting_approval",
         TaskStatus::Succeeded => "succeeded",
         TaskStatus::Failed => "failed",
         TaskStatus::Denied => "denied",

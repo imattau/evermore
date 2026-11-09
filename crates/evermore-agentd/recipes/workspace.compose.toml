@@ -1,0 +1,29 @@
+id = "workspace.compose"
+version = 1
+title = "Compose a workspace"
+description = "Switch to a workspace, launch an application, and set Do Not Disturb. Every write is submitted together for one owner review."
+operations = ["sway.switch_workspace", "sway.launch_app", "notifications.set_dnd"]
+budget = { steps = 4, writes = 3, seconds = 60, context_tokens = 0 }
+
+[[step]]
+id = "choose"
+kind = "select"
+schema = { type = "object", properties = { workspace = { type = "integer", minimum = 1, maximum = 10 }, program = { type = "string", minLength = 1, maxLength = 128 }, dnd = { type = "boolean" } }, required = ["workspace", "program", "dnd"] }
+
+[[step]]
+id = "workspace"
+kind = "write"
+operation = "sway.switch_workspace"
+args = { workspace_number = "{{choose.workspace}}" }
+
+[[step]]
+id = "launch"
+kind = "write"
+operation = "sway.launch_app"
+args = { program = "{{choose.program}}", args = [] }
+
+[[step]]
+id = "dnd"
+kind = "write"
+operation = "notifications.set_dnd"
+args = { enabled = "{{choose.dnd}}" }

@@ -17,6 +17,16 @@ pub struct Grant {
     pub revoked: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperationStatus {
+    pub operation_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 pub fn configured_owner() -> Result<String, String> {
     request_operations(&Request::ConfiguredOwner)?
         .as_str()
@@ -70,6 +80,44 @@ pub fn signer_public_key(identity: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "signer returned an invalid public key".into())
+}
+
+pub fn sign_event(identity: &str, content: &str, tags: Vec<Vec<String>>) -> Result<Value, String> {
+    request_signer(&SignerRequest::SignEvent {
+        identity: identity.to_string(),
+        kind: 1,
+        content: content.to_string(),
+        tags,
+        created_at: None,
+    })
+}
+
+pub fn nip44_encrypt(
+    identity: &str,
+    recipient_pubkey: &str,
+    plaintext: &str,
+) -> Result<String, String> {
+    let data = request_signer(&SignerRequest::Nip44Encrypt {
+        identity: identity.to_string(),
+        recipient_pubkey: recipient_pubkey.to_string(),
+        plaintext: plaintext.to_string(),
+    })?;
+    data.get("ciphertext")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "signer returned an invalid ciphertext".into())
+}
+
+pub fn submit_request(event: Value) -> Result<Value, String> {
+    request_operations(&Request::SubmitSignedRequest { event })
+}
+
+pub fn operation_status(operation_id: &str) -> Result<OperationStatus, String> {
+    let value = request_operations(&Request::OperationStatus {
+        operation_id: operation_id.to_string(),
+    })?;
+    serde_json::from_value(value)
+        .map_err(|error| format!("invalid operation status response: {error}"))
 }
 
 fn request_operations(request: &Request) -> Result<Value, String> {

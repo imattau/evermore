@@ -52,9 +52,21 @@ fn serve() -> std::io::Result<()> {
     let store = Arc::new(TaskStore::open().map_err(std::io::Error::other)?);
     let runner = Arc::new(Runner {
         store: Arc::clone(&store),
+        agent_identity: agent_identity.clone(),
         agent_pubkey: agent_pubkey.clone(),
         owner_pubkey: owner_pubkey.clone(),
     });
+    {
+        let runner = Arc::clone(&runner);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if let Err(error) = runner.resume_waiting_tasks() {
+                    eprintln!("evermore-agentd: task resume pass failed: {error}");
+                }
+            }
+        });
+    }
 
     let socket_path = agent::runtime_socket_path();
     if let Some(parent) = socket_path.parent() {

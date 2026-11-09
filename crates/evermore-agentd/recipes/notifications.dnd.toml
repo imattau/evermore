@@ -1,0 +1,17 @@
+id = "notifications.dnd"
+version = 1
+title = "Set Do Not Disturb"
+description = "Turn SwayNotificationCenter Do Not Disturb on or off. Approval decisions still require an explicit owner action."
+operations = ["notifications.set_dnd"]
+budget = { steps = 2, writes = 1, seconds = 30, context_tokens = 0 }
+
+[[step]]
+id = "choose"
+kind = "select"
+schema = { type = "object", properties = { enabled = { type = "boolean" } }, required = ["enabled"] }
+
+[[step]]
+id = "apply"
+kind = "write"
+operation = "notifications.set_dnd"
+args = { enabled = "{{choose.enabled}}" }

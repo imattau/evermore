@@ -58,6 +58,8 @@ use sha2::{Digest, Sha256};
 use crate::recipe::{Recipe, RecipeStep, validate_recipe};
 
 const EVERMORE_PACKAGES_NSM: &str = include_str!("../nscript/modules/evermore_packages/0.1.0.nsm");
+const EVERMORE_NOTIFICATIONS_NSM: &str =
+    include_str!("../nscript/modules/evermore_notifications/0.1.0.nsm");
 
 /// A registry carrying `nscript`'s standard modules plus Evermore's own,
 /// bundled from source at compile time rather than read from disk.
@@ -68,10 +70,10 @@ const EVERMORE_PACKAGES_NSM: &str = include_str!("../nscript/modules/evermore_pa
 /// CI before it could reach a built daemon.
 fn evermore_module_registry() -> ModuleRegistry {
     let mut registry = ModuleRegistry::with_builtins();
-    // One entry today; this stays a loop because the next bundled
-    // Evermore module (settings, calendar, ...) adds a second.
-    #[allow(clippy::single_element_loop)]
-    for (name, source) in [("evermore_packages", EVERMORE_PACKAGES_NSM)] {
+    for (name, source) in [
+        ("evermore_packages", EVERMORE_PACKAGES_NSM),
+        ("evermore_notifications", EVERMORE_NOTIFICATIONS_NSM),
+    ] {
         let (descriptor, diagnostics) = parse_module(source);
         assert!(
             diagnostics.is_empty(),
@@ -520,6 +522,8 @@ mod tests {
     use super::*;
 
     const PACKAGES_DOCTOR_NS: &str = include_str!("../nscript/recipes/packages.doctor.ns");
+    const NOTIFICATIONS_TRIAGE_NS: &str =
+        include_str!("../nscript/recipes/notifications.triage.ns");
 
     #[test]
     fn bundled_modules_are_valid() {
@@ -593,6 +597,56 @@ mod tests {
                 "Installed packages: {{installed.count}}\nSelected: {{choose.publisher}}/\
                  {{choose.name}} version {{dependencies.version}}"
             )
+        );
+    }
+
+    #[test]
+    fn notifications_triage_ns_projects_a_read_then_a_write_step() {
+        // M12.4: a genuinely new recipe with no hand-written TOML
+        // counterpart, exercising the projector's write-step path for the
+        // first time (packages.doctor only ever produced read + render).
+        let recipe = parse_ns_recipe(
+            NOTIFICATIONS_TRIAGE_NS.as_bytes(),
+            "builtin",
+            "notifications.triage",
+        )
+        .expect("projects and validates");
+        assert_eq!(recipe.id, "notifications.triage");
+        assert_eq!(recipe.title, "Notification triage");
+        assert_eq!(
+            recipe.operations,
+            ["notifications.list_recent", "notifications.dismiss"]
+        );
+        assert_eq!(recipe.budget.steps, 3);
+        assert_eq!(recipe.budget.writes, 1);
+
+        let ids: Vec<&str> = recipe.steps.iter().map(|step| step.id.as_str()).collect();
+        assert_eq!(ids, ["choose", "recent", "result"]);
+
+        assert_eq!(recipe.steps[0].kind, StepKind::Select);
+        assert_eq!(
+            recipe.steps[0]
+                .schema
+                .as_ref()
+                .expect("select has a schema")["required"],
+            Value::Array(vec![Value::String("notification_id".to_owned())])
+        );
+
+        assert_eq!(recipe.steps[1].kind, StepKind::Read);
+        assert_eq!(
+            recipe.steps[1].operation.as_deref(),
+            Some("notifications.list_recent")
+        );
+        assert_eq!(recipe.steps[1].args, None);
+
+        assert_eq!(recipe.steps[2].kind, StepKind::Write);
+        assert_eq!(
+            recipe.steps[2].operation.as_deref(),
+            Some("notifications.dismiss")
+        );
+        assert_eq!(
+            recipe.steps[2].args,
+            Some(json!({ "notification_id": "{{choose.notification_id}}" }))
         );
     }
 

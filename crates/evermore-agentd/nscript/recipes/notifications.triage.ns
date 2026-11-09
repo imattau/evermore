@@ -1,0 +1,26 @@
+// title: Notification triage
+// description: Review recent notifications, then dismiss one by its local ID. Dismissing still requires owner approval.
+//
+// A genuinely new recipe (no hand-written TOML counterpart) authored
+// directly as nscript for M12.4. Where packages.doctor.ns only exercised
+// the projector's read + render path, this one is select -> read -> write:
+// crates/evermore-agentd/src/nscript_recipe.rs's first exercise of
+// projecting a write step out of a real checked nscript program. Projected
+// into the same Recipe/RecipeStep structs that
+// crates/evermore-agentd/src/recipe.rs's loader validates and
+// evermore-operationsd executes -- nscript's own runtime never runs here.
+// See crates/evermore-agentd/nscript/README.md.
+use evermore_notifications
+
+permissions {
+    notifications_read
+    notifications_write
+    clock
+}
+
+input notification_id: Text
+
+every 1d {
+    let recent = evermore_notifications.list_recent()?
+    let result = evermore_notifications.dismiss(notification_id)?
+}

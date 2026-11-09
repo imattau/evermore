@@ -1,6 +1,6 @@
-# M12.3: evermore-agentd recipes authored as nscript
+# M12.3/M12.4: evermore-agentd recipes authored as nscript
 
-Status: **wired in.** `evermore-agentd` depends on `nscript`'s own
+Status: **wired in, and proven on a genuinely new recipe.** `evermore-agentd` depends on `nscript`'s own
 `nscript-syntax`/`nscript-semantics`/`nscript-modules` library crates (pinned
 to an exact commit on the `declared-input` branch — see
 `crates/evermore-agentd/Cargo.toml`) and projects a checked `.ns` program
@@ -34,7 +34,20 @@ owner-approval path are entirely `evermore-agentd`'s own, unchanged.
   asserts the projected `Recipe` matches the hand-written TOML one
   field-for-field — same `id`/`title`/`description`/`operations`/`budget`,
   same four step ids in the same order, same `select` schema, same `read`
-  args, same `render` template.
+  args, same `render` template. This only ever exercised the projector's
+  **read + render** path, because it mirrors a recipe that already existed
+  as hand-written TOML.
+- `modules/evermore_notifications/0.1.0.nsm` and
+  `recipes/notifications.triage.ns` — **M12.4's genuinely new recipe**, with
+  no hand-written TOML counterpart: review recent notifications
+  (`notifications.list_recent`, a read), then dismiss one by its local ID
+  (`notifications.dismiss`, a write owner approval already gates — see
+  `evermore_common::operations::catalog()`). This is the first recipe to
+  exercise the projector's **write** path: `select` → `read` → `write`, no
+  `render` (`validate_recipe` requires write steps to be a recipe's final
+  steps, so a write-containing recipe cannot also render a summary — this
+  rules out the shape the earlier read-only prototype used). Asserted by
+  `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_write_step`.
 
 ## The conventions the projector requires
 
@@ -65,6 +78,15 @@ fixes a convention for each rather than guessing:
   graph, not the catalogue's `input_schema`, whose JSON key order is not
   guaranteed to match either). A bare identifier argument must name a
   declared `input`; anything else is refused.
+- **A write-containing recipe cannot also `render`.** The projector always
+  appends the `render` step last (if a `print(...)` is present), regardless
+  of where it appears in the source relative to the schedule body's `let`
+  statements; `crate::recipe::validate_recipe` separately requires every
+  `write`/`each` step to be a recipe's final step. Put the two together and
+  a schedule body with both a write operation call and a `print(...)` will
+  always fail validation — the `render` step lands after the write either
+  way. `notifications.triage.ns` (M12.4) is `select` → `read` → `write`
+  with no `print(...)` for exactly this reason.
 
 ## A real, non-obvious finding along the way
 

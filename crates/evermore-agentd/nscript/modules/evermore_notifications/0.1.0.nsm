@@ -1,0 +1,26 @@
+module evermore_notifications @ 0.1.0
+language ">=0.1.0 <0.2.0"
+reference "https://github.com/imattau/evermore/blob/main/crates/evermore-common/src/lib.rs"
+
+record Notification {
+    field id: Text
+    field source: Text
+    field title: Text
+    field body: Text
+    field received_at: Integer
+}
+
+record RecentNotifications {
+    field notifications: List<Notification>
+}
+
+record DismissResult {
+    field dismissed: Bool
+}
+
+error NotificationsError {
+    field message: Text
+}
+
+operation list_recent() -> Result<RecentNotifications,NotificationsError> effect Storage permission notifications_read
+operation dismiss(notification_id: Text) -> Result<DismissResult,NotificationsError> effect Storage permission notifications_write

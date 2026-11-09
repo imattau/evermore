@@ -3341,12 +3341,28 @@ never as a runtime inside a privileged process:
    along the way: `nscript` string literals do not interpret `\n` as an
    escape, so a multi-line `render` template needs an actual embedded
    newline character in the source, not `"\n"` (see the README for detail).
-4. **M12.4 — First real authored recipe.** Only after M12.3's emitted
-   `audit.digest` passes every check the hand-written one does: author one
-   genuinely new recipe (a notification-triage or settings-concierge variant)
-   directly in `nscript`, compile it, and ship it through the same local-
-   recipe validation path a hand-written TOML recipe goes through. Do not
-   skip straight to a write-heavy or standing-routine recipe.
+4. **M12.4 — First real authored recipe.** Author one genuinely new recipe
+   with no hand-written TOML counterpart, directly in `nscript`, and ship it
+   through the same local-recipe validation path a hand-written TOML recipe
+   goes through. **Done (2026-11-09):**
+   [`crates/evermore-agentd/nscript/modules/evermore_notifications/0.1.0.nsm`](crates/evermore-agentd/nscript/modules/evermore_notifications/0.1.0.nsm)
+   and
+   [`crates/evermore-agentd/nscript/recipes/notifications.triage.ns`](crates/evermore-agentd/nscript/recipes/notifications.triage.ns):
+   review recent notifications, then dismiss one by local ID (owner approval
+   still gates the dismiss, unchanged). M12.3's only proof so far
+   (`packages.doctor.ns`) mirrored an existing hand-written recipe and only
+   ever produced a `read`+`render` `Recipe` — it could not show the
+   projector handles a `write` step, since nothing forced one into
+   existence. `notifications.triage` does: `select` → `read` → `write`,
+   asserted field-for-field by
+   `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_write_step`.
+   One real constraint surfaced doing this: a write-containing recipe cannot
+   also `render`, because the projector always places the `render` step last
+   while `validate_recipe` requires `write`/`each` to be a recipe's own last
+   step — so `notifications.triage.ns` ends at the write, with no summary
+   `print(...)` (see the README for detail). Kept deliberately light —
+   exactly one write, no standing schedule semantics — per the explicit
+   "don't skip to write-heavy" scoping for this milestone.
 
 ### Open decisions
 

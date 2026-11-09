@@ -1,0 +1,27 @@
+id = "packages.doctor"
+version = 1
+title = "Package doctor"
+description = "Inspect installed packages and explain one package's direct dependencies. Read-only."
+operations = ["packages.list_installed", "packages.explain_dependencies"]
+budget = { steps = 4, writes = 0, seconds = 45, context_tokens = 0 }
+
+[[step]]
+id = "choose"
+kind = "select"
+schema = { type = "object", properties = { publisher = { type = "string", minLength = 1, maxLength = 64 }, name = { type = "string", minLength = 1, maxLength = 128 } }, required = ["publisher", "name"] }
+
+[[step]]
+id = "installed"
+kind = "read"
+operation = "packages.list_installed"
+
+[[step]]
+id = "dependencies"
+kind = "read"
+operation = "packages.explain_dependencies"
+args = { publisher = "{{choose.publisher}}", name = "{{choose.name}}" }
+
+[[step]]
+id = "report"
+kind = "render"
+template = "Installed packages: {{installed.count}}\nSelected: {{choose.publisher}}/{{choose.name}} version {{dependencies.version}}\nDirect dependencies: {{dependencies.dependencies.count}}"

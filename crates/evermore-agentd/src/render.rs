@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-pub fn resolve_path<'a>(context: &'a Value, path: &str) -> Option<&'a Value> {
+pub fn resolve_path(context: &Value, path: &str) -> Option<Value> {
     let mut current = context;
     for part in path.split('.') {
         if part.is_empty() {
@@ -8,11 +8,16 @@ pub fn resolve_path<'a>(context: &'a Value, path: &str) -> Option<&'a Value> {
         }
         current = match current {
             Value::Object(object) => object.get(part)?,
-            Value::Array(items) => items.get(part.parse::<usize>().ok()?)?,
+            Value::Array(items) => {
+                if part == "count" || part == "length" {
+                    return Some(Value::from(items.len() as u64));
+                }
+                items.get(part.parse::<usize>().ok()?)?
+            }
             _ => return None,
         };
     }
-    Some(current)
+    Some(current.clone())
 }
 
 pub fn render_value(value: &Value, context: &Value) -> Result<Value, String> {
@@ -21,7 +26,6 @@ pub fn render_value(value: &Value, context: &Value) -> Result<Value, String> {
             let trimmed = text.trim();
             if let Some(reference) = whole_reference(trimmed) {
                 return resolve_path(context, reference)
-                    .cloned()
                     .ok_or_else(|| format!("template reference '{reference}' has no value"));
             }
             Ok(Value::String(render_text(text, context)?))
@@ -54,7 +58,7 @@ pub fn render_text(template: &str, context: &Value) -> Result<String, String> {
         let reference = after[..end].trim();
         let value = resolve_path(context, reference)
             .ok_or_else(|| format!("template reference '{reference}' has no value"))?;
-        output.push_str(&display_value(value));
+        output.push_str(&display_value(&value));
         rest = &after[end + 2..];
     }
     output.push_str(rest);
@@ -184,6 +188,17 @@ mod tests {
     fn rejects_unknown_reference() {
         let error = render_text("{{choose.missing}}", &json!({"choose": {}})).unwrap_err();
         assert!(error.contains("no value"));
+    }
+
+    #[test]
+    fn arrays_expose_count_and_indexes() {
+        let context = json!({"installed": [{"name": "one"}, {"name": "two"}]});
+        assert_eq!(render_text("{{installed.count}}", &context).unwrap(), "2");
+        assert_eq!(render_text("{{installed.length}}", &context).unwrap(), "2");
+        assert_eq!(
+            render_text("{{installed.1.name}}", &context).unwrap(),
+            "two"
+        );
     }
 
     #[test]

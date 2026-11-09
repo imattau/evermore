@@ -216,6 +216,7 @@ pub fn builtins() -> Vec<Recipe> {
         builtin(include_str!("../recipes/settings.concierge.toml")),
         builtin(include_str!("../recipes/workspace.compose.toml")),
         builtin(include_str!("../recipes/notifications.dnd.toml")),
+        builtin(include_str!("../recipes/packages.doctor.toml")),
     ]
 }
 
@@ -856,6 +857,17 @@ args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
             .find(|recipe| recipe.id == "notifications.dnd")
             .unwrap();
         assert_eq!(dnd.write_count(), 1);
+        let doctor = recipes
+            .iter()
+            .find(|recipe| recipe.id == "packages.doctor")
+            .unwrap();
+        assert_eq!(doctor.write_count(), 0);
+        assert!(
+            doctor
+                .operations
+                .iter()
+                .any(|operation| operation == "packages.list_installed")
+        );
     }
 
     #[test]

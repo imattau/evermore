@@ -1964,7 +1964,8 @@ and the owner approves every write. The full rationale and limits are in the
 "Agentic AI — Bounded Agency" addendum below; this phase turns that design into
 milestones.
 
-**Implementation status (2026-11-09):** M11.1-M11.3 are implemented.
+**Implementation status (2026-11-09):** M11.1-M11.3 and the read-only part of
+M11.4 are implemented.
 `evermore-common::agent` defines the v1 socket/task protocol, tag helpers,
 offline task read, and shared proposal instructions, marker parsing, and
 validation; `evermore-agentd` serves the deterministic runner with a private
@@ -1995,14 +1996,16 @@ plan-level review surface, not a session-wide permission or a new approval
 event kind.
 
 Host unit tests pass. An end-to-end run against stub signer, operations, and
-inference sockets exercised the digest, local recipes, L1 repair and refusal,
-the `workspace.compose` plan submitting three writes together and reaching
-`succeeded` after approval statuses, and a denied `notifications.dnd` task
-ending `denied`; the task store stayed `0600`. The catalogue fingerprint was
-updated in `tools/adapter-training/registry.lock` with the new operation; the
-adapter itself still needs a retrain and signed release. VM acceptance remains.
-M11.4-M11.5 are not started. Phase 7's operation baseline and Phase 7.5's
-inference runtime are unchanged.
+inference sockets exercised the digest, the read-only `packages.doctor`
+(installed-package and dependency counts), local recipes, L1 repair and
+refusal, the `workspace.compose` plan submitting three writes together and
+reaching `succeeded` after approval statuses, and a denied `notifications.dnd`
+task ending `denied`; the task store stayed `0600`. The catalogue fingerprint
+was updated in `tools/adapter-training/registry.lock` with the new operation;
+the adapter itself still needs a retrain and signed release. VM acceptance
+remains. M11.4's read-only package doctor is implemented; the update planner
+and M11.5 routines are not started. Phase 7's operation baseline and Phase
+7.5's inference runtime are unchanged.
 
 **Architecture:**
 

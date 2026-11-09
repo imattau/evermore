@@ -84,10 +84,11 @@ change" field uses the same request and fills the existing owner-approval form.
 The proposal path enforces a 4096-token context budget; task recipes carry the
 same field as `budget.context_tokens` for future model steps.
 
-Built-in recipes include `audit.digest`, `settings.concierge`,
-`workspace.compose`, and `notifications.dnd`. The write recipes submit all their
-writes together, so the panel shows one pending-write plan with canonical
-arguments; "Approve all" signs one owner approval per exact operation.
+Built-in recipes include `audit.digest`, `packages.doctor`,
+`settings.concierge`, `workspace.compose`, and `notifications.dnd`. The write
+recipes submit all their writes together, so the panel shows one pending-write
+plan with canonical arguments; "Approve all" signs one owner approval per exact
+operation.
 
 The daemon needs a loaded signer identity for its agent pubkey and for signing
 write requests:

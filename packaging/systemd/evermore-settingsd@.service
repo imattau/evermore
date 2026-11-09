@@ -6,11 +6,9 @@ Wants=evermore-signer.service evermore-relay.service
 
 [Service]
 Type=simple
-# Assumes `cargo install --path crates/evermore-settingsd` has put the
-# binary on the user's cargo bin path, same caveat as evermore-signer's
-# unit. %i (systemd instance name) carries the identity to run as, so this
-# is enabled per-identity: `systemctl --user enable evermore-settingsd@personal`.
-ExecStart=%h/.cargo/bin/evermore-settingsd --identity %i
+# The Evermore system install places binaries in /usr/bin. %i (the systemd
+# instance name) carries the identity, so enable one instance per identity.
+ExecStart=/usr/bin/evermore-settingsd --identity %i
 Restart=on-failure
 RestartSec=2
 

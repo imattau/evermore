@@ -7,7 +7,7 @@ rate. Runs an adapter-scale sweep when --adapter and multiple --scale values
 are given.
 
     tools/adapter-training/evaluate.py \
-      --eval tools/adapter-training/data/eval.jsonl \
+      --test tools/adapter-training/data/test.jsonl \
       --base out/base.gguf \
       --adapter out/adapter.gguf \
       --scale 0,0.5,1.0 \
@@ -16,6 +16,7 @@ are given.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -30,11 +31,16 @@ import urllib.request
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--eval", required=True, help="eval.jsonl from evermore-adapter-data")
+    split = parser.add_mutually_exclusive_group(required=True)
+    split.add_argument("--test", help="locked test.jsonl; use for release evaluation")
+    split.add_argument("--dev", help="dev.jsonl; use only for checkpoint/scale selection")
+    split.add_argument("--eval", dest="test", help=argparse.SUPPRESS)
+    parser.add_argument("--dataset-manifest", required=True, help="manifest for the generated split")
     parser.add_argument("--base", required=True, help="base GGUF")
     parser.add_argument("--adapter", help="optional LoRA GGUF")
     parser.add_argument("--scale", default="1.0", help="comma-separated adapter scales")
     parser.add_argument("--grammar", help="optional GBNF grammar (proposal.gbnf)")
+    parser.add_argument("--mcp-grammar", help="optional GBNF grammar for MCP tools/call parameters")
     parser.add_argument("--llama-server", default="llama-server")
     parser.add_argument("--ctx-size", type=int, default=2048)
     parser.add_argument("--max-tokens", type=int, default=192)
@@ -157,7 +163,7 @@ def validate(schema, value, path="arguments"):
                 validate(properties[key], item, f"{path}.{key}")
 
 
-def run_split(args, records, scale, grammar, port, process):
+def run_split(args, records, scale, grammar, mcp_grammar, port, process):
     if args.adapter:
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/lora-adapters",
@@ -176,24 +182,50 @@ def run_split(args, records, scale, grammar, port, process):
         "refusals_expected": 0,
         "refusals_correct": 0,
         "unexpected_operations": 0,
+        "mcp_tools_expected": 0,
+        "mcp_tools_correct": 0,
+        "mcp_tools_listed": 0,
+        "mcp_schema_valid": 0,
+        "mcp_unlisted_calls": 0,
+        "panel_writes_expected": 0,
+        "panel_writes_correct": 0,
+        "panel_schema_valid": 0,
+        "panel_refusals_expected": 0,
+        "panel_refusals_correct": 0,
+        "mcp_refusals_expected": 0,
+        "mcp_refusals_correct": 0,
     }
     known = {record["expected_operation"] for record in records if record.get("expected_operation")}
     failures = []
 
     for record in records:
+        if record["expected_kind"] == "refusal":
+            totals["refusals_expected"] += 1
+            if record["source"] == "mcp-tools":
+                totals["mcp_refusals_expected"] += 1
+            else:
+                totals["panel_refusals_expected"] += 1
+        elif record["expected_kind"] == "mcp_tool":
+            totals["mcp_tools_expected"] += 1
+        else:
+            totals["panel_writes_expected"] += 1
         messages = record["messages"][:-1]
+        content = ""
         try:
-            content = chat(port, messages, grammar, args.max_tokens)
+            record_grammar = mcp_grammar if record["expected_kind"] == "mcp_tool" else grammar
+            content = chat(port, messages, record_grammar, args.max_tokens)
             proposal = extract_json(content)
             totals["parsed"] += 1
         except (OSError, ValueError, json.JSONDecodeError, KeyError) as error:
-            failures.append({"id": record["id"], "error": str(error)})
+            failures.append({"id": record["id"], "error": str(error), "output": content})
             continue
 
         if "refusal" in proposal:
             got_kind = "refusal"
         elif "operation" in proposal:
             got_kind = "proposal"
+        elif "name" in proposal:
+            got_kind = "mcp_tool"
         else:
             got_kind = "unknown"
         expected_kind = record["expected_kind"]
@@ -201,38 +233,100 @@ def run_split(args, records, scale, grammar, port, process):
             totals["kind_correct"] += 1
 
         if expected_kind == "refusal":
-            totals["refusals_expected"] += 1
             if got_kind == "refusal":
                 totals["refusals_correct"] += 1
+                if record["source"] == "mcp-tools":
+                    totals["mcp_refusals_correct"] += 1
+                else:
+                    totals["panel_refusals_correct"] += 1
+            else:
+                failures.append({"id": record["id"], "error": f"expected refusal, got {got_kind}", "output": content})
             continue
 
         expected_operation = record["expected_operation"]
-        operation = proposal.get("operation")
+        operation = proposal.get("name" if expected_kind == "mcp_tool" else "operation")
         if operation == expected_operation:
-            totals["operation_correct"] += 1
+            if expected_kind == "mcp_tool":
+                totals["mcp_tools_correct"] += 1
+            else:
+                totals["operation_correct"] += 1
+                totals["panel_writes_correct"] += 1
         elif operation not in known:
             totals["unexpected_operations"] += 1
+        if operation != expected_operation:
+            failures.append({"id": record["id"], "error": f"expected {expected_operation}, got {operation}", "output": content})
+        if expected_kind == "mcp_tool":
+            available_tools = {}
+            system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+            marker = "Available tools: "
+            if marker in system:
+                try:
+                    available_tools = {
+                        tool["name"]: tool
+                        for tool in json.loads(system.rsplit(marker, 1)[1])
+                    }
+                except (ValueError, KeyError, TypeError):
+                    available_tools = {}
+            if operation in available_tools:
+                totals["mcp_tools_listed"] += 1
+            else:
+                totals["mcp_unlisted_calls"] += 1
+            selected_schema = available_tools.get(operation, {}).get("inputSchema")
+        else:
+            selected_schema = record["input_schema"]
         arguments = proposal.get("arguments")
         if isinstance(arguments, dict):
             try:
-                validate(record["input_schema"], arguments)
+                validate(selected_schema or record["input_schema"], arguments)
                 totals["schema_valid"] += 1
+                if expected_kind == "mcp_tool" and operation == expected_operation:
+                    totals["mcp_schema_valid"] += 1
+                elif expected_kind == "proposal":
+                    totals["panel_schema_valid"] += 1
             except ValueError as error:
-                failures.append({"id": record["id"], "error": str(error)})
+                failures.append({"id": record["id"], "error": str(error), "output": content})
         else:
             failures.append({"id": record["id"], "error": "arguments is not an object"})
 
-    proposals = max(1, totals["records"] - totals["refusals_expected"])
+    proposals = max(1, totals["panel_writes_expected"])
     report = dict(totals)
     report["parse_rate"] = totals["parsed"] / max(1, totals["records"])
     report["operation_accuracy"] = totals["operation_correct"] / proposals
-    report["schema_valid_rate"] = totals["schema_valid"] / proposals
+    report["panel_write_accuracy"] = report["operation_accuracy"]
+    report["panel_schema_valid_rate"] = totals["panel_schema_valid"] / proposals
+    report["mcp_tool_accuracy"] = (
+        totals["mcp_tools_correct"] / totals["mcp_tools_expected"]
+        if totals["mcp_tools_expected"]
+        else None
+    )
+    report["mcp_listed_tool_rate"] = (
+        totals["mcp_tools_listed"] / totals["mcp_tools_expected"]
+        if totals["mcp_tools_expected"]
+        else None
+    )
+    report["mcp_correct_tool_schema_rate"] = (
+        totals["mcp_schema_valid"] / totals["mcp_tools_expected"]
+        if totals["mcp_tools_expected"]
+        else None
+    )
+    # Compatibility alias, scoped to panel writes. MCP has its own
+    # correct-tool schema-valid metric above.
+    report["schema_valid_rate"] = report["panel_schema_valid_rate"]
     report["refusal_accuracy"] = (
         totals["refusals_correct"] / totals["refusals_expected"]
         if totals["refusals_expected"]
         else None
     )
+    report["panel_refusal_accuracy"] = (
+        totals["panel_refusals_correct"] / totals["panel_refusals_expected"]
+        if totals["panel_refusals_expected"] else None
+    )
+    report["mcp_refusal_accuracy"] = (
+        totals["mcp_refusals_correct"] / totals["mcp_refusals_expected"]
+        if totals["mcp_refusals_expected"] else None
+    )
     report["grammar_enforced"] = bool(grammar)
+    report["mcp_grammar_enforced"] = bool(mcp_grammar)
     report["scale"] = scale if args.adapter else None
     report["failures"] = failures[:20]
     return report
@@ -240,8 +334,15 @@ def run_split(args, records, scale, grammar, port, process):
 
 def main():
     args = parse_args()
+    with open(args.dataset_manifest, encoding="utf-8") as handle:
+        dataset_manifest = json.load(handle)
+    selected_split = "test" if args.test else "dev"
+    with open(args.test or args.dev, "rb") as split_file:
+        selected_digest = hashlib.sha256(split_file.read()).hexdigest()
+    if selected_digest != dataset_manifest.get("split_sha256", {}).get(selected_split):
+        raise SystemExit(f"{selected_split} file hash does not match dataset manifest")
     records = []
-    with open(args.eval, encoding="utf-8") as handle:
+    with open(args.test or args.dev, encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
                 records.append(json.loads(line))
@@ -250,6 +351,9 @@ def main():
     grammar = None
     if args.grammar:
         grammar = open(args.grammar, encoding="utf-8").read()
+    mcp_grammar = None
+    if args.mcp_grammar:
+        mcp_grammar = open(args.mcp_grammar, encoding="utf-8").read()
 
     scales = [float(value) for value in args.scale.split(",")] if args.adapter else [None]
     port = free_port()
@@ -281,7 +385,7 @@ def main():
 
     try:
         wait_ready(port, process)
-        runs = [run_split(args, records, scale, grammar, port, process) for scale in scales]
+        runs = [run_split(args, records, scale, grammar, mcp_grammar, port, process) for scale in scales]
     finally:
         stop()
         log.close()
@@ -291,22 +395,42 @@ def main():
         os.unlink(log.name)
 
     report = {
-        "eval_file": args.eval,
+        "evaluation_file": args.test or args.dev,
+        "evaluation_split": "test" if args.test else "dev",
+        "dataset_sha256": dataset_manifest["dataset_sha256"],
+        "catalogue_fingerprint": dataset_manifest["catalogue_fingerprint"],
+        "split_sha256": selected_digest,
         "base": args.base,
         "adapter": args.adapter,
         "records": len(records),
         "runs": runs,
     }
+    coverage = {"mcp": {}, "panel_write": {}}
+    for record in records:
+        kind = record["expected_kind"]
+        operation = record.get("expected_operation")
+        is_positive = (
+            record["id"].startswith(("mcp.", "mcp-special."))
+            if kind == "mcp_tool"
+            else record["id"].startswith("positive.")
+        )
+        if is_positive and operation:
+            group = "mcp" if kind == "mcp_tool" else "panel_write"
+            coverage[group][operation] = coverage[group].get(operation, 0) + 1
+    report["positive_case_coverage"] = coverage
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     for run in runs:
         print(
-            "scale={scale} parse={parse:.3f} operation={operation:.3f} "
-            "schema={schema:.3f} refusal={refusal}".format(
+            "scale={scale} parse={parse:.3f} operation={operation:.3f} mcp-tools={mcp_tools:.3f} "
+            "listed={listed:.3f} mcp-schema={mcp_schema:.3f} schema={schema:.3f} refusal={refusal}".format(
                 scale=run["scale"],
                 parse=run["parse_rate"],
                 operation=run["operation_accuracy"],
+                mcp_tools=run["mcp_tool_accuracy"] if run["mcp_tool_accuracy"] is not None else 0.0,
+                listed=run["mcp_listed_tool_rate"] if run["mcp_listed_tool_rate"] is not None else 0.0,
+                mcp_schema=run["mcp_correct_tool_schema_rate"] if run["mcp_correct_tool_schema_rate"] is not None else 0.0,
                 schema=run["schema_valid_rate"],
                 refusal=run["refusal_accuracy"],
             )

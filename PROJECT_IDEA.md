@@ -214,48 +214,43 @@ daemons. Phase 6's M6.1 ("run it as a real daily session") is not
 meaningful until this exists: the login session must connect "which Unix
 user logged in" to "which `nsec` the signer should hold." **Implementation
 status (2026-11-09):** The identity model, unlock mechanism, profile-data
-approach, and device-root identity below are decided. The core assumption
-behind the
-identity model (that `homed`'s record format can carry a pubkey as
-identity metadata) has been verified against a running VM. Core
-components now exist: `evermore-enroll` can provision a prepared homed
-record, and `evermore-greeter` can list homed users, display cached
-profiles, relay PAM prompts, and start Sway. The end-to-end first-use
-path is still incomplete: a fresh system with no homed users has no
-enrollment UI, no chosen durable custody flow for a newly created local
-key, and no login hook that restores that key into the signer's session
-keyring. NIP-46 unlock still needs PKCS#11-shim work, and the
-relationship to Phase 7's owner/service identities remains unresolved.
-Treat this as partial implementation, not a usable identity-native
-login flow.
+approach, and device-root identity below are decided. The core assumption behind the identity model (that `homed`'s record
+format can carry a pubkey as identity metadata) has been verified against
+a running VM. Core
+components now exist: `evermore-enroll` can provision a homed record,
+`evermore-greeter` can guide first-user setup and optional NIP-46 phone
+pairing, list homed users, and start Sway. Pairing validates the NIP-46
+connection secret and `get_public_key` exchange before storing the remote
+signer, and enrolls the PKCS#11 factor alongside the offline passphrase.
+The identity key is stored in the LUKS-backed home and the signer user
+unit loads it into the session keyring at startup. Fresh-install acceptance
+with a real phone signer, interrupted-enrollment recovery, and verified key
+cleanup on logout remain open. The relationship to Phase 7's owner/service
+identities also remains unresolved.
 
 **First-use implementation order:**
 
-1. **Choose and implement local key custody.** The current signer
-   `keygen` stores a secret only in the current kernel session keyring,
-   which does not survive logout or reboot. Define how an identity's
-   secret is protected at rest in the homed home and released after
-   authentication. Keep the signer as the only process that receives
-   the decrypted key. Do not ship enrollment that creates a homed user
-   without this matching unlock path.
-2. **Add first-boot enrollment.** Provide a dedicated setup screen when
-   no human homed records exist. It must support generating a new
-   identity or importing one, collect the chosen unlock factor, validate
-   the account name, and create the homed record. Run privileged
-   provisioning through a narrowly scoped system service or first-boot
-   service; do not grant the greeter account general root access.
-3. **Join authentication to signer startup.** After homed/PAM unlock
-   succeeds, load the selected identity into the per-user signer before
-   dependent user services start. On logout, stop the signer and clear
-   session key material. Wrong credentials, locked homes, and signer
-   startup failures must return to a recoverable greeter state with a
-   useful message.
-4. **Make the empty state and recovery path explicit.** The greeter now
-   reports when no identities are enrolled and that first-boot
-   enrollment is unavailable in the current build. Replace that message
-   with the enrollment flow when step 2 lands. Document recovery from a
-   failed enrollment without deleting unrelated home records.
-5. **Gate the flow on a fresh-system acceptance run.** Start with zero
+1. **Local custody and first-user setup (implemented, acceptance pending).**
+   The graphical greeter guides first boot, supports generating or importing
+   an identity, and creates a LUKS-backed homed account. When the PKCS#11
+   provider is installed and a relay is reachable, it can pair a phone by
+   NIP-46 QR and enroll that unlock factor alongside the passphrase. It stores
+   the identity secret at
+   `~/.local/share/evermore/identity.nsec` with mode 0600. The key is
+   plaintext while the home is mounted, protected at rest by homed's
+   encrypted volume, and imported only by the signer. Pairing and unlock
+   still need fresh-install acceptance with a phone signer.
+2. **Join authentication to signer startup.** `evermore-signer.service`
+   runs `load-home-identity` before starting its socket server. Verify
+   the greeter's homed/PAM unlock starts that user manager with the
+   expected session keyring. The unit's `ExecStopPost` revokes the home key;
+   verify that it runs when the final login session ends. Wrong credentials
+   and signer startup failures must remain recoverable and visible.
+3. **Recover interrupted enrollment.** The tty flow must safely resume
+   or remove only the account it created if power fails after `CreateHome`
+   but before the key and marker are written. It must never delete an
+   unrelated homed account.
+4. **Gate the flow on a fresh-system acceptance run.** Start with zero
    homed users, create or import an identity, reboot, unlock it, confirm
    Sway starts and the signer returns that identity's public key, then
    log out and verify session key material is gone. Repeat with invalid
@@ -508,10 +503,14 @@ login flow.
     Production's `relay` field must always point at a real, externally
     reachable relay the paired phone can also see.
 
-    Still open: the actual pairing *flow* (how a phone and a device
-    agree on a `pkcs11-nip46-pairing.json` in the first place) doesn't
-    exist yet — today it's written by hand. That belongs with the
-    greeter/enrollment work, not this module.
+    The first-user GUI now implements the pairing flow: it emits a
+    `nostrconnect://` QR while subscribed to the selected relay, validates
+    the phone's connect-secret response, confirms `get_public_key`, and
+    atomically stores `pkcs11-nip46-pairing.json`. It also includes the
+    pairing URI and PIN fields in the initial homed request. Remaining
+    acceptance work is exercising this flow against a supported phone signer
+    and a fresh VM with the module installed; the current work has compile
+    checks but no live phone/VM run.
   - *Priority 2 — FIDO2/U2F hardware key via `systemd-homed-fido2`.* For
     a device/user with no paired phone, or no local-network path to a
     remote signer right now. Tap to unlock, fully offline, and the same
@@ -1673,7 +1672,13 @@ greeter, provisions the first human identity from a pubkey at first boot, and
 can install signed software through `npack` from a trust list signed by the
 device's own root identity.
 
-**Implementation status (2026-11-08):** Not started. This phase absorbs M5.6
+**Implementation status (2026-11-09):** A first VM-image path is now in
+`packaging/vm-image/`: it builds release artifacts, provisions a clean Arch
+cloud image, installs the graphical first-user/NIP-46 setup and desktop, and
+emits a qcow2 with no human account or SSH access. User units now target the
+system binary locations. This is an online VM image only; the signed offline
+repository, installer, device-root bootstrap, UKI flow, and install acceptance
+harness below are still open. This phase absorbs M5.6
 (the archiso profile), applies the Phase 5.5 identity decisions, consumes the
 Phase 7.5 model store, and wraps the Phase 8 desktop configuration. It also
 settles M6.5's release-shape question for the first release: the ISO — not AUR
@@ -1733,14 +1738,11 @@ are made; the rest of the phase is plan.
   trust list, and seal the key according to the at-rest decision below. This
   needs a **system-context signer instance**, a deployment shape Phase 1 does
   not have (its signer is a user unit) — new work, not configuration.
-- **M9.6 — First-boot enrollment.** `evermore-enroll-tui` on tty1 while
-  `homectl list` reports no users: collect an npub or mint a new identity,
-  choose custody (local `ncryptsec` inside the encrypted home, or NIP-46
-  pairing through `evermore-pkcs11` once that provider exists), write the
-  identity JSON with its `"evermore"` block, call `evermore-enroll create`,
-  then hand tty1 to `greetd`. Later boots skip this and run `tuigreet --cmd
-  sway`. This is the largest genuinely new piece: `greetd` has no enrollment
-  UI, and the greeter cannot discover an identity that does not exist yet.
+- **M9.6 — First-boot enrollment.** Use the graphical `evermore-greeter`
+  while `homectl list` reports no users. The current flow can create a local
+  identity or pair a NIP-46 signer through the PKCS#11 provider, then create
+  the homed account and hand off to Sway. Remaining work is fresh-image
+  acceptance, interrupted-enrollment recovery, and real-phone signer testing.
 - **M9.7 — First-login inheritance.** On the first successful login, import the
   device-root signing floor into the user's `evermore:trusted-publishers`
   NIP-51 list, seed `evermore:relays`, and start the user units through
@@ -2128,6 +2130,38 @@ shows real tasks. M11.3 introduces writes and plan approval together; never
 ship one without the other. M11.4 and M11.5 follow only after the approval
 surface has been exercised on the simple writes. M11.6 tracks the catalogue
 fingerprint and re-evaluates on every operation change.
+
+### Phase 12: `nscript` — Typed Recipe Authoring and a Real Deploy Host
+
+**Goal:** give Phase 11's recipe format a typed authoring language and give the
+sibling project [`imattau/nscript`](https://github.com/imattau/nscript) its
+first real, non-simulated deploy target, without moving execution authority,
+grant checking, or budget enforcement out of `evermore-agentd`/
+`evermore-operationsd`. The full rationale, scope boundary, and risks are in
+the "nscript — Typed Recipe Authoring and a Real Deploy Host" addendum below;
+this phase turns that design into milestones once Phase 11 is stable.
+
+**Status:** proposed; not started. Depends on Phase 11's recipe format and
+operation catalogue being settled, since `nscript`'s permission manifest is
+meant to compile onto the existing `operations = []`/`budget` declaration
+rather than invent a second one.
+
+**Build order:** M12.1 reconciles `nscript`'s typed NIP-01/44/51/78/98 records
+with how Evermore actually represents those NIPs — mostly the external
+`nostr` (rust-nostr) crate's primitives plus Evermore's own grant/audit-aware
+catalogue types layered on top in `evermore-common` and each daemon — via a
+thin host-trait adapter, with no change to either project's trust boundary —
+read-only, upstream-facing. M12.2 wires
+that adapter into `evermore-operationsd`'s existing read path so `nscript`'s
+NIP modules get a real (not simulated) target for reads evermore already
+grants. M12.3 builds the `nscript → evermore-agentd` recipe compiler that
+emits the same validated TOML/IR `evermore-agentd` already runs today,
+inferring `operations=[]` and budgets from `nscript`'s static permission
+analysis instead of requiring the author to hand-write them. M12.4, authoring
+a standing routine or notification-triage recipe in `nscript` instead of TOML,
+only follows once M12.3's emitted recipes pass the exact same validation and
+conformance checks a hand-written recipe does. No milestone embeds an `nscript`
+interpreter inside a privileged daemon.
 
 ## Key Design Decisions and Risks
 
@@ -3133,3 +3167,179 @@ projection → AI read, then an approved write → signed NIP-52 publication →
 local refresh. Keep owner, AI actor, and service signer distinct throughout,
 and make network or relay failure visible without losing the locally cached
 agenda or replaying a write.
+
+## Addendum: `nscript` — Typed Recipe Authoring and a Real Deploy Host (Design Note)
+
+**Status:** design note; proposed as **Phase 12**, depending on Phase 11.
+Nothing here changes Phase 11's shipped behaviour, and none of it is a
+prerequisite for Phase 11.
+
+**Scope:** `evermore-agentd`'s recipe format and operation catalogue, and the
+read path of `evermore-operationsd`. It does not add a new execution engine,
+does not change who holds signing authority, and does not relax any grant or
+budget check Phase 11 already enforces.
+
+### The gap this closes, on both sides
+
+[`imattau/nscript`](https://github.com/imattau/nscript) is a statically typed
+scripting language for Nostr, from the same author as Evermore. It models NIPs
+as first-class, nominally-typed contracts (NIP-01, 42, 44, 51, 78, 98, and
+more), uses capability-based security — payment, signing, relay, and storage
+access must be explicitly granted, and scripts hold signer handles rather than
+keys — and its compiler statically infers a program's effects into a
+declared-permission manifest. That is close to a description of what
+`evermore-agentd`'s TOML recipe header already does by hand (`operations = []`,
+`budget = {...}`). `nscript`'s typed NIP records conceptually overlap with how
+Evermore represents the same NIPs — not with a hand-rolled Evermore type,
+since Evermore has none: raw protocol primitives (events, kinds, tags, NIP-44
+encryption) come from the external `nostr` (rust-nostr) crate, used directly
+by `evermore-signer`, `evermore-operationsd`, `evermore-settingsd`, and others.
+`evermore-common` only defines the catalogue/grant/audit layer *on top* of
+those primitives (see M12.1's findings below for exactly where they line up
+and where they do not).
+
+The gap runs in both directions:
+
+- **What `nscript` lacks:** a real deployment target. Its README states the
+  compiler, simulator, and Studio work today, but general NIP module
+  operations are simulated unless a real host is wired in, and Concord
+  protocol operations have Rust host implementations and tests but no
+  configured `nscript deploy` host. It is pre-1.0 (Draft 0.1) with a
+  single-maintainer bus factor.
+- **What Evermore lacks:** a typed authoring language for recipes. Today's
+  TOML recipes (`crates/evermore-agentd/src/recipe.rs`) are hand-written,
+  including the `operations` allowlist and `budget`, and validated only at
+  load time against `evermore_common::agent`'s `StepKind`/`TaskBudget`. A
+  typed source language that *statically infers* that allowlist, rather than
+  trusting the author to declare it correctly, is a real hardening win for
+  exactly the artifact Phase 11 calls "authority-bearing" and treats like a
+  signed package.
+
+### Why Evermore should not embed an `nscript` interpreter
+
+The tempting design — run `nscript`'s runtime inside `evermore-agentd` and let
+it drive catalogue calls directly — is the wrong shape for the same four
+reasons Phase 11 rejected free-form ReAct planning: it would put an immature,
+single-maintainer interpreter inside a daemon that currently has no shell, no
+process-spawn operation, and no direct write path, and it would create a
+second place (the interpreter) where grant checks, budgets, and write-ordering
+rules could silently drift from `evermore-operationsd`'s enforcement. Phase
+11's rule — effective authority is the **intersection** of grant and recipe,
+checked at submission, approval, and execution — only holds if there is one
+enforcement point. Embedding a second runtime creates two.
+
+So the integration keeps `nscript` as a **compiler and a typed host adapter**,
+never as a runtime inside a privileged process:
+
+1. **`nscript` compiles to the existing recipe IR.** An `nscript` program's
+   statically inferred permission manifest becomes the recipe's
+   `operations = []` and `budget`; its control flow compiles to the existing
+   `select`/`read`/`journal`/`render`/`write`/`each` step kinds
+   (`evermore_common::agent::StepKind`). `evermore-agentd` re-validates the
+   emitted recipe exactly as it validates a hand-written one today — unknown
+   operations, undeclared operation use, forward template references, writes
+   out of order, budgets over 32 steps/300 seconds are still refused by the
+   same loader. The compiler is a convenience for the author; the runtime's
+   validation is still the actual gate.
+2. **Evermore becomes a real `nscript deploy` host, read-only first.** The
+   host-trait implementation that `nscript`'s Concord work needs is built
+   against `evermore-operationsd`'s existing Unix-socket read path and grant
+   checks — the same socket `evermore-agentd` already uses for `read` steps.
+   This gives `nscript` genuine conformance coverage against production code
+   and traffic, and it reconciles the duplicate NIP-type modeling: Evermore's
+   types stay canonical (they already carry grant/audit semantics as part of
+   the type), and `nscript`'s host trait adapts to them, not the reverse.
+3. **Write authority never moves.** `evermore-operationsd` remains the sole
+   execution authority. An `nscript`-authored recipe's writes still become
+   ordinary signed `kind:1` operation requests, batched for one owner approval
+   exactly as Phase 11 specifies; `nscript` never gets a signer handle to a
+   real Evermore identity, and no milestone here changes that.
+
+### What it must never do
+
+- Run an `nscript` interpreter inside `evermore-agentd`, `evermore-operationsd`,
+  or any other privileged daemon.
+- Let a compiled recipe's declared `operations`/`budget` bypass
+  `evermore-agentd`'s own loader validation. The compiler output is untrusted
+  input like any local recipe file, not a pre-approved artifact.
+- Give `nscript` a live signer handle, a grant it did not already hold, or any
+  write path that does not go through the existing signed-request/approval
+  chain.
+- Treat `nscript`'s simulated-unless-wired NIP operations as equivalent to a
+  real deploy result before the host adapter in M12.1/M12.2 actually exists.
+- Fork or vendor `nscript` into the Evermore workspace as a way to move faster
+  than its own release cadence; the point is a real-usage conformance
+  relationship with an external project, not absorbing it.
+
+### Build order
+
+1. **M12.1 — Type reconciliation, no wiring.** Map `nscript`'s typed NIP
+   records (NIP-01/44/51/78/98) onto how Evermore actually represents those
+   NIPs — the `nostr` crate's primitives plus `evermore-common`'s
+   grant/audit-aware catalogue types — and document where they already agree
+   and where Evermore's representation is stricter or narrower. Pure
+   documentation and, where useful, upstream `nscript` conformance fixtures
+   generated from Evermore's own test data. No Evermore code path changes.
+   **Done (2026-11-09):** [`docs/nscript-type-reconciliation.md`](docs/nscript-type-reconciliation.md).
+2. **M12.2 — Read-only deploy host.** Implement `nscript`'s host trait against
+   `evermore-operationsd`'s existing Unix-socket read path for a narrow set of
+   already-granted read operations (start with `calendar.list`/`calendar.get`
+   or `packages.list_installed`, which already have stable catalogue
+   contracts). This is the "evermore helps nscript mature" half: it is a real
+   target nscript can run its conformance suite against, with no change to
+   Evermore's authority model since reads already execute under the
+   caller's grant without owner prompting.
+3. **M12.3 — Recipe compiler.** Build the `nscript → evermore-agentd` TOML/IR
+   emitter. Validate it by compiling `nscript` versions of Phase 11's existing
+   built-in recipes (`audit.digest` is the right first target — zero
+   authority, already specified) and diffing the emitted recipe's behaviour
+   against the hand-written one under `evermore-agentd`'s existing test
+   harness.
+4. **M12.4 — First real authored recipe.** Only after M12.3's emitted
+   `audit.digest` passes every check the hand-written one does: author one
+   genuinely new recipe (a notification-triage or settings-concierge variant)
+   directly in `nscript`, compile it, and ship it through the same local-
+   recipe validation path a hand-written TOML recipe goes through. Do not
+   skip straight to a write-heavy or standing-routine recipe.
+
+### Open decisions
+
+- **Whether the compiler lives in the `evermore` workspace or in `nscript`.**
+  Leaning toward `nscript` owning the emitter as an "evermore-agentd backend"
+  target, analogous to any other compile target, so Evermore does not take on
+  `nscript`'s compiler-maintenance burden. Evermore owns the IR's stability
+  contract (changes to `StepKind`/`TaskBudget` are breaking for the emitter)
+  and reviews emitter changes that touch it.
+- **How much of Phase 11's step model `nscript` should expose as native
+  syntax** versus how much stays an escape hatch (e.g., `each` iteration,
+  `render` templating) that `nscript` calls out to rather than reimplements.
+  Favor the escape hatch until there is a concrete recipe that needs richer
+  native control flow.
+- **Whether M12.2's host adapter is contributed upstream to `nscript` or kept
+  as an Evermore-side crate that implements `nscript`'s trait.** Upstream is
+  preferable if `nscript`'s RFC process can absorb it at the pace this phase
+  needs; otherwise it starts Evermore-side and is offered upstream once
+  proven.
+
+### Risks
+
+- **Bus factor and pace mismatch.** `nscript` is pre-1.0 with one maintainer
+  (the same person maintaining Evermore). A stall there should not block
+  Phase 11's own roadmap; the compiler/adapter boundary in this design is
+  deliberately chosen so Evermore's recipe format keeps working with
+  hand-written TOML regardless of `nscript`'s pace.
+- **Duplicate type drift.** Until M12.1's reconciliation lands, `nscript`'s
+  and `evermore-common`'s NIP types can silently diverge. Treat
+  `evermore-common` as canonical in any conflict, since its types already
+  encode grant/audit semantics that a general-purpose Nostr language
+  correctly does not bake in.
+- **Authority creep through the compiler.** The single most important
+  invariant in this whole design is that compiled output is validated exactly
+  like hand-written input. Any change to `evermore-agentd`'s loader that
+  special-cases "trusted because it came from the `nscript` compiler" defeats
+  the entire point and should be treated as a security regression.
+- **Scope creep into `nscript` maintenance.** M12.2's real-deploy-host work is
+  valuable to `nscript` precisely because it is real usage, not because
+  Evermore should become `nscript`'s de facto QA team. Keep the milestones
+  scoped to what Phase 11's own recipes need; do not chase full NIP-module
+  coverage for its own sake.

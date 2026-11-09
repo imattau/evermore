@@ -245,11 +245,9 @@ pub extern "C" fn c_login(
     pin: *mut CK_BYTE,
     pin_len: CK_ULONG,
 ) -> CK_RV {
-    // The PIN is deliberately not the real security gate here -- it
-    // never will be. NIP-46 approval is. Any non-empty PIN is accepted
-    // so homed's existing PIN-entry UX keeps working unmodified; the
-    // actual gate belongs in `c_decrypt` once the NIP-46 round-trip
-    // exists (see that function's doc comment).
+    // The random PIN is stored only in homed's short-lived secret record
+    // and satisfies its normal PKCS#11 login call. The security decision
+    // occurs in C_Decrypt, where the paired signer must approve the unlock.
     if pin.is_null() || pin_len == 0 {
         return CKR_PIN_INCORRECT;
     }

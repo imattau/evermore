@@ -66,6 +66,20 @@ pub fn exists(identity: &str) -> Result<bool, KeyError> {
     Ok(load(identity)?.is_some())
 }
 
+/// Unlinks and revokes an identity's secret from the current session keyring.
+pub fn remove(identity: &str) -> Result<(), KeyError> {
+    let ring = session_keyring()?;
+    match ring.search(&description_for(identity)) {
+        Ok(key) => {
+            key.revoke()?;
+            ring.unlink_key(key)?;
+            Ok(())
+        }
+        Err(KeyError::KeyDoesNotExist) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[allow(dead_code)]
 pub fn key_object(identity: &str) -> Result<Option<Key>, KeyError> {
     let ring = session_keyring()?;

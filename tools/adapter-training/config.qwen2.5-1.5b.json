@@ -1,0 +1,25 @@
+{
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+  "rank": 16,
+  "alpha": 32,
+  "dropout": 0.05,
+  "learning_rate": 0.0001,
+  "epochs": 4,
+  "batch_size": 1,
+  "gradient_accumulation": 4,
+  "max_seq_length": 2048,
+  "seed": 7,
+  "torch_dtype": "bfloat16",
+  "device_map": "auto",
+  "gradient_checkpointing": true,
+  "target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ]
+}

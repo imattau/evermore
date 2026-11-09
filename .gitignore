@@ -1,6 +1,8 @@
 /target/
 **/target/
 /.venv-training/
+/.image-build/
+/dist/
 
 # Publisher secret keys (nsec) -- generated locally, never committed.
 # The public half (npub/hex) is fine to commit; see packaging/npack/.

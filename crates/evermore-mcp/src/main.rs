@@ -560,9 +560,7 @@ fn write_http(
 fn list_tools() -> Vec<Value> {
     let mut tools: Vec<Value> = operations::catalog()
         .into_iter()
-        .filter(|definition| {
-            definition.access == Access::Read || definition.approval == Approval::Required
-        })
+        .filter(operations::is_mcp_exposed)
         .map(operation_tool)
         .collect();
     tools.push(json!({

@@ -1471,7 +1471,9 @@ name = "evermore-enroll"
 version = "0.1.0"
 dependencies = [
  "nostr",
+ "serde",
  "serde_json",
+ "tungstenite",
  "zbus",
  "zeroize",
 ]
@@ -1483,9 +1485,11 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "nostr",
  "serde",
  "serde_json",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
@@ -1616,6 +1620,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tungstenite",
+ "zeroize",
 ]
 
 [[package]]

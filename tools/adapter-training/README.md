@@ -1,8 +1,15 @@
 # Adapter training and evaluation
 
-Build tooling for the Evermore operation LoRA: the adapter that makes tool
-proposals follow the operation catalogue and its argument shapes. Nothing here
-runs at runtime; `evermore-inferd` only reads the signed GGUF package.
+Build tooling for Evermore's Qwen-specific tool-use LoRA. It teaches both the
+panel's operation-proposal format and Evermore MCP's `tools/call` format,
+including `mcp_status`, `op_status`, exact tool names, argument schemas,
+approval-gated writes, and refusals for unsupported or unsafe requests.
+Nothing here runs at runtime; `evermore-inferd` only reads the signed GGUF
+package.
+
+Before changing the dataset, model split, or release criteria, follow
+[`REQUIREMENTS.md`](REQUIREMENTS.md). It separates MCP execution from the
+panel's write-proposal path and deterministic agent recipes.
 
 Training hardware is opt-in and outside the ISO/build VM. The build VM only
 validates and packages the resulting adapter.
@@ -15,15 +22,25 @@ cargo run -p evermore-adapter-training -- --output-dir tools/adapter-training/da
 
 The generator reads `evermore_common::operations` directly, so every catalogue
 operation is represented and the dataset cannot drift silently. It writes
-`train.jsonl`, `eval.jsonl`, and `dataset-manifest.json` with the catalogue
-fingerprint and counts. Splits are deterministic.
+`train.jsonl`, `dev.jsonl`, `test.jsonl`, and `dataset-manifest.json` with the
+catalogue fingerprint, content hash, and per-split task counts. Splits are
+deterministic. Training reads only train and dev; keep test for the final
+locked evaluation.
 
-Generated records cover each operation's description, access/approval class,
-canonical arguments, invalid-argument repair, and refusal cases. The assistant
-target format is one JSON object:
+Panel examples are generated only for approval-gated writes, matching
+`evermore-agentd propose`; read operations belong to deterministic recipes.
+Generated records pair each request with explicit argument values, vary those
+values across examples, and include invalid-argument repair and refusal cases.
+The generator makes five positive examples per tool in each split. They are
+catalogue-derived templates, not independently authored release scenarios, so
+the image packaging gate rejects this dataset until its test cases are reviewed.
+MCP examples
+include schema-rich, semantically related candidate tools so training tests
+selection among Evermore tools, not just output formatting. The panel target
+format includes the exact marker consumed by Evermore's proposal parser:
 
 ```json
-{"operation":"settings.get","arguments":{"domain":"theme","key":"mode"}}
+EVERMORE_PROPOSAL: {"operation":"settings.set","arguments":{"domain":"theme","key":"mode","value":"dark"}}
 ```
 
 or
@@ -31,6 +48,16 @@ or
 ```json
 {"refusal":"no approved operation executes shell commands"}
 ```
+
+MCP records instead use the shape expected by MCP `tools/call`:
+
+```json
+{"name":"settings.set","arguments":{"domain":"theme","key":"mode","value":"dark"}}
+```
+
+The MCP tool list and each tool's `inputSchema` are embedded in those examples.
+Write tools submit owner-approval-gated requests; the assistant must never
+claim that a proposed write has already executed.
 
 ### Opt-in local traces
 
@@ -63,7 +90,7 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r tools/adapter-training/requirements.txt
 
 tools/adapter-training/train_lora.py \
-  --config tools/adapter-training/config.example.json \
+  --config tools/adapter-training/config.qwen2.5-1.5b.json \
   --data-dir tools/adapter-training/data \
   --output-dir out/adapter-peft
 ```
@@ -75,21 +102,26 @@ seed. Keep the file in the repository so the run is reproducible.
 
 ```sh
 tools/adapter-training/evaluate.py \
-  --eval tools/adapter-training/data/eval.jsonl \
+  --dev tools/adapter-training/data/dev.jsonl \
+  --dataset-manifest tools/adapter-training/data/dataset-manifest.json \
   --base out/base.gguf \
   --out out/base-eval.json
 
 tools/adapter-training/evaluate.py \
-  --eval tools/adapter-training/data/eval.jsonl \
+  --test tools/adapter-training/data/test.jsonl \
+  --dataset-manifest tools/adapter-training/data/dataset-manifest.json \
   --base out/base.gguf \
   --adapter out/adapter.gguf \
   --scale 0,0.5,1.0 \
   --grammar tools/adapter-training/proposal.gbnf \
+  --mcp-grammar tools/adapter-training/mcp-tool-call.gbnf \
   --out out/adapter-eval.json
 ```
 
-Metrics: parse rate, tool-selection accuracy, argument/schema validity,
-refusal accuracy, and proposals for non-existent operations. Compare
+Use `--dev` to compare saved epoch checkpoints or adapter scales. Use `--test`
+once for the release decision; model packaging rejects reports from dev.
+Metrics report panel write selection/schema/refusal separately from MCP tool
+selection/listing/schema/refusal, including unlisted MCP calls. Compare
 base-vs-adapter and scale runs before publishing. The evaluator starts its own
 `llama-server`; it does not touch the user's model store.
 
@@ -128,9 +160,10 @@ If the catalogue changes, the check fails with a rebuild-and-re-evaluate
 message until the lock and the signed adapter package are updated together.
 Use `--require-adapter` once the ISO is expected to ship the default pair.
 
-## Reference run (2026-11-08)
+## Historical TinyLlama run (2026-11-08)
 
-Local validation artifact, not a published or signed release:
+This was an experimental run and is not the default model. TinyLlama is being
+dropped because it did not reliably select tools or produce valid schemas.
 
 - Base: `TinyLlama-1.1B-Chat-v1.0`, `Q4_K_M` GGUF.
 - Data: 124 train / 72 eval records, catalogue fingerprint
@@ -150,7 +183,7 @@ Local validation artifact, not a published or signed release:
   grammar, rescale to 0.25 was reported by `llama-server`, and unload stopped
   the child.
 
-Refusal accuracy is the weak point: the base and adapter both propose an
-operation for out-of-catalogue requests. Before publishing, add more refusal
-variants (and likely a larger base model) and require a non-zero refusal score
-in the evaluation gate.
+The current release candidate is Qwen2.5-1.5B-Instruct with its Qwen-trained
+adapter. Do not publish it until the MCP tool-name, schema-validity, refusal,
+and existing panel-operation metrics have been measured against the base model
+and the adapter, and the adapter materially improves the relevant scores.

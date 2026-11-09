@@ -4,17 +4,20 @@ Documentation=https://github.com/imattau/evermore
 
 [Service]
 Type=simple
-# Assumes `cargo install --path crates/evermore-signer` (or equivalent) has
-# put the binary on the user's cargo bin path. Revisit once packaging (npack
-# / an AUR package) exists -- Phase 5.
+# Installed system-wide by the Evermore package so a newly created homed
+# account can start the signer before any per-user Rust toolchain exists.
 # homed has unlocked and mounted this user's encrypted home before the user
 # manager starts. Import the Nostr key into this login session's kernel
 # keyring before serving requests; existing sessions without a home key keep
 # their current behavior and can still load one explicitly.
-ExecStartPre=%h/.cargo/bin/evermore-signer load-home-identity %u --if-present
-ExecStart=%h/.cargo/bin/evermore-signer serve
+ExecStartPre=/usr/bin/evermore-signer load-home-identity %u --if-present
+ExecStart=/usr/bin/evermore-signer serve
+ExecStopPost=/usr/bin/evermore-signer unload-home-identity %u
 Restart=on-failure
 RestartSec=2
+RuntimeDirectory=evermore
+RuntimeDirectoryMode=0700
+ReadWritePaths=%t/evermore
 
 # The daemon's whole job is to be the one process that touches secret key
 # material -- keep its own surface minimal.

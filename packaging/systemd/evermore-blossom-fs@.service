@@ -12,7 +12,7 @@ Type=simple
 # system-concerns table: Blossom servers are external infrastructure
 # Evermore points at, not something it ships).
 Environment=BLOSSOM_URL=
-ExecStart=%h/.cargo/bin/evermore-blossom-fs --identity %i --blossom-url ${BLOSSOM_URL}
+ExecStart=/usr/bin/evermore-blossom-fs --identity %i --blossom-url ${BLOSSOM_URL}
 Restart=on-failure
 RestartSec=2
 

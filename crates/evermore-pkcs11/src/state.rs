@@ -1,15 +1,10 @@
 //! Provider state: a single RSA-2048 keypair representing the one
 //! virtual "token" this module exposes, plus the open-session table.
 //!
-//! Scope note: this first increment proves the PKCS#11 ABI/mechanics
-//! work end-to-end against real `homed` with a real, locally-held RSA
-//! keypair -- `C_Decrypt` does genuine RSA-OAEP-SHA1 math. It
-//! deliberately does *not* yet gate that decrypt on a NIP-46 approval
-//! round-trip; see `functions.rs`'s `C_Decrypt` for exactly where that
-//! gate belongs once it's built (PROJECT_IDEA.md's Phase 5.5 tracks it
-//! as the next concrete step, not assumed-done here). One keypair per
-//! module instance for now, not yet wired to `evermore-signer`'s
-//! per-identity `backing::Backing::Remote` pairing records.
+//! The provider persists one RSA keypair and one token identity. Its
+//! decrypt path requires approval from the separately configured device
+//! NIP-46 pairing before performing RSA-OAEP. The pairing is device-wide
+//! and intentionally separate from per-user remote-signing records.
 
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};

@@ -1,0 +1,4 @@
+# The greeter can ask the root-owned enrollment helper to create the first
+# homed account. The helper accepts secrets only on stdin and enforces that
+# the caller is greeter, homed is empty, and enrollment has not completed.
+greeter ALL=(root) NOPASSWD: /usr/bin/evermore-enroll first-user-create, /usr/bin/evermore-enroll first-user-pair

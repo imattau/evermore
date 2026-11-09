@@ -2523,6 +2523,22 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
                 _ => return Err("unexpected context service response".into()),
             }
         }
+        "ai.context.status" => {
+            match send_request::<_, evermore_common::ai_context::Event>(
+                &evermore_common::ai_context::runtime_socket_path(),
+                &evermore_common::ai_context::Request::Health,
+            )? {
+                evermore_common::ai_context::Event::Health {
+                    protocol_version,
+                    ready,
+                } => serde_json::json!({
+                    "protocol_version": protocol_version,
+                    "ready": ready
+                }),
+                evermore_common::ai_context::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected context service response".into()),
+            }
+        }
         "ai.context.get" => {
             let source = arguments["source"]
                 .as_str()
@@ -2557,6 +2573,98 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
                 }
                 evermore_common::ai_index::Event::Error { message } => return Err(message),
                 _ => return Err("unexpected index service response".into()),
+            }
+        }
+        "ai.index.status" => {
+            let socket = evermore_common::ai_index::runtime_socket_path();
+            let (protocol_version, ready) = match send_request::<_, evermore_common::ai_index::Event>(
+                &socket,
+                &evermore_common::ai_index::Request::Health,
+            )? {
+                evermore_common::ai_index::Event::Health {
+                    protocol_version,
+                    ready,
+                } => (protocol_version, ready),
+                evermore_common::ai_index::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected index service health response".into()),
+            };
+            let selected_files = match send_request::<_, evermore_common::ai_index::Event>(
+                &socket,
+                &evermore_common::ai_index::Request::ListScopes,
+            )? {
+                evermore_common::ai_index::Event::Scopes { scopes } => scopes.len(),
+                evermore_common::ai_index::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected index scope response".into()),
+            };
+            serde_json::json!({
+                "protocol_version": protocol_version,
+                "ready": ready,
+                "selected_files": selected_files
+            })
+        }
+        "ai.index.list_scopes" => {
+            match send_request::<_, evermore_common::ai_index::Event>(
+                &evermore_common::ai_index::runtime_socket_path(),
+                &evermore_common::ai_index::Request::ListScopes,
+            )? {
+                evermore_common::ai_index::Event::Scopes { scopes } => serde_json::Value::Array(
+                    scopes
+                        .into_iter()
+                        .map(|scope| {
+                            serde_json::json!({
+                                "scope_id": scope.id,
+                                "path": scope.path
+                            })
+                        })
+                        .collect(),
+                ),
+                evermore_common::ai_index::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected index scope response".into()),
+            }
+        }
+        "ai.index.read" => {
+            let path = arguments["path"].as_str().expect("validated string");
+            match send_request::<_, evermore_common::ai_context::Event>(
+                &evermore_common::ai_context::runtime_socket_path(),
+                &evermore_common::ai_context::Request::GetIndexedFile {
+                    path: path.to_string(),
+                },
+            )? {
+                evermore_common::ai_context::Event::Context { source, data } => {
+                    serde_json::json!({ "source": source, "data": data })
+                }
+                evermore_common::ai_context::Event::Error { message } => return Err(message),
+                _ => return Err("unexpected indexed-file context response".into()),
+            }
+        }
+        "ai.infer.status" => {
+            match send_request::<_, evermore_common::ai::Event>(
+                &evermore_common::ai::runtime_infer_socket_path(),
+                &evermore_common::ai::Request::Health,
+            )? {
+                evermore_common::ai::Event::Health {
+                    protocol_version,
+                    backend,
+                    ready,
+                } => serde_json::json!({
+                    "protocol_version": protocol_version,
+                    "backend": backend,
+                    "ready": ready
+                }),
+                evermore_common::ai::Event::Error { message, .. } => return Err(message),
+                _ => return Err("unexpected inference service health response".into()),
+            }
+        }
+        "ai.model.list" => {
+            match send_request::<_, evermore_common::ai::Event>(
+                &evermore_common::ai::runtime_infer_socket_path(),
+                &evermore_common::ai::Request::ListModels,
+            )? {
+                evermore_common::ai::Event::Models { models } => {
+                    serde_json::to_value(models).map_err(|error| error.to_string())?
+                }
+                evermore_common::ai::Event::Error { message, .. } => return Err(message),
+                _ => return Err("unexpected inference model-list response".into()),
             }
         }
         "sway.list_windows" => serde_json::json!(sway_list_windows()?),

@@ -2,7 +2,7 @@
 # Use with llama-server's /v1/chat/completions "grammar" field.
 root ::= proposal | refusal
 
-proposal ::= "{\"operation\":\"" name "\",\"arguments\":" value "}"
+proposal ::= "EVERMORE_PROPOSAL: {\"operation\":\"" name "\",\"arguments\":" value "}"
 refusal ::= "{\"refusal\":\"" text "\"}"
 
 name ::= [a-z] [a-z0-9_.]*

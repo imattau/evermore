@@ -79,3 +79,19 @@ installation discovers the release through the publisher trust list.
 The intended ISO pre-install is a `Q4_K_M` base in the 1B–3B range plus the
 `F16` Evermore adapter, both shipped as signed `npack` packages and imported
 through `ai.model.install_signed_npack`.
+
+For the VM image's preinstalled offline store, first evaluate the Qwen adapter
+against both the panel and MCP grammars, then assemble the BGE + Qwen pair. The
+assembler enforces tool-selection, schema, operation, and refusal score gates
+before copying files:
+
+```sh
+python3 tools/model-build/assemble-default-store.py \
+  --base .image-build/model-store/p8.test.qwen2.5-1.5b-1.0.0/base.gguf \
+  --adapter out/qwen-evermore-adapter.gguf \
+  --bge-dir .image-build/model-store/p7.model.bge-1.0.0 \
+  --dataset-manifest tools/adapter-training/data/dataset-manifest.json \
+  --config tools/adapter-training/config.qwen2.5-1.5b.json \
+  --eval-report out/qwen-eval.json \
+  --output-dir .image-build/model-store
+```

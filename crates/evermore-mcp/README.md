@@ -46,11 +46,32 @@ interface.
 
 `tools/list` derives operation names, descriptions, input/output schemas,
 grant labels, and read/write annotations from `evermore-common::operations`.
-Every operation call requires an active owner-signed grant for the exact
-operation name. Reads route through `evermore-operationsd`. Writes are NIP-44
-encrypted to the owner, signed by the configured agent, then submitted to
-`evermore-operationsd`; the daemon applies grant checks and owner approval
-before any side effect.
+It currently exposes all 37 catalog operations: 23 reads and 14 writes with
+an owner-approval path, plus the two MCP diagnostics `mcp_status` and
+`op_status`. The shared catalog defines the exposure rule used by both MCP
+and the training-data generator. Every operation call requires an active
+owner-signed grant for the exact operation name. Reads route through
+`evermore-operationsd`. Writes are NIP-44 encrypted to the owner, signed by
+the configured agent, then submitted to `evermore-operationsd`; the daemon
+applies grant checks and owner approval before any side effect.
+
+The current catalogue covers calendar events; public identity keys; recent
+notifications; trusted package discovery, install, removal, and dependency
+inspection; owned Blossom blobs; settings; and Sway window/workspace/app
+controls. The AI tools cover user-enabled context sources, explicitly selected
+file scopes and search/read, local inference health, installed model inventory,
+and approval-gated model import. They include `ai.context.status`,
+`ai.index.status`, `ai.index.list_scopes`, `ai.index.search`, `ai.index.read`,
+`ai.infer.status`, and `ai.model.list`. File reads still pass through the
+context service's selected-scope, file-type, size, and no-AI checks.
+
+Coverage is limited to explicit catalogue APIs. MCP does not expose shell
+execution, signer secrets, changes to local context/index consent, model
+loading/unloading, service restarts, or raw daemon control. Those remain local
+owner or service responsibilities. The MCP training dataset is generated from
+the same catalogue filter as `tools/list`, so every read operation and every
+owner-approval-gated write is represented without maintaining a second tool
+inventory.
 
 `mcp_status` reports adapter reachability and whether the configured agent
 identity resolves in the signer. It does not contact `evermore-operationsd`

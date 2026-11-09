@@ -414,7 +414,14 @@ mod tests {
 
     #[test]
     fn warm_endpoint_lookup_never_starts_a_model() {
-        let pool = Pool::new(PathBuf::from("/does/not/exist"), 1, Duration::from_millis(1));
-        assert!(pool.endpoint_for_backend("evermore/not-loaded", Backend::Auto).is_none());
+        let pool = Pool::new(
+            PathBuf::from("/does/not/exist"),
+            1,
+            Duration::from_millis(1),
+        );
+        assert!(
+            pool.endpoint_for_backend("evermore/not-loaded", Backend::Auto)
+                .is_none()
+        );
     }
 }

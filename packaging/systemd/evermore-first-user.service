@@ -1,20 +1,12 @@
 [Unit]
-Description=Evermore first-user identity enrollment
+Description=Evermore first-user enrollment compatibility gate
 Before=greetd.service
-ConditionPathExists=!/var/lib/evermore/first-user-enrolled
 After=systemd-homed.service
 Wants=systemd-homed.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/evermore-enroll first-user
-StandardInput=tty
-StandardOutput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
-TimeoutStartSec=infinity
+ExecStart=/usr/bin/true
 
 [Install]
 RequiredBy=greetd.service

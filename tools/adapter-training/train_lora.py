@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Fine-tune a LoRA adapter on the catalogue-derived dataset.
+"""Fine-tune on train.jsonl and use dev.jsonl for token-loss diagnostics.
+
+The locked test.jsonl split is never loaded here. Choose checkpoints by the
+generated tool-use metrics from evaluate.py --dev, not by eval_loss alone.
 
 Training is intentionally outside `ai-inferd` and the ISO build. Install the
 extras in `requirements.txt` on a machine with a CUDA/ROCm GPU, then:
@@ -24,6 +27,10 @@ def parse_args():
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--model-path",
+        help="optional local snapshot path; config still records the repository and revision",
+    )
     return parser.parse_args()
 
 
@@ -48,7 +55,10 @@ def main():
         )
         return 2
 
-    tokenizer = AutoTokenizer.from_pretrained(config["base_model"])
+    revision = config.get("revision")
+    model_source = args.model_path or config["base_model"]
+    source_kwargs = {} if args.model_path else {"revision": revision}
+    tokenizer = AutoTokenizer.from_pretrained(model_source, **source_kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -67,12 +77,25 @@ def main():
         return Dataset.from_list(rows)
 
     train = load("train")
-    evaluation = load("eval")
+    # The locked test split is deliberately never opened by the trainer.
+    development = load("dev")
+
+    dtype = config.get("torch_dtype")
+    if dtype is None:
+        dtype = "bfloat16" if config.get("bf16", True) else "float16"
+    torch_dtype = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }.get(dtype)
+    if torch_dtype is None:
+        raise ValueError(f"unsupported torch_dtype: {dtype}")
 
     model = AutoModelForCausalLM.from_pretrained(
-        config["base_model"],
-        torch_dtype=torch.bfloat16 if config.get("bf16", True) else torch.float16,
-        device_map="auto",
+        model_source,
+        **source_kwargs,
+        torch_dtype=torch_dtype,
+        device_map=config.get("device_map", "auto"),
     )
     model.config.use_cache = False
 
@@ -96,14 +119,19 @@ def main():
         save_strategy="epoch",
         eval_strategy="epoch",
         seed=config.get("seed", 7),
-        bf16=config.get("bf16", True),
+        bf16=dtype == "bfloat16",
+        fp16=dtype == "float16",
+        gradient_checkpointing=config.get("gradient_checkpointing", True),
+        # Save every epoch. Select an epoch with generated dev-set metrics via
+        # evaluate.py; token loss is not a tool-use quality metric.
+        load_best_model_at_end=False,
         report_to=[],
     )
     trainer = SFTTrainer(
         model=model,
         args=training,
         train_dataset=train,
-        eval_dataset=evaluation,
+        eval_dataset=development,
         peft_config=peft,
         processing_class=tokenizer,
     )

@@ -5,7 +5,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/evermore-indexd
+ExecStart=/usr/bin/evermore-indexd
 ExecStartPre=/usr/bin/chmod 0700 %h/.local/state/evermore-indexd
 Restart=on-failure
 RestartSec=3

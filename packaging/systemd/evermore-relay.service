@@ -4,10 +4,8 @@ Documentation=https://github.com/imattau/evermore
 
 [Service]
 Type=simple
-# Assumes `go build -o ~/.local/bin/evermore-relay-supervisor ./relay` (or
-# equivalent) has put the binary on the user's PATH. Revisit once packaging
-# (npack / an AUR package) exists -- Phase 5.
-ExecStart=%h/.local/bin/evermore-relay-supervisor
+# The Evermore system install places the relay supervisor in /usr/bin.
+ExecStart=/usr/bin/evermore-relay-supervisor
 Restart=on-failure
 RestartSec=2
 Environment=EVERMORE_RELAY_PORT=4869

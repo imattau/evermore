@@ -95,6 +95,7 @@ packages:
   - pkgconf
   - rustup
   - rsync
+  - qrencode
   - wayland
   - wayland-protocols
   - libxkbcommon

@@ -144,6 +144,13 @@ pub mod operations {
         pub result_redaction: Redaction,
     }
 
+    /// Whether an operation is safe to expose through the MCP adapter.
+    /// Read operations are available directly; writes are exposed only when
+    /// the operations daemon has an owner-approval path for them.
+    pub fn is_mcp_exposed(definition: &Definition) -> bool {
+        definition.access == Access::Read || definition.approval == Approval::Required
+    }
+
     /// Build the current catalogue in stable name order. Interfaces should
     /// consume these definitions rather than duplicating tool metadata.
     pub fn catalog() -> Vec<Definition> {
@@ -562,6 +569,36 @@ pub mod operations {
                 Redaction::None,
             ),
             definition(
+                "ai.infer.status",
+                "Check whether Evermore's local inference service and its llama.cpp backend are available. This reports service readiness only; it does not load a model.",
+                Access::Read,
+                "ai.model.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                object_schema(
+                    json!({
+                        "protocol_version": { "type": "integer" },
+                        "backend": { "type": "string" },
+                        "ready": { "type": "boolean" }
+                    }),
+                    &["protocol_version", "backend", "ready"],
+                ),
+                Redaction::None,
+            ),
+            definition(
+                "ai.model.list",
+                "List locally installed chat and embedding models, including their capabilities, context size, adapter, and whether each model is already warm. This does not load or unload models.",
+                Access::Read,
+                "ai.model.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                json!({
+                    "type": "array",
+                    "items": { "type": "object" }
+                }),
+                Redaction::None,
+            ),
+            definition(
                 "settings.get",
                 "Read one value from a settings domain.",
                 Access::Read,
@@ -613,6 +650,22 @@ pub mod operations {
                 Redaction::None,
             ),
             definition(
+                "ai.context.status",
+                "Check whether Evermore's context service is available and report its protocol version. This does not read context data.",
+                Access::Read,
+                "ai.context.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                object_schema(
+                    json!({
+                        "protocol_version": { "type": "integer" },
+                        "ready": { "type": "boolean" }
+                    }),
+                    &["protocol_version", "ready"],
+                ),
+                Redaction::None,
+            ),
+            definition(
                 "ai.context.get",
                 "Read one context source enabled by the user's local context policy.",
                 Access::Read,
@@ -654,6 +707,63 @@ pub mod operations {
                         "additionalProperties": false
                     }
                 }),
+                Redaction::SecretShapedValues,
+            ),
+            definition(
+                "ai.index.status",
+                "Check whether Evermore's local file index is available and report how many user-selected files are indexed. File paths are returned separately by ai.index.list_scopes.",
+                Access::Read,
+                "ai.index.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                object_schema(
+                    json!({
+                        "protocol_version": { "type": "integer" },
+                        "ready": { "type": "boolean" },
+                        "selected_files": { "type": "integer" }
+                    }),
+                    &["protocol_version", "ready", "selected_files"],
+                ),
+                Redaction::None,
+            ),
+            definition(
+                "ai.index.list_scopes",
+                "List the file paths the owner explicitly selected for local AI indexing. Use these exact paths with ai.index.read. Paths are user-approved local scopes; do not infer or probe other files.",
+                Access::Read,
+                "ai.index.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scope_id": { "type": "string" },
+                            "path": { "type": "string" }
+                        },
+                        "required": ["scope_id", "path"],
+                        "additionalProperties": false
+                    }
+                }),
+                Redaction::SecretShapedValues,
+            ),
+            definition(
+                "ai.index.read",
+                "Read one exact file already selected for AI indexing. The service enforces the active scope allowlist, file-size limit, supported file types, and no-AI markers.",
+                Access::Read,
+                "ai.index.read",
+                Approval::None,
+                object_schema(
+                    json!({ "path": { "type": "string", "minLength": 1, "maxLength": 4096 } }),
+                    &["path"],
+                ),
+                object_schema(
+                    json!({
+                        "source": { "type": "string" },
+                        "data": { "type": "object" }
+                    }),
+                    &["source", "data"],
+                ),
                 Redaction::SecretShapedValues,
             ),
             definition(
@@ -1731,10 +1841,10 @@ pub mod ai {
             /// operation-proposal callers that need parseable JSON.
             #[serde(default)]
             grammar: Option<String>,
-        /// Refuse the request unless the selected model is already running.
-        /// Used by latency-bounded launcher suggestions.
-        #[serde(default)]
-        warm_only: bool,
+            /// Refuse the request unless the selected model is already running.
+            /// Used by latency-bounded launcher suggestions.
+            #[serde(default)]
+            warm_only: bool,
         },
         Embed {
             request_id: String,

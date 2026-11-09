@@ -122,8 +122,14 @@ fn connect_and_subscribe(
     let (mut ws, _response) = tungstenite::connect(relay_url)
         .map_err(|e| format!("couldn't connect to relay at {relay_url}: {e}"))?;
 
-    if let MaybeTlsStream::Plain(tcp) = ws.get_ref() {
-        let _ = tcp.set_read_timeout(Some(Duration::from_millis(200)));
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(tcp) => {
+            let _ = tcp.set_read_timeout(Some(Duration::from_millis(200)));
+        }
+        MaybeTlsStream::Rustls(tls) => {
+            let _ = tls.sock.set_read_timeout(Some(Duration::from_millis(200)));
+        }
+        _ => {}
     }
 
     let filter = Filter::new()

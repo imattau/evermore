@@ -4,7 +4,7 @@ After=default.target evermore-contextd.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/evermore-sway-ai-bridge
+ExecStart=/usr/bin/evermore-sway-ai-bridge
 Restart=on-failure
 RestartSec=3
 UMask=0077

@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/evermore-inferd
+ExecStart=/usr/bin/evermore-inferd
 Restart=on-failure
 RestartSec=3
 Environment=EVERMORE_LLAMA_SERVER_BIN=/usr/bin/llama-server

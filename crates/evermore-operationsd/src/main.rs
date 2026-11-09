@@ -2336,6 +2336,89 @@ fn invoke_read(name: &str, arguments: &Value) -> Result<Value, String> {
         "packages.list_available" => {
             npackd_client::call("Search", serde_json::json!({"query": ""}))?
         }
+        "packages.update_plan" => {
+            let checked = npackd_client::call("CheckUpdates", serde_json::json!({"user": true}))?;
+            let mut updates = Vec::new();
+            let mut revoked = Vec::new();
+            let mut errors = Vec::new();
+            for entry in checked.as_array().cloned().unwrap_or_default() {
+                let reference = entry
+                    .get("reference")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(reason) = entry.get("revoked").and_then(Value::as_str) {
+                    revoked.push(serde_json::json!({
+                        "reference": reference,
+                        "reason": reason,
+                        "current_version": entry.get("current_version").cloned().unwrap_or(Value::Null)
+                    }));
+                    continue;
+                }
+                let available = entry
+                    .get("available_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if available.is_empty() {
+                    continue;
+                }
+                let current = entry
+                    .get("current_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match npackd_client::call(
+                    "GetPackage",
+                    serde_json::json!({"package": reference, "user": true}),
+                ) {
+                    Ok(package) => {
+                        let publisher_raw = package
+                            .get("publisher")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let publisher = PublicKey::parse(publisher_raw)
+                            .map(|key| key.to_hex())
+                            .unwrap_or_else(|_| publisher_raw.to_string());
+                        let name = package
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let version = package
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .unwrap_or(available);
+                        let sha256 = package
+                            .get("sha256")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if publisher.is_empty() || name.is_empty() || sha256.is_empty() {
+                            errors.push(serde_json::json!({
+                                "reference": reference,
+                                "error": "resolved release omitted publisher, name, or sha256"
+                            }));
+                            continue;
+                        }
+                        updates.push(serde_json::json!({
+                            "publisher": publisher,
+                            "name": name,
+                            "current_version": current,
+                            "available_version": version,
+                            "sha256": sha256,
+                            "reference": reference
+                        }));
+                    }
+                    Err(error) => errors.push(serde_json::json!({
+                        "reference": reference,
+                        "error": error
+                    })),
+                }
+            }
+            serde_json::json!({
+                "count": updates.len(),
+                "updates": updates,
+                "revoked": revoked,
+                "errors": errors
+            })
+        }
         "packages.resolve" => {
             let publisher = arguments["publisher"].as_str().expect("validated string");
             let name = arguments["name"].as_str().expect("validated string");

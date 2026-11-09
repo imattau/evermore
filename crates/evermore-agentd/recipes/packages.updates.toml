@@ -1,0 +1,18 @@
+id = "packages.updates"
+version = 1
+title = "Update planner"
+description = "Check trusted publishers for newer releases, resolve exact hashes, and submit one owner-approved install per update. Partial failure is reported, not retried."
+operations = ["packages.update_plan", "packages.install_pinned"]
+budget = { steps = 2, writes = 32, seconds = 180, context_tokens = 0 }
+
+[[step]]
+id = "plan"
+kind = "read"
+operation = "packages.update_plan"
+
+[[step]]
+id = "apply"
+kind = "each"
+from = "plan.updates"
+operation = "packages.install_pinned"
+args = { publisher = "{{item.publisher}}", name = "{{item.name}}", version = "{{item.available_version}}", sha256 = "{{item.sha256}}" }

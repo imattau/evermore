@@ -16,6 +16,19 @@ pub struct Runner {
     pub owner_pubkey: String,
 }
 
+enum PlannedWrite {
+    Single {
+        index: usize,
+        operation: String,
+        arguments: Value,
+    },
+    Each {
+        index: usize,
+        operation: String,
+        items: Vec<Value>,
+    },
+}
+
 impl Runner {
     pub fn create_task(
         &self,
@@ -75,11 +88,10 @@ impl Runner {
     pub fn run(self: Arc<Self>, task_id: String, recipe: Recipe) {
         if let Err(error) = self.run_inner(&task_id, &recipe) {
             let _ = self.store.update(&task_id, |task| {
-                task.status = if task
-                    .steps
-                    .iter()
-                    .any(|step| step.status == StepStatus::Succeeded)
-                {
+                let partial = task.steps.iter().any(|step| {
+                    step.status == StepStatus::Succeeded || step.operation_id.is_some()
+                });
+                task.status = if partial {
                     TaskStatus::PartiallyCompleted
                 } else {
                     TaskStatus::Failed
@@ -102,7 +114,7 @@ impl Runner {
 
         for index in 0..recipe.steps.len() {
             let step = recipe.steps[index].clone();
-            if step.kind == StepKind::Write {
+            if matches!(step.kind, StepKind::Write | StepKind::Each) {
                 write_start = Some(index);
                 break;
             }
@@ -173,7 +185,9 @@ impl Runner {
                         .ok_or_else(|| format!("render step '{}' lost its template", step.id))?;
                     Ok(Value::String(render::render_text(template, &context)?))
                 }
-                StepKind::Write => unreachable!("write steps break before execution"),
+                StepKind::Write | StepKind::Each => {
+                    unreachable!("write steps break before execution")
+                }
                 StepKind::Unknown => Err("recipe uses an unknown step kind".into()),
             };
 
@@ -245,54 +259,198 @@ impl Runner {
             return Ok(());
         }
         clients::require_grant(&self.agent_pubkey, &recipe.write_operations())?;
+        let plans = self.plan_writes(recipe, start, context)?;
+        let mut submitted = 0_usize;
+
+        for plan in plans {
+            let task = self.store.get(task_id)?;
+            if task.cancel_requested || task.status == TaskStatus::Cancelled {
+                self.store.update(task_id, |task| {
+                    task.status = TaskStatus::Cancelled;
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+            match plan {
+                PlannedWrite::Single {
+                    index,
+                    operation,
+                    arguments,
+                } => {
+                    let operation_id =
+                        self.submit_one(task_id, index as u32, &operation, &arguments)?;
+                    self.store.update(task_id, |task| {
+                        let step = task
+                            .steps
+                            .get_mut(index)
+                            .ok_or_else(|| "task step vanished".to_string())?;
+                        step.arguments = Some(arguments);
+                        step.operation_id = Some(operation_id);
+                        step.status = StepStatus::AwaitingApproval;
+                        step.started_at = Some(unix_time());
+                        Ok(())
+                    })?;
+                    submitted += 1;
+                }
+                PlannedWrite::Each {
+                    index,
+                    operation,
+                    items,
+                } => {
+                    let placeholder_id = recipe.steps[index].id.clone();
+                    let applied = items.len();
+                    for (item_index, arguments) in items.into_iter().enumerate() {
+                        let next_index = self.store.get(task_id)?.steps.len() as u32;
+                        let operation_id =
+                            self.submit_one(task_id, next_index, &operation, &arguments)?;
+                        let id = format!("{placeholder_id}[{item_index}]");
+                        let operation = operation.clone();
+                        self.store.update(task_id, |task| {
+                            task.steps.push(TaskStep {
+                                index: next_index,
+                                id,
+                                kind: StepKind::Write,
+                                operation: Some(operation),
+                                arguments: Some(arguments),
+                                operation_id: Some(operation_id),
+                                status: StepStatus::AwaitingApproval,
+                                result: None,
+                                error: None,
+                                started_at: Some(unix_time()),
+                                finished_at: None,
+                            });
+                            Ok(())
+                        })?;
+                        submitted += 1;
+                    }
+                    self.store.update(task_id, |task| {
+                        let step = task
+                            .steps
+                            .get_mut(index)
+                            .ok_or_else(|| "task step vanished".to_string())?;
+                        step.status = StepStatus::Succeeded;
+                        step.result = Some(json!({ "applied": applied }));
+                        step.finished_at = Some(unix_time());
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+
+        self.store.update(task_id, |task| {
+            if submitted > 0 {
+                task.status = TaskStatus::AwaitingApproval;
+            } else {
+                task.status = TaskStatus::Succeeded;
+                task.result = Some(json!({ "updates": 0 }));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn plan_writes(
+        &self,
+        recipe: &Recipe,
+        start: usize,
+        context: &Value,
+    ) -> Result<Vec<PlannedWrite>, String> {
+        let mut plans = Vec::new();
+        let mut total_writes = 0_usize;
         for index in start..recipe.steps.len() {
-            let step = recipe.steps[index].clone();
+            let step = &recipe.steps[index];
             let name = step
                 .operation
                 .as_deref()
                 .ok_or_else(|| format!("write step '{}' lost its operation", step.id))?;
-            let rendered = match &step.args {
-                Some(arguments) => render::render_value(arguments, context)?,
-                None => json!({}),
-            };
-            let arguments = operations::canonicalize_input(name, &rendered)?;
             clients::require_grant(&self.agent_pubkey, &[name.to_string()])?;
-            let plaintext = json!({"operation": name, "arguments": arguments}).to_string();
-            let ciphertext =
-                clients::nip44_encrypt(&self.agent_identity, &self.owner_pubkey, &plaintext)?;
-            let event = clients::sign_event(
-                &self.agent_identity,
-                &ciphertext,
-                vec![
-                    vec!["t".into(), "evermore-operation-request".into()],
-                    vec!["p".into(), self.owner_pubkey.clone()],
-                    agent::task_tag(task_id),
-                    agent::step_tag(index as u32),
-                ],
-            )?;
-            let record = clients::submit_request(event)?;
-            let operation_id = record
-                .get("operation_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "operation daemon omitted operation_id".to_string())?
-                .to_string();
-            self.store.update(task_id, |task| {
-                let step = task
-                    .steps
-                    .get_mut(index)
-                    .ok_or_else(|| "task step vanished".to_string())?;
-                step.arguments = Some(arguments);
-                step.operation_id = Some(operation_id);
-                step.status = StepStatus::AwaitingApproval;
-                step.started_at = Some(unix_time());
-                Ok(())
-            })?;
+            match step.kind {
+                StepKind::Write => {
+                    let rendered = match &step.args {
+                        Some(arguments) => render::render_value(arguments, context)?,
+                        None => json!({}),
+                    };
+                    let arguments = operations::canonicalize_input(name, &rendered)?;
+                    total_writes += 1;
+                    plans.push(PlannedWrite::Single {
+                        index,
+                        operation: name.to_string(),
+                        arguments,
+                    });
+                }
+                StepKind::Each => {
+                    let from = step
+                        .from
+                        .as_deref()
+                        .ok_or_else(|| format!("each step '{}' lost its from path", step.id))?;
+                    let source = render::resolve_path(context, from).ok_or_else(|| {
+                        format!("each step '{}' could not resolve '{from}'", step.id)
+                    })?;
+                    let items = source.as_array().ok_or_else(|| {
+                        format!("each step '{}' source '{from}' is not an array", step.id)
+                    })?;
+                    let mut rendered_items = Vec::new();
+                    for item in items {
+                        let mut item_context = context.clone();
+                        item_context["item"] = item.clone();
+                        let rendered = match &step.args {
+                            Some(arguments) => render::render_value(arguments, &item_context)?,
+                            None => json!({}),
+                        };
+                        let arguments = operations::canonicalize_input(name, &rendered)?;
+                        total_writes += 1;
+                        rendered_items.push(arguments);
+                    }
+                    plans.push(PlannedWrite::Each {
+                        index,
+                        operation: name.to_string(),
+                        items: rendered_items,
+                    });
+                }
+                _ => {
+                    return Err(format!(
+                        "recipe step '{}' is not a write or each step",
+                        step.id
+                    ));
+                }
+            }
         }
-        self.store.update(task_id, |task| {
-            task.status = TaskStatus::AwaitingApproval;
-            Ok(())
-        })?;
-        Ok(())
+        if total_writes > recipe.budget.writes as usize {
+            return Err(format!(
+                "write plan needs {total_writes} approvals but the recipe budget allows {}",
+                recipe.budget.writes
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn submit_one(
+        &self,
+        task_id: &str,
+        step_index: u32,
+        operation: &str,
+        arguments: &Value,
+    ) -> Result<String, String> {
+        clients::require_grant(&self.agent_pubkey, &[operation.to_string()])?;
+        let plaintext = json!({"operation": operation, "arguments": arguments}).to_string();
+        let ciphertext =
+            clients::nip44_encrypt(&self.agent_identity, &self.owner_pubkey, &plaintext)?;
+        let event = clients::sign_event(
+            &self.agent_identity,
+            &ciphertext,
+            vec![
+                vec!["t".into(), "evermore-operation-request".into()],
+                vec!["p".into(), self.owner_pubkey.clone()],
+                agent::task_tag(task_id),
+                agent::step_tag(step_index),
+            ],
+        )?;
+        let record = clients::submit_request(event)?;
+        record
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "operation daemon omitted operation_id".to_string())
     }
 
     pub fn resume_waiting_tasks(&self) -> Result<(), String> {

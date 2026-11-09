@@ -64,6 +64,7 @@ Step kinds in v1:
 | `journal` | Read the private operation journal (`pending`, `history`, `summary`). |
 | `render` | Deterministically interpolate earlier step values with `{{step.field}}`. |
 | `write` | Submit one approval-gated operation. Writes must be the final steps so the owner reviews the whole write plan before anything runs. |
+| `each` | Iterate an array from an earlier read step, render one approval-gated write per item, and submit them together. `each` must be the final step and is capped by the write budget. |
 
 ## Usage
 
@@ -108,10 +109,18 @@ The proposal path enforces a 4096-token context budget; task recipes carry the
 same field as `budget.context_tokens` for future model steps.
 
 Built-in recipes include `audit.digest`, `packages.doctor`,
-`settings.concierge`, `workspace.compose`, and `notifications.dnd`. The write
-recipes submit all their writes together, so the panel shows one pending-write
-plan with canonical arguments; "Approve all" signs one owner approval per exact
-operation.
+`packages.updates`, `settings.concierge`, `workspace.compose`, and
+`notifications.dnd`. The write recipes submit all their writes together, so the
+panel shows one pending-write plan with canonical arguments; "Approve all"
+signs one owner approval per exact operation.
+
+`packages.updates` is the update planner: it reads `packages.update_plan`
+(trusted-publisher check plus exact version and SHA-256 resolution), then its
+`each` step submits one `packages.install_pinned` request per available update.
+Resolver failures and revoked releases are reported separately; a package that
+fails or is denied does not stop the others, and the task ends
+`partially_completed` rather than retrying. Zero updates completes without any
+approval request.
 
 The daemon needs a loaded signer identity for its agent pubkey and for signing
 write requests:

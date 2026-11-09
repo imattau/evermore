@@ -32,6 +32,8 @@ pub struct RecipeStep {
     pub template: Option<String>,
     pub view: Option<String>,
     pub limit: Option<usize>,
+    /// Array path for an `each` step, for example `plan.updates`.
+    pub from: Option<String>,
 }
 
 impl Recipe {
@@ -96,7 +98,7 @@ impl Recipe {
     pub fn write_operations(&self) -> Vec<String> {
         self.steps
             .iter()
-            .filter(|step| step.kind == StepKind::Write)
+            .filter(|step| matches!(step.kind, StepKind::Write | StepKind::Each))
             .filter_map(|step| step.operation.clone())
             .collect()
     }
@@ -104,7 +106,7 @@ impl Recipe {
     pub fn operation_names(&self) -> Vec<String> {
         self.steps
             .iter()
-            .filter(|step| matches!(step.kind, StepKind::Read | StepKind::Write))
+            .filter(|step| matches!(step.kind, StepKind::Read | StepKind::Write | StepKind::Each))
             .filter_map(|step| step.operation.clone())
             .collect()
     }
@@ -112,7 +114,7 @@ impl Recipe {
     pub fn write_count(&self) -> u32 {
         self.steps
             .iter()
-            .filter(|step| step.kind == StepKind::Write)
+            .filter(|step| matches!(step.kind, StepKind::Write | StepKind::Each))
             .count() as u32
     }
 }
@@ -149,6 +151,8 @@ struct RawStep {
     view: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    from: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -159,6 +163,7 @@ enum RawStepKind {
     Journal,
     Render,
     Write,
+    Each,
 }
 
 fn default_version() -> u32 {
@@ -190,6 +195,7 @@ pub fn audit_digest() -> Recipe {
                 template: None,
                 view: Some("summary".into()),
                 limit: None,
+                from: None,
             },
             RecipeStep {
                 id: "digest".into(),
@@ -203,6 +209,7 @@ pub fn audit_digest() -> Recipe {
                 ),
                 view: None,
                 limit: None,
+                from: None,
             },
         ],
         source: "builtin".into(),
@@ -217,6 +224,7 @@ pub fn builtins() -> Vec<Recipe> {
         builtin(include_str!("../recipes/workspace.compose.toml")),
         builtin(include_str!("../recipes/notifications.dnd.toml")),
         builtin(include_str!("../recipes/packages.doctor.toml")),
+        builtin(include_str!("../recipes/packages.updates.toml")),
     ]
 }
 
@@ -318,6 +326,7 @@ pub fn parse_recipe(bytes: &[u8], source: &str) -> Result<Recipe, String> {
                     RawStepKind::Journal => StepKind::Journal,
                     RawStepKind::Render => StepKind::Render,
                     RawStepKind::Write => StepKind::Write,
+                    RawStepKind::Each => StepKind::Each,
                 },
                 operation: step.operation,
                 args: step.args.map(toml_to_json),
@@ -325,6 +334,7 @@ pub fn parse_recipe(bytes: &[u8], source: &str) -> Result<Recipe, String> {
                 template: step.template,
                 view: step.view,
                 limit: step.limit,
+                from: step.from,
             })
             .collect(),
         source: source.to_string(),
@@ -388,12 +398,13 @@ fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
     let mut step_ids = BTreeSet::new();
     let mut select_properties: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut seen_write = false;
+    let mut each_index = None;
     for (index, step) in recipe.steps.iter().enumerate() {
         validate_id(&step.id)?;
         if !step_ids.insert(step.id.clone()) {
             return Err(format!("duplicate step id '{}'", step.id));
         }
-        if step.kind == StepKind::Write {
+        if matches!(step.kind, StepKind::Write | StepKind::Each) {
             seen_write = true;
         } else if seen_write {
             return Err(
@@ -511,12 +522,63 @@ fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
                     }
                 }
             }
+            StepKind::Each => {
+                if each_index.is_some() {
+                    return Err("a recipe may contain at most one each step".into());
+                }
+                each_index = Some(index);
+                let name = step
+                    .operation
+                    .as_deref()
+                    .ok_or_else(|| format!("each step '{}' needs an operation", step.id))?;
+                if !declared.contains(name) {
+                    return Err(format!(
+                        "each step '{}' uses operation '{name}' not declared in operations",
+                        step.id
+                    ));
+                }
+                let definition = operations::find(name)
+                    .ok_or_else(|| format!("each step '{}' has an unknown operation", step.id))?;
+                if definition.access != Access::Write
+                    || definition.approval != operations::Approval::Required
+                {
+                    return Err(format!(
+                        "each step '{}' operation '{name}' is not an approval-gated write",
+                        step.id
+                    ));
+                }
+                let from = step
+                    .from
+                    .as_deref()
+                    .ok_or_else(|| format!("each step '{}' needs a from path", step.id))?;
+                if from.contains("{{") || from.contains("}}") {
+                    return Err(format!(
+                        "each step '{}' from must be a plain path, not a template",
+                        step.id
+                    ));
+                }
+                validate_reference(from, index, &recipe.steps, &select_properties, false)?;
+                if let Some(args) = &step.args {
+                    if !args.is_object() {
+                        return Err(format!("each step '{}' args must be a table", step.id));
+                    }
+                }
+            }
             StepKind::Unknown => return Err("recipe uses an unknown step kind".into()),
         }
 
         for reference in step_references(step) {
-            validate_reference(&reference, index, &recipe.steps, &select_properties)?;
+            validate_reference(
+                &reference,
+                index,
+                &recipe.steps,
+                &select_properties,
+                step.kind == StepKind::Each,
+            )?;
         }
+    }
+    if each_index.is_some_and(|index| index + 1 != recipe.steps.len()) {
+        return Err("each must be the final step of a recipe".into());
     }
     let writes = recipe.write_count();
     if writes > 0 && recipe.budget.writes == 0 {
@@ -640,7 +702,11 @@ fn validate_reference(
     current_index: usize,
     steps: &[RecipeStep],
     select_properties: &BTreeMap<String, BTreeSet<String>>,
+    allow_item: bool,
 ) -> Result<(), String> {
+    if allow_item && (reference == "item" || reference.starts_with("item.")) {
+        return Ok(());
+    }
     let mut parts = reference.split('.');
     let step_id = parts
         .next()
@@ -700,7 +766,7 @@ fn validate_reference(
                 ));
             }
         }
-        StepKind::Read | StepKind::Render | StepKind::Write => {}
+        StepKind::Read | StepKind::Render | StepKind::Write | StepKind::Each => {}
         StepKind::Unknown => {}
     }
     Ok(())
@@ -868,6 +934,70 @@ args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
                 .iter()
                 .any(|operation| operation == "packages.list_installed")
         );
+        let updates = recipes
+            .iter()
+            .find(|recipe| recipe.id == "packages.updates")
+            .unwrap();
+        assert_eq!(updates.write_count(), 1);
+        assert!(
+            updates
+                .operations
+                .iter()
+                .any(|operation| operation == "packages.install_pinned")
+        );
+    }
+
+    #[test]
+    fn each_must_be_final_and_reference_an_earlier_step() {
+        let text = r#"
+id = "test.each"
+title = "Each"
+operations = ["packages.update_plan", "packages.install_pinned"]
+budget = { steps = 3, writes = 4, seconds = 10 }
+
+[[step]]
+id = "plan"
+kind = "read"
+operation = "packages.update_plan"
+
+[[step]]
+id = "apply"
+kind = "each"
+from = "plan.updates"
+operation = "packages.install_pinned"
+args = { publisher = "{{item.publisher}}" }
+
+[[step]]
+id = "text"
+kind = "render"
+template = "done"
+"#;
+        let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
+        assert!(
+            error.contains("final steps") || error.contains("final step"),
+            "{error}"
+        );
+
+        let text = r#"
+id = "test.each"
+title = "Each"
+operations = ["packages.update_plan", "packages.install_pinned"]
+budget = { steps = 2, writes = 4, seconds = 10 }
+
+[[step]]
+id = "plan"
+kind = "read"
+operation = "packages.update_plan"
+
+[[step]]
+id = "apply"
+kind = "each"
+from = "later.updates"
+operation = "packages.install_pinned"
+args = { publisher = "{{item.publisher}}" }
+"#;
+        let error = parse_recipe(text.as_bytes(), "local").unwrap_err();
+        assert!(error.contains("earlier step"), "{error}");
     }
 
     #[test]

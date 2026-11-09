@@ -411,6 +411,39 @@ pub mod operations {
                 Redaction::SecretShapedValues,
             ),
             definition(
+                "packages.update_plan",
+                "Check installed packages against the owner's trusted publishers, resolve the exact available version and SHA-256 for each update, and report resolver errors and revocations separately. Read-only; each install still requires its own owner approval.",
+                Access::Read,
+                "packages.read",
+                Approval::None,
+                object_schema(json!({}), &[]),
+                object_schema(
+                    json!({
+                        "count": { "type": "integer", "minimum": 0 },
+                        "updates": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "publisher": { "type": "string" },
+                                    "name": { "type": "string" },
+                                    "current_version": { "type": "string" },
+                                    "available_version": { "type": "string" },
+                                    "sha256": { "type": "string" },
+                                    "reference": { "type": "string" }
+                                },
+                                "required": ["publisher", "name", "current_version", "available_version", "sha256", "reference"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "revoked": { "type": "array", "items": { "type": "object" } },
+                        "errors": { "type": "array", "items": { "type": "object" } }
+                    }),
+                    &["count", "updates", "revoked", "errors"],
+                ),
+                Redaction::None,
+            ),
+            definition(
                 "packages.resolve",
                 "Resolve one package's current trusted release (publisher/name, as reported by packages.list_available or packages.list_installed) to its exact version and SHA-256, immediately before proposing packages.install_pinned -- the catalogue listing alone doesn't carry a hash.",
                 Access::Read,
@@ -2393,6 +2426,7 @@ pub mod agent {
         Journal,
         Render,
         Write,
+        Each,
         #[serde(other)]
         Unknown,
     }

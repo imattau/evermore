@@ -246,7 +246,12 @@ pub fn load_all() -> Vec<Recipe> {
     let mut paths: Vec<_> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("toml" | "ns")
+            )
+        })
         .collect();
     paths.sort();
     for path in paths {
@@ -300,6 +305,13 @@ pub fn load_local(path: &std::path::Path) -> Result<Recipe, String> {
         }
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    if path.extension().and_then(|ext| ext.to_str()) == Some("ns") {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or("recipe file name is not valid UTF-8")?;
+        return crate::nscript_recipe::parse_ns_recipe(&bytes, "local", stem);
+    }
     parse_recipe(&bytes, "local")
 }
 
@@ -348,7 +360,7 @@ fn toml_to_json(value: toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
+pub(crate) fn validate_recipe(recipe: &Recipe) -> Result<(), String> {
     validate_id(&recipe.id)?;
     if recipe.version == 0 {
         return Err("recipe version must be at least 1".into());

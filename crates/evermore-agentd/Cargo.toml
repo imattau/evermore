@@ -11,3 +11,13 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 toml = "0.8.23"
+# Pinned to an exact commit, not a branch or tag: nscript is a pre-1.0,
+# actively-changing sibling project. This is the authoring front end for
+# `.ns` recipes (crates/evermore-agentd/nscript/); evermore-agentd's own
+# loader, grant checks, and execution path are untouched and remain the
+# sole enforcement point -- see crates/evermore-agentd/src/nscript_recipe.rs
+# and crates/evermore-agentd/nscript/README.md.
+nscript-syntax = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea99ffd77d0bea3055d837a4a2289950" }
+nscript-semantics = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea99ffd77d0bea3055d837a4a2289950" }
+nscript-modules = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea99ffd77d0bea3055d837a4a2289950" }
+semver = "1"

@@ -4,6 +4,7 @@
 
 pub mod clients;
 pub mod infer;
+pub mod nscript_recipe;
 pub mod propose;
 pub mod recipe;
 pub mod render;

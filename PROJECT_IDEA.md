@@ -3311,30 +3311,36 @@ never as a runtime inside a privileged process:
    parses and checks a `.ns` file with `nscript`'s own front end and projects
    the checked program straight into the existing `Recipe`/`RecipeStep`
    structs, which its loader validates exactly as a hand-written TOML recipe
-   today. **In progress (2026-11-09):**
+   today. **Done (2026-11-09):**
    [`crates/evermore-agentd/nscript/README.md`](crates/evermore-agentd/nscript/README.md)
-   prototypes the type-checking half — a non-NIP `evermore_packages.nsm`
-   module declaring `packages.list_installed`/`explain_dependencies` as
-   typed operations, and the full built-in `packages.doctor` recipe
-   (including its `choose` form) translated to `nscript` and checked
-   cleanly. The form-input gap this prototype first found is now closed
-   upstream: [`nscript#12`](https://github.com/imattau/nscript/pull/12)
-   adds `input name: Type`, bound into schedule-body scope like a `let`,
-   with `nscript run`/`deploy --input <name>=<value>` supplying it —
-   verified end to end with a scalar-only smoke test. One gap remains, found
-   while exercising the full recipe with `nscript run`: its built-in
-   simulator cannot fake a custom (non-NIP) module's return shape, so field
-   access on a simulated `evermore_packages` result fails; this does not
-   block the real projector, which would never run `nscript`'s simulator or
-   evaluator at all. The other original gap is unchanged: neither
-   `nscript inspect --json` nor `nscript compile --emit ir` exposes the
-   statement-by-statement structure a real projector needs — that means
-   `evermore-agentd` depending on `nscript`'s own library crates
-   (`nscript-syntax`, `nscript-semantics`) and walking the checked AST in
-   Rust, not shelling out to the built binary. Validate the eventual
-   projector by compiling `nscript` versions of Phase 11's existing
-   built-in recipes and diffing behaviour against the hand-written ones
-   under `evermore-agentd`'s existing test harness.
+   and [`crates/evermore-agentd/src/nscript_recipe.rs`](crates/evermore-agentd/src/nscript_recipe.rs).
+   `evermore-agentd` now depends on `nscript`'s own `nscript-syntax`/
+   `nscript-semantics`/`nscript-modules` crates (git-pinned to an exact
+   commit — a pre-1.0, actively-changing sibling project, never a branch or
+   tag), bundles a non-NIP `evermore_packages.nsm` module
+   (`list_installed`/`explain_dependencies`) at compile time via
+   `include_str!`, and projects a checked `.ns` program into `Recipe`/
+   `RecipeStep` by convention: file name → id, leading `// title: ...`/
+   `// description: ...` comments → metadata, `input` declarations → one
+   `select` step, each schedule-body `let name = module.op(args)?` → one
+   `read`/`write` step (kind decided by looking the real operation up in
+   `evermore_common::operations`, never by the script), one trailing
+   `print(...)` → one `render` step. `recipe::load_all`/`load_local` accept
+   `.ns` files alongside `.toml`, through the identical `validate_recipe`.
+   The full built-in `packages.doctor` recipe, authored as
+   `nscript/recipes/packages.doctor.ns`, projects to a `Recipe` that matches
+   the hand-written TOML one field-for-field (asserted by
+   `nscript_recipe::tests::packages_doctor_ns_projects_onto_the_hand_written_toml_recipe`).
+   This closed the form-input gap (upstream
+   [`nscript#12`](https://github.com/imattau/nscript/pull/12), `input name:
+   Type`) and the statement-structure gap (this projector walks the checked
+   AST in Rust, exactly the "depend on `nscript`'s library crates directly"
+   path the earlier prototype called for) that blocked it. `nscript`'s own
+   runtime, `OperationHost`, and simulator never run inside
+   `evermore-agentd` — only its parser and checker. A non-obvious finding
+   along the way: `nscript` string literals do not interpret `\n` as an
+   escape, so a multi-line `render` template needs an actual embedded
+   newline character in the source, not `"\n"` (see the README for detail).
 4. **M12.4 — First real authored recipe.** Only after M12.3's emitted
    `audit.digest` passes every check the hand-written one does: author one
    genuinely new recipe (a notification-triage or settings-concierge variant)

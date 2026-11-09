@@ -1422,6 +1422,10 @@ dependencies = [
  "evermore-common",
  "getrandom 0.2.17",
  "hex",
+ "nscript-modules",
+ "nscript-semantics",
+ "nscript-syntax",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -2847,6 +2851,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a437a9308232ce794b1e7fdf540d38ea37efc3c73492640c13b4c8568b8f108"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "nscript-modules"
+version = "0.2.0"
+source = "git+https://github.com/imattau/nscript?rev=bea18e94ea99ffd77d0bea3055d837a4a2289950#bea18e94ea99ffd77d0bea3055d837a4a2289950"
+dependencies = [
+ "nscript-syntax",
+ "semver",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "nscript-semantics"
+version = "0.2.0"
+source = "git+https://github.com/imattau/nscript?rev=bea18e94ea99ffd77d0bea3055d837a4a2289950#bea18e94ea99ffd77d0bea3055d837a4a2289950"
+dependencies = [
+ "nscript-modules",
+ "nscript-syntax",
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "nscript-syntax"
+version = "0.2.0"
+source = "git+https://github.com/imattau/nscript?rev=bea18e94ea99ffd77d0bea3055d837a4a2289950#bea18e94ea99ffd77d0bea3055d837a4a2289950"
+dependencies = [
+ "unicode-ident",
 ]
 
 [[package]]

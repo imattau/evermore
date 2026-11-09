@@ -1,12 +1,11 @@
-// Prototype for Phase 12 / M12.3: can a real evermore-agentd recipe be
-// authored as nscript source instead of hand-written TOML?
+// title: Package doctor
+// description: Inspect installed packages and explain one package's direct dependencies. Read-only.
 //
-// This mirrors crates/evermore-agentd/recipes/packages.doctor.toml in full,
-// now that `input` (added in this same change set) gives nscript a typed
-// primitive for a form the host collects before running -- the gap
-// nscript/README.md recorded when this prototype first shipped without a
-// `choose` step. See that README for what else this does and does not
-// prove (notably: nothing here is wired into evermore-agentd yet).
+// Mirrors crates/evermore-agentd/recipes/packages.doctor.toml, projected
+// through crates/evermore-agentd/src/nscript_recipe.rs into the same
+// Recipe/RecipeStep structs that file's loader validates and
+// evermore-operationsd executes -- nscript's own runtime never runs here.
+// See crates/evermore-agentd/nscript/README.md.
 use evermore_packages
 
 permissions {
@@ -22,7 +21,8 @@ every 365d {
     let installed = evermore_packages.list_installed()?
     let dependencies = evermore_packages.explain_dependencies(publisher, name)?
     print(
-        "Installed packages: " + text(installed.count) + "\n" +
+        "Installed packages: " + text(installed.count) + "
+" +
         "Selected: " + publisher + "/" + name + " version " + dependencies.version
     )
 }

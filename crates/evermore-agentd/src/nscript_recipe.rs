@@ -51,7 +51,7 @@
 //! [`evermore_module_registry`]) so the daemon never reads them from disk at
 //! run time.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use evermore_common::agent::{StepKind, TaskBudget};
 use evermore_common::operations::{self, Access};
@@ -67,6 +67,7 @@ const EVERMORE_PACKAGES_NSM: &str = include_str!("../nscript/modules/evermore_pa
 const EVERMORE_NOTIFICATIONS_NSM: &str =
     include_str!("../nscript/modules/evermore_notifications/0.1.0.nsm");
 const EVERMORE_AI_NSM: &str = include_str!("../nscript/modules/evermore_ai/0.1.0.nsm");
+const EVERMORE_SWAY_NSM: &str = include_str!("../nscript/modules/evermore_sway/0.1.0.nsm");
 
 /// Every Evermore-specific, non-NIP `nscript` module this crate bundles, as
 /// `(module name, source text)`. The single list both
@@ -78,6 +79,7 @@ const BUNDLED_MODULES: &[(&str, &str)] = &[
     ("evermore_packages", EVERMORE_PACKAGES_NSM),
     ("evermore_notifications", EVERMORE_NOTIFICATIONS_NSM),
     ("evermore_ai", EVERMORE_AI_NSM),
+    ("evermore_sway", EVERMORE_SWAY_NSM),
 ];
 
 /// A registry carrying `nscript`'s standard modules plus Evermore's own,
@@ -167,6 +169,16 @@ fn json_schema_type(type_name: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Module parameters can be lists (for example `sway.launch_app(args)`), even
+/// though recipe `input` declarations cannot; keep the two mappings separate.
+#[cfg(test)]
+fn module_param_json_type(type_name: &str) -> Result<&'static str, String> {
+    match type_name {
+        "List<Text>" => Ok("array"),
+        other => json_schema_type(other),
+    }
+}
+
 /// `module.operation(args)?`'s pieces, or `None` for any other shape of
 /// `let` value. The trailing `?` ([`ExprKind::Propagate`]) is required: a
 /// catalogue operation always declares `Result<T,E>`.
@@ -186,6 +198,50 @@ fn as_operation_call(value: &Expr) -> Option<(&str, &str, &[Expr])> {
     Some((module.as_str(), name.value.as_str(), arguments.as_slice()))
 }
 
+/// Copy the consuming catalogue operation's bounds onto a declared input's
+/// select schema. `input workspace: Int` has no range of its own, but
+/// `sway.switch_workspace` accepts 1..10; without this, the panel form would
+/// default to an invalid 0 and the run would fail.
+fn collect_input_constraints(
+    constraints: &mut BTreeMap<String, Map<String, Value>>,
+    argument: &Expr,
+    inputs: &BTreeSet<String>,
+    definition: &operations::Definition,
+    parameter: &str,
+) {
+    let ExprKind::Identifier(name) = &argument.value else {
+        return;
+    };
+    if !inputs.contains(name) {
+        return;
+    }
+    let Some(property) = definition
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(parameter))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let mut extra = Map::new();
+    for key in [
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "enum",
+    ] {
+        if let Some(value) = property.get(key) {
+            extra.insert(key.to_string(), value.clone());
+        }
+    }
+    if !extra.is_empty() {
+        constraints.entry(name.clone()).or_default().extend(extra);
+    }
+}
+
 /// One operation-call argument, as a `RecipeStep::args` JSON value: a
 /// literal passes through as itself; a bare `input` reference becomes a
 /// `{{choose.<name>}}` placeholder the runner substitutes at execution time;
@@ -200,6 +256,13 @@ fn arg_value(
         ExprKind::Text(text) => Ok(Value::String(text.clone())),
         ExprKind::Integer(value) => Ok(json!(value)),
         ExprKind::Bool(value) => Ok(Value::Bool(*value)),
+        ExprKind::List(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(arg_value(item, inputs, loop_binding)?);
+            }
+            Ok(Value::Array(values))
+        }
         ExprKind::Identifier(name) if inputs.contains(name) => {
             Ok(Value::String(format!("{{{{choose.{name}}}}}")))
         }
@@ -436,6 +499,7 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
     let mut operations = Vec::new();
     let mut seen_render = false;
     let mut seen_for = false;
+    let mut input_constraints: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for item in body {
         match item {
             Item::Let(declaration) => {
@@ -489,6 +553,13 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                     }
                     let mut object = Map::new();
                     for (parameter, argument) in parameters.iter().zip(arguments) {
+                        collect_input_constraints(
+                            &mut input_constraints,
+                            argument,
+                            &input_names,
+                            &definition,
+                            &parameter.name,
+                        );
                         object.insert(
                             parameter.name.clone(),
                             arg_value(argument, &input_names, None)?,
@@ -624,6 +695,13 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                     }
                     let mut object = Map::new();
                     for (parameter, argument) in parameters.iter().zip(arguments) {
+                        collect_input_constraints(
+                            &mut input_constraints,
+                            argument,
+                            &input_names,
+                            &definition,
+                            &parameter.name,
+                        );
                         object.insert(
                             parameter.name.clone(),
                             arg_value(argument, &input_names, Some(&binding.value))?,
@@ -656,6 +734,24 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                      `print(...)`, and one `for` write loop, not this declaration"
                         .into(),
                 );
+            }
+        }
+    }
+
+    if !input_constraints.is_empty() {
+        if let Some(select) = steps.iter_mut().find(|step| step.kind == StepKind::Select)
+            && let Some(properties) = select
+                .schema
+                .as_mut()
+                .and_then(|schema| schema.get_mut("properties"))
+                .and_then(Value::as_object_mut)
+        {
+            for (name, extra) in input_constraints {
+                if let Some(property) = properties.get_mut(&name).and_then(Value::as_object_mut) {
+                    for (key, value) in extra {
+                        property.insert(key, value);
+                    }
+                }
             }
         }
     }
@@ -879,9 +975,10 @@ mod tests {
 
                 let properties = definition.input_schema.get("properties");
                 for parameter in &operation.parameters {
-                    let expected = json_schema_type(&parameter.type_name).unwrap_or_else(|error| {
-                        panic!("`{real_name}.{}`: {error}", parameter.name)
-                    });
+                    let expected =
+                        module_param_json_type(&parameter.type_name).unwrap_or_else(|error| {
+                            panic!("`{real_name}.{}`: {error}", parameter.name)
+                        });
                     let actual = properties
                         .and_then(|properties| properties.get(&parameter.name))
                         .and_then(|property| property.get("type"))

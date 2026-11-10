@@ -1996,13 +1996,15 @@ keeps ids, identities, and public keys under advanced details, explains that
 the grant expires, distinguishes pausing the schedule from revoking authority,
 shows catalogue descriptions for every capability, auto-refreshes definitions
 every 30 seconds, and surfaces unused agent identities for cleanup. A curated
-gallery now ships six starting points (Desktop check, Update watch, Update
-assistant, AI readiness, Package doctor, Notification triage); the observer
-recipes are nscript loaded as built-ins, and the gallery supplies cadence,
-expiry, and a manual/scheduled default. The Update assistant is the first
-nscript `for update in plan.updates` recipe projected to an `each` write,
+gallery now ships seven starting points (Desktop check, Update watch, Update
+assistant, AI readiness, Workspace prep, Package doctor, Notification triage);
+the observer recipes are nscript loaded as built-ins, and the gallery supplies
+cadence, expiry, and a manual/scheduled default. The Update assistant is the
+first nscript `for update in plan.updates` recipe projected to an `each` write,
 submitting one exact `packages.install_pinned` request per update for owner
-approval. The wizard renders the recipe's typed input schema for the
+approval. Workspace prep shows the other end: three approval-gated writes
+whose input bounds are derived from the catalogue operation that consumes
+them. The wizard renders the recipe's typed input schema for the
 input-driven templates, and the assistant's default grant is a curated recipe
 set rather than every built-in recipe. Finished agent tasks publish a local
 `evermore-notify` event so observers surface as desktop notifications. VM

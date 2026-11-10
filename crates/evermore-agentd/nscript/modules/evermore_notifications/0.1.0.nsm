@@ -14,9 +14,14 @@ record DismissResult {
     field dismissed: Bool
 }
 
+record DndResult {
+    field dnd: Bool
+}
+
 error NotificationsError {
     field message: Text
 }
 
 operation list_recent() -> Result<List<Notification>,NotificationsError> effect Storage permission notifications_read
 operation dismiss(notification_id: Text) -> Result<DismissResult,NotificationsError> effect Storage permission notifications_write
+operation set_dnd(enabled: Bool) -> Result<DndResult,NotificationsError> effect Storage permission notifications_write

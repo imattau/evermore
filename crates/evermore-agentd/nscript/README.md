@@ -71,6 +71,11 @@ validation error (or, worse, a wrong one that still validates).
   `packages.install_pinned` write per item. This is the projector's first
   `for` → `each` projection; loop-item fields become `{{item.<field>}}`
   arguments and the write budget is 32.
+- `recipes/workspace.prep.ns` — Workspace prep: three approval-gated writes
+  (workspace switch, app launch with an empty argument list, and DND). Input
+  bounds such as workspace `1..10` are copied from the catalogue operation
+  that consumes each input, so the panel form cannot default to an invalid
+  value.
 - The module signature test now also compares the **return shape** (array vs
   object) against the real catalogue. This is what caught
   `notifications.list_recent` and `packages.list_installed` declaring records
@@ -123,6 +128,12 @@ fixes a convention for each rather than guessing:
   guaranteed to match either). A bare identifier argument must name a
   declared `input`; inside a `for` body, a `<item>.<field>` argument becomes
   `{{item.<field>}}`; anything else is refused.
+- **Input constraints come from the consumer.** When a declared input is
+  passed to an operation parameter, the projector copies that catalogue
+  property's `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, and
+  `enum` into the `select` schema. `input workspace: Int` therefore becomes
+  1..10 because `sway.switch_workspace` says so, and the panel form defaults
+  to 1 instead of an invalid 0.
 - **A write-containing recipe can `render`, but only to preview, never to
   summarise.** This was a real projector bug, now fixed: the projector used
   to always append the `render` step last regardless of where `print(...)`

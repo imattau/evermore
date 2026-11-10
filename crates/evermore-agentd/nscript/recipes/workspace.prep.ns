@@ -1,0 +1,20 @@
+// title: Workspace prep
+// description: Switch to a workspace, launch an app, and set Do Not Disturb. Each write needs approval.
+use evermore_sway
+use evermore_notifications
+
+permissions {
+    sway_write
+    notifications_write
+    clock
+}
+
+input workspace: Int
+input program: Text
+input dnd: Bool
+
+every 1d {
+    let switched = evermore_sway.switch_workspace(workspace)?
+    let launched = evermore_sway.launch_app(program, [])?
+    let dnd_set = evermore_notifications.set_dnd(dnd)?
+}

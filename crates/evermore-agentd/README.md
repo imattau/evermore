@@ -94,6 +94,7 @@ The first set is read-only or manual:
 - **Update watch** (`updates.watch`) — daily trusted-update summary.
 - **AI readiness** (`ai.check`) — weekly local inference/model/index/context check.
 - **Update assistant** (`updates.install`) — weekly trusted-update installs, one approval per package.
+- **Workspace prep** (`workspace.prep`) — manual workspace switch, app launch, and DND.
 - **Package doctor** (`packages.doctor`) — manual dependency explanation.
 - **Notification triage** (`notifications.triage`) — manual dismiss by local ID.
 

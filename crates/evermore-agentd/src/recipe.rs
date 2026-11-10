@@ -242,6 +242,10 @@ pub fn builtins() -> Vec<Recipe> {
             include_str!("../nscript/recipes/updates.install.ns"),
             "updates.install",
         ),
+        builtin_ns(
+            include_str!("../nscript/recipes/workspace.prep.ns"),
+            "workspace.prep",
+        ),
     ]
 }
 
@@ -933,6 +937,30 @@ args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
         validate_recipe(&recipe).unwrap();
         assert_eq!(recipe.source, "builtin");
         assert!(!recipe.has_catalogue_reads());
+    }
+
+    #[test]
+    fn workspace_prep_projects_and_bounds_inputs() {
+        let recipes = builtins();
+        let recipe = recipes
+            .iter()
+            .find(|recipe| recipe.id == "workspace.prep")
+            .unwrap();
+        assert_eq!(recipe.steps.len(), 4);
+        let schema = recipe.steps[0].schema.as_ref().unwrap();
+        assert_eq!(schema["properties"]["workspace"]["minimum"], 1);
+        assert_eq!(schema["properties"]["workspace"]["maximum"], 10);
+        assert_eq!(schema["properties"]["program"]["maxLength"], 128);
+        assert_eq!(schema["properties"]["dnd"]["type"], "boolean");
+        assert_eq!(recipe.budget.writes, 3);
+        assert_eq!(
+            recipe.steps[1].args.as_ref().unwrap()["workspace_number"],
+            "{{choose.workspace}}"
+        );
+        assert_eq!(
+            recipe.steps[2].args.as_ref().unwrap()["args"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

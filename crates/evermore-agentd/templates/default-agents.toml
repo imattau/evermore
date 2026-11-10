@@ -38,6 +38,17 @@ badge = "Asks before changing"
 requires = ["npack"]
 
 [[template]]
+id = "workspace-prep"
+recipe = "workspace.prep"
+name = "Workspace prep"
+summary = "Switch to a workspace, launch an app, and set Do Not Disturb. Each write asks first."
+category = "Desktop"
+cadence_seconds = 604800
+expiry_days = 90
+badge = "Asks before changing"
+manual = true
+
+[[template]]
 id = "ai-readiness"
 recipe = "ai.check"
 name = "AI readiness"

@@ -1,0 +1,28 @@
+module evermore_sway @ 0.1.0
+language ">=0.1.0 <0.2.0"
+reference "https://github.com/imattau/evermore/blob/main/crates/evermore-common/src/lib.rs"
+
+record SwitchResult {
+    field operation_id: Text
+}
+
+record LaunchResult {
+    field program: Text
+    field started: Bool
+    field pid: Integer
+}
+
+record Window {
+    field con_id: Integer
+    field title: Text
+    field app_id: Text
+    field workspace: Text
+}
+
+error SwayError {
+    field message: Text
+}
+
+operation switch_workspace(workspace_number: Int) -> Result<SwitchResult,SwayError> effect Storage permission sway_write
+operation launch_app(program: Text, args: List<Text>) -> Result<LaunchResult,SwayError> effect Storage permission sway_write
+operation list_windows() -> Result<List<Window>,SwayError> effect Storage permission sway_read

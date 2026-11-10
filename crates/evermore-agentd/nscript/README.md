@@ -66,6 +66,11 @@ validation error (or, worse, a wrong one that still validates).
   read-only. They are loaded as built-ins and paired with
   `templates/default-agents.toml`, which supplies the gallery name, summary,
   cadence, expiry, and manual/scheduled default.
+- `recipes/updates.install.ns` — the Update assistant: read the trusted
+  update plan, then `for update in plan.updates` submit one exact
+  `packages.install_pinned` write per item. This is the projector's first
+  `for` → `each` projection; loop-item fields become `{{item.<field>}}`
+  arguments and the write budget is 32.
 - The module signature test now also compares the **return shape** (array vs
   object) against the real catalogue. This is what caught
   `notifications.list_recent` and `packages.list_installed` declaring records
@@ -94,23 +99,30 @@ fixes a convention for each rather than guessing:
   step, id `choose`); exactly one `every`/`at` block whose body is zero or
   more `let name = module.op(args)?` statements (each → one `read` or
   `write` step, step id = the `let` name, kind decided by looking the real
-  operation up in `evermore_common::operations` — never by the script) plus
-  at most one `print(...)` (→ one `render` step, id `report`, built from the
-  `+`-concatenated literal/`text(...)`/field-reference parts), **projected
-  at its own position in the schedule body** rather than always last. Since
-  `crate::recipe::validate_recipe` requires `write`/`each` to be a recipe's
-  own final step, a `print(...)` written before a later write previews
-  already-known values (M12.4's `notifications.triage.ns` does this); one
-  written after a write is refused the same way a hand-written TOML
-  recipe's would be — `render` cannot follow a write either way, so a
+  operation up in `evermore_common::operations` — never by the script), at
+  most one `print(...)` (→ one `render` step, id `report`, built from the
+  `+`-concatenated literal/`text(...)`/field-reference parts), and at most
+  one final `for <item> in <read result field> { let write(...)? }` (→ one
+  `each` step whose `from` is that field path and whose step id is the inner
+  `let` name). A `for` body must contain exactly one approval-gated write;
+  loop-item fields become `{{item.<field>}}` arguments, and the projected
+  budget allows up to 32 approvals and 180 seconds. The `print(...)` is
+  **projected at its own position in the schedule body** rather than always
+  last. Since `crate::recipe::validate_recipe` requires `write`/`each` to be
+  a recipe's own final step, a `print(...)` written before a later write
+  previews already-known values (M12.4's `notifications.triage.ns` does
+  this); one written after a write is refused the same way a hand-written
+  TOML recipe's would be — `render` cannot follow a write either way, so a
   write-containing recipe's only choice is to put its `print(...)` earlier
-  or omit it. Anything else in the schedule body — an `if`, a `for`, a
-  second `print`, a second schedule — is refused with a specific message.
+  or omit it. Anything else in the schedule body — an `if`, a second
+  `print`, a second `for`, a second schedule — is refused with a specific
+  message.
 - **Operation arguments are positional**, matching the bundled `.nsm`
   module's own declared parameter order (read from the resolved module
   graph, not the catalogue's `input_schema`, whose JSON key order is not
   guaranteed to match either). A bare identifier argument must name a
-  declared `input`; anything else is refused.
+  declared `input`; inside a `for` body, a `<item>.<field>` argument becomes
+  `{{item.<field>}}`; anything else is refused.
 - **A write-containing recipe can `render`, but only to preview, never to
   summarise.** This was a real projector bug, now fixed: the projector used
   to always append the `render` step last regardless of where `print(...)`

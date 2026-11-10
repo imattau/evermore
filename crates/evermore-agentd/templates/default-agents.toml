@@ -27,6 +27,17 @@ badge = "Read-only"
 requires = ["npack"]
 
 [[template]]
+id = "update-assistant"
+recipe = "updates.install"
+name = "Update assistant"
+summary = "Resolve trusted updates and ask before installing each exact package version."
+category = "Packages"
+cadence_seconds = 604800
+expiry_days = 90
+badge = "Asks before changing"
+requires = ["npack"]
+
+[[template]]
 id = "ai-readiness"
 recipe = "ai.check"
 name = "AI readiness"

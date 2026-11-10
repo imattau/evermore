@@ -1,0 +1,21 @@
+// title: Update assistant
+// description: Resolve trusted package updates and submit one owner-approved install per package.
+use evermore_packages
+
+permissions {
+    packages_read
+    packages_write
+    clock
+}
+
+every 7d {
+    let plan = evermore_packages.update_plan()?
+    for update in plan.updates {
+        let installed = evermore_packages.install_pinned(
+            update.publisher,
+            update.name,
+            update.available_version,
+            update.sha256
+        )?
+    }
+}

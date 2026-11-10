@@ -188,9 +188,14 @@ fn as_operation_call(value: &Expr) -> Option<(&str, &str, &[Expr])> {
 
 /// One operation-call argument, as a `RecipeStep::args` JSON value: a
 /// literal passes through as itself; a bare `input` reference becomes a
-/// `{{choose.<name>}}` placeholder the runner substitutes at execution time,
-/// matching how a hand-written TOML recipe references an earlier step.
-fn arg_value(expr: &Expr, inputs: &BTreeSet<String>) -> Result<Value, String> {
+/// `{{choose.<name>}}` placeholder the runner substitutes at execution time;
+/// and inside a `for <binding> in ...` loop, a `<binding>.<field>` reference
+/// becomes `{{item.<field>}}`, matching the runner's `each` step.
+fn arg_value(
+    expr: &Expr,
+    inputs: &BTreeSet<String>,
+    loop_binding: Option<&str>,
+) -> Result<Value, String> {
     match &expr.value {
         ExprKind::Text(text) => Ok(Value::String(text.clone())),
         ExprKind::Integer(value) => Ok(json!(value)),
@@ -202,7 +207,35 @@ fn arg_value(expr: &Expr, inputs: &BTreeSet<String>) -> Result<Value, String> {
             "operation argument `{name}` is not a declared input, and this projector does not \
              resolve any other kind of value reference as an argument"
         )),
-        _ => Err("operation arguments must be a literal or a bare input name".into()),
+        ExprKind::Member { .. } => {
+            let Some(binding) = loop_binding else {
+                return Err(
+                    "operation arguments may reference a loop item only inside a `for` body".into(),
+                );
+            };
+            let path = expression_path(expr).ok_or_else(|| {
+                "a loop-item argument must be a plain field path such as `update.name`".to_string()
+            })?;
+            let suffix = path.strip_prefix(&format!("{binding}.")).ok_or_else(|| {
+                format!("loop-item argument `{path}` must start with `{binding}.`")
+            })?;
+            Ok(Value::String(format!("{{{{item.{suffix}}}}}")))
+        }
+        _ => Err(
+            "operation arguments must be a literal, a bare input name, or a loop-item field".into(),
+        ),
+    }
+}
+
+/// The dotted path an expression names (`plan.updates`, `update.publisher`,
+/// or a bare identifier). Used for `for` sources and loop-item arguments.
+fn expression_path(expr: &Expr) -> Option<String> {
+    match &expr.value {
+        ExprKind::Identifier(name) => Some(name.clone()),
+        ExprKind::Member { value, name } => {
+            Some(format!("{}.{}", expression_path(value)?, name.value))
+        }
+        _ => None,
     }
 }
 
@@ -402,6 +435,7 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
 
     let mut operations = Vec::new();
     let mut seen_render = false;
+    let mut seen_for = false;
     for item in body {
         match item {
             Item::Let(declaration) => {
@@ -455,7 +489,10 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                     }
                     let mut object = Map::new();
                     for (parameter, argument) in parameters.iter().zip(arguments) {
-                        object.insert(parameter.name.clone(), arg_value(argument, &input_names)?);
+                        object.insert(
+                            parameter.name.clone(),
+                            arg_value(argument, &input_names, None)?,
+                        );
                     }
                     Some(Value::Object(object))
                 };
@@ -472,66 +509,166 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                     from: None,
                 });
             }
-            Item::Statement(statement) => {
-                let StatementKind::Expression(expr) = &statement.value else {
+            Item::Statement(statement) => match &statement.value {
+                StatementKind::Expression(expr) => {
+                    if !is_print_call(expr) {
+                        return Err(
+                            "a recipe's schedule body supports only `let <op>?` statements, one \
+                             `print(...)`, and one `for` write loop, not this expression"
+                                .into(),
+                        );
+                    }
+                    if seen_render {
+                        return Err("a recipe may have only one `print(...)` statement".into());
+                    }
+                    seen_render = true;
+                    let ExprKind::Call { arguments, .. } = &expr.value else {
+                        unreachable!("is_print_call checked this");
+                    };
+                    let [argument] = arguments.as_slice() else {
+                        return Err("`print(...)` in a recipe takes exactly one argument".into());
+                    };
+                    let template = render_template(argument, &input_names)?;
+                    // Pushed at its own position in the schedule body, not
+                    // deferred to the end: a `print(...)` written before a
+                    // later write call previews already-known values ahead of
+                    // it, which `validate_recipe`'s "writes must be final"
+                    // rule allows (see nscript/README.md). A `print(...)`
+                    // written after a write is still refused by that same
+                    // rule, exactly as a hand-written TOML recipe's `render`
+                    // step would be.
+                    steps.push(RecipeStep {
+                        id: "report".to_owned(),
+                        kind: StepKind::Render,
+                        operation: None,
+                        args: None,
+                        schema: None,
+                        template: Some(template),
+                        view: None,
+                        limit: None,
+                        from: None,
+                    });
+                }
+                StatementKind::For {
+                    binding,
+                    value,
+                    body,
+                } => {
+                    if seen_for {
+                        return Err(
+                            "a recipe may declare only one `for` write loop; use one `each` step"
+                                .into(),
+                        );
+                    }
+                    seen_for = true;
+                    let source_path = expression_path(value).ok_or_else(|| {
+                        "a for loop's source must be a field path such as `plan.updates`"
+                            .to_string()
+                    })?;
+                    let base = source_path.split('.').next().unwrap_or("");
+                    if !steps
+                        .iter()
+                        .any(|step| step.id == base && matches!(step.kind, StepKind::Read))
+                    {
+                        return Err(format!(
+                            "for loop source `{source_path}` must start with an earlier read step"
+                        ));
+                    }
+                    let [Item::Let(declaration)] = body.as_slice() else {
+                        return Err(
+                            "a for body must contain exactly one `let <write operation>?` statement"
+                                .into(),
+                        );
+                    };
+                    let (module, operation, arguments) = as_operation_call(&declaration.value)
+                        .ok_or(
+                            "a for body's `let` must call one catalogue write operation, ending \
+                             in `?`",
+                        )?;
+                    let real_name = catalogue_operation(module, operation).ok_or_else(|| {
+                        format!(
+                            "module `{module}` does not follow the `evermore_<prefix>` naming \
+                             convention this projector requires"
+                        )
+                    })?;
+                    let definition = operations::find(&real_name).ok_or_else(|| {
+                        format!("`{real_name}` is not a known catalogue operation")
+                    })?;
+                    if definition.access != Access::Write {
+                        return Err(format!(
+                            "for loop operation `{real_name}` must be an approval-gated write"
+                        ));
+                    }
+                    let parameters = &graph
+                        .modules
+                        .get(module)
+                        .and_then(|registered| {
+                            registered
+                                .descriptor
+                                .operations
+                                .iter()
+                                .find(|op| op.name == operation)
+                        })
+                        .ok_or_else(|| {
+                            format!(
+                                "module `{module}` has no resolved descriptor for `{operation}`"
+                            )
+                        })?
+                        .parameters;
+                    if parameters.len() != arguments.len() {
+                        return Err(format!(
+                            "`{module}.{operation}` takes {} argument(s), found {}",
+                            parameters.len(),
+                            arguments.len()
+                        ));
+                    }
+                    let mut object = Map::new();
+                    for (parameter, argument) in parameters.iter().zip(arguments) {
+                        object.insert(
+                            parameter.name.clone(),
+                            arg_value(argument, &input_names, Some(&binding.value))?,
+                        );
+                    }
+                    operations.push(real_name.clone());
+                    steps.push(RecipeStep {
+                        id: declaration.name.value.clone(),
+                        kind: StepKind::Each,
+                        operation: Some(real_name),
+                        args: Some(Value::Object(object)),
+                        schema: None,
+                        template: None,
+                        view: None,
+                        limit: None,
+                        from: Some(source_path),
+                    });
+                }
+                _ => {
                     return Err(
-                        "a recipe's schedule body supports only `let <op>?` statements and one \
-                         `print(...)`, not this statement shape"
-                            .into(),
-                    );
-                };
-                if !is_print_call(expr) {
-                    return Err(
-                        "a recipe's schedule body supports only `let <op>?` statements and one \
-                         `print(...)`, not this expression"
+                        "a recipe's schedule body supports only `let <op>?` statements, one \
+                         `print(...)`, and one `for` write loop, not this declaration"
                             .into(),
                     );
                 }
-                if seen_render {
-                    return Err("a recipe may have only one `print(...)` statement".into());
-                }
-                seen_render = true;
-                let ExprKind::Call { arguments, .. } = &expr.value else {
-                    unreachable!("is_print_call checked this");
-                };
-                let [argument] = arguments.as_slice() else {
-                    return Err("`print(...)` in a recipe takes exactly one argument".into());
-                };
-                let template = render_template(argument, &input_names)?;
-                // Pushed at its own position in the schedule body, not
-                // deferred to the end: a `print(...)` written before a
-                // later write call previews already-known values ahead of
-                // it, which `validate_recipe`'s "writes must be final"
-                // rule allows (see nscript/README.md). A `print(...)`
-                // written after a write is still refused by that same
-                // rule, exactly as a hand-written TOML recipe's `render`
-                // step would be.
-                steps.push(RecipeStep {
-                    id: "report".to_owned(),
-                    kind: StepKind::Render,
-                    operation: None,
-                    args: None,
-                    schema: None,
-                    template: Some(template),
-                    view: None,
-                    limit: None,
-                    from: None,
-                });
-            }
+            },
             _ => {
                 return Err(
-                    "a recipe's schedule body supports only `let <op>?` statements and one \
-                     `print(...)`, not this declaration"
+                    "a recipe's schedule body supports only `let <op>?` statements, one \
+                     `print(...)`, and one `for` write loop, not this declaration"
                         .into(),
                 );
             }
         }
     }
 
-    let writes = steps
-        .iter()
-        .filter(|step| matches!(step.kind, StepKind::Write | StepKind::Each))
-        .count() as u32;
+    let has_each = steps.iter().any(|step| matches!(step.kind, StepKind::Each));
+    let writes = if has_each {
+        32
+    } else {
+        steps
+            .iter()
+            .filter(|step| matches!(step.kind, StepKind::Write | StepKind::Each))
+            .count() as u32
+    };
     let recipe = Recipe {
         id: recipe_id.to_owned(),
         version: 1,
@@ -541,7 +678,7 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
         budget: TaskBudget {
             steps: steps.len() as u32,
             writes,
-            seconds: 45,
+            seconds: if has_each { 180 } else { 45 },
             context_tokens: 0,
         },
         steps,

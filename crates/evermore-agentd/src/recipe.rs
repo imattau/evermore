@@ -238,6 +238,10 @@ pub fn builtins() -> Vec<Recipe> {
             include_str!("../nscript/recipes/notifications.triage.ns"),
             "notifications.triage",
         ),
+        builtin_ns(
+            include_str!("../nscript/recipes/updates.install.ns"),
+            "updates.install",
+        ),
     ]
 }
 
@@ -929,6 +933,31 @@ args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
         validate_recipe(&recipe).unwrap();
         assert_eq!(recipe.source, "builtin");
         assert!(!recipe.has_catalogue_reads());
+    }
+
+    #[test]
+    fn update_assistant_projects_an_each_step() {
+        let recipes = builtins();
+        let recipe = recipes
+            .iter()
+            .find(|recipe| recipe.id == "updates.install")
+            .unwrap();
+        assert_eq!(recipe.steps.len(), 2);
+        assert!(matches!(recipe.steps[0].kind, StepKind::Read));
+        assert!(matches!(recipe.steps[1].kind, StepKind::Each));
+        let each = &recipe.steps[1];
+        assert_eq!(each.from.as_deref(), Some("plan.updates"));
+        assert_eq!(each.operation.as_deref(), Some("packages.install_pinned"));
+        assert_eq!(
+            each.args.as_ref().unwrap()["publisher"],
+            "{{item.publisher}}"
+        );
+        assert_eq!(
+            each.args.as_ref().unwrap()["version"],
+            "{{item.available_version}}"
+        );
+        assert_eq!(recipe.budget.writes, 32);
+        assert_eq!(recipe.budget.seconds, 180);
     }
 
     #[test]

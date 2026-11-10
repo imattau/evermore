@@ -1160,6 +1160,27 @@ impl PanelApp {
             .cloned()
     }
 
+    fn assistant_has_active_grant(&self) -> bool {
+        let Some(owner) = self.owner_identity() else {
+            return false;
+        };
+        let assistant_name = format!("{}-assistant", owner.name);
+        let Some(assistant) = self
+            .identities
+            .iter()
+            .find(|identity| identity.name == assistant_name)
+        else {
+            return false;
+        };
+        let now = now_unix();
+        self.operation_grants.iter().any(|grant| {
+            grant.agent_pubkey == assistant.pubkey_hex
+                && grant.grant_published
+                && !grant.revoked
+                && now < grant.expires_at
+        })
+    }
+
     fn create_agent(&mut self) {
         self.agent_status = None;
         self.agent_error = None;
@@ -3154,6 +3175,21 @@ impl eframe::App for PanelApp {
                 ui.heading("AI");
                 ui.weak("Local inference, grounded in files and operations you choose.");
                 ui.add_space(12.0);
+                if !self.assistant_has_active_grant() {
+                    open_section(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("The assistant needs a grant").strong(),
+                        );
+                        ui.weak(
+                            "Enable the built-in Evermore Assistant on the Agents screen. \
+                             It can propose operations; every write still asks you.",
+                        );
+                        if ui.button("Open Agents").clicked() {
+                            self.tab = Tab::Agents;
+                        }
+                    });
+                    ui.add_space(12.0);
+                }
                 ui.horizontal(|ui| {
                     let mut selected = self.ai_session_id.clone();
                     egui::ComboBox::from_label("Session")

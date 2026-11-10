@@ -70,6 +70,19 @@ pub fn create_agent_identity(slug: &str) -> Result<CreatedAgentIdentity, String>
     }
 }
 
+pub fn delete_agent_identity(slug: &str) -> Result<(), String> {
+    let mut stream = connect()?;
+    match request(
+        &mut stream,
+        Request::DeleteAgentIdentity {
+            slug: slug.to_string(),
+        },
+    )? {
+        Response::Ok { .. } => Ok(()),
+        Response::Err { message } => Err(message),
+    }
+}
+
 pub fn sign_event(
     identity: &str,
     kind: u16,

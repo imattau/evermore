@@ -401,6 +401,7 @@ struct PanelApp {
     agent_recipe: String,
     agent_interval_seconds: u64,
     agent_expiry_days: u64,
+    agent_delete_confirm: Option<String>,
     approval_identity: String,
     approval_review_id: Option<String>,
     approval_error: Option<String>,
@@ -1250,51 +1251,13 @@ impl PanelApp {
             updated_at: now,
         };
 
-        let plaintext = match serde_json::to_string(&definition) {
-            Ok(plaintext) => plaintext,
-            Err(error) => {
-                self.agent_error = Some(format!("Could not encode the agent definition: {error}"));
-                return;
-            }
-        };
-        let ciphertext =
-            match signer_client::nip44_encrypt(&owner.name, &owner.pubkey_hex, plaintext) {
-                Ok(ciphertext) => ciphertext,
-                Err(error) => {
-                    self.agent_error =
-                        Some(format!("Could not encrypt the agent definition: {error}"));
-                    return;
-                }
-            };
-        let d_tag = match evermore_common::agent::agent_d_tag(&slug) {
-            Ok(tag) => tag,
-            Err(error) => {
-                self.agent_error = Some(error);
-                return;
-            }
-        };
-        let event: nostr::event::Event = match signer_client::sign_event(
-            &owner.name,
-            evermore_common::agent::KIND_AGENT_DEFINITION,
-            ciphertext,
-            vec![vec!["d".to_string(), d_tag]],
-        )
-        .and_then(|value| {
-            serde_json::from_value(value)
-                .map_err(|error| format!("invalid signed definition: {error}"))
-        }) {
-            Ok(event) => event,
-            Err(error) => {
-                self.agent_error = Some(format!("Could not sign the agent definition: {error}"));
-                return;
-            }
-        };
-        if let Err(error) = relay_client::publish(relay_client::DEFAULT_RELAY_URL, &event) {
-            self.agent_error = Some(format!("Could not publish the agent definition: {error}"));
+        if let Err(error) = self.publish_agent_definition(&owner, &definition) {
+            self.agent_error = Some(error);
             return;
         }
 
-        if let Err(error) = self.publish_agents_membership(&owner, &created.pubkey_hex) {
+        if let Err(error) = self.publish_agents_membership(&owner, Some(&created.pubkey_hex), None)
+        {
             self.agent_error = Some(error);
             return;
         }
@@ -1315,10 +1278,34 @@ impl PanelApp {
         }
     }
 
+    fn publish_agent_definition(
+        &self,
+        owner: &signer_client::Identity,
+        definition: &evermore_common::agent::AgentDefinition,
+    ) -> Result<(), String> {
+        let plaintext = serde_json::to_string(definition)
+            .map_err(|error| format!("Could not encode the agent definition: {error}"))?;
+        let ciphertext = signer_client::nip44_encrypt(&owner.name, &owner.pubkey_hex, plaintext)
+            .map_err(|error| format!("Could not encrypt the agent definition: {error}"))?;
+        let d_tag = evermore_common::agent::agent_d_tag(&definition.id)?;
+        let event: nostr::event::Event = signer_client::sign_event(
+            &owner.name,
+            evermore_common::agent::KIND_AGENT_DEFINITION,
+            ciphertext,
+            vec![vec!["d".to_string(), d_tag]],
+        )
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("invalid signed definition: {error}"))
+        })?;
+        relay_client::publish(relay_client::DEFAULT_RELAY_URL, &event)
+    }
+
     fn publish_agents_membership(
         &self,
         owner: &signer_client::Identity,
-        agent_pubkey: &str,
+        add: Option<&str>,
+        remove: Option<&str>,
     ) -> Result<(), String> {
         let filter = serde_json::json!({
             "kinds": [evermore_common::agent::KIND_AGENTS_LIST],
@@ -1339,7 +1326,12 @@ impl PanelApp {
                     .collect()
             })
             .unwrap_or_default();
-        pubkeys.insert(agent_pubkey.to_string());
+        if let Some(add) = add {
+            pubkeys.insert(add.to_string());
+        }
+        if let Some(remove) = remove {
+            pubkeys.remove(remove);
+        }
         let mut tags = vec![vec![
             "d".to_string(),
             evermore_common::agent::AGENTS_LIST_D_TAG.to_string(),
@@ -1358,6 +1350,47 @@ impl PanelApp {
                 .map_err(|error| format!("invalid signed agent list: {error}"))
         })?;
         relay_client::publish(relay_client::DEFAULT_RELAY_URL, &event)
+    }
+
+    fn delete_agent_definition(
+        &self,
+        owner: &signer_client::Identity,
+        slug: &str,
+    ) -> Result<(), String> {
+        let d_tag = evermore_common::agent::agent_d_tag(slug)?;
+        let filter = serde_json::json!({
+            "kinds": [evermore_common::agent::KIND_AGENT_DEFINITION],
+            "authors": [owner.pubkey_hex],
+            "#d": [d_tag],
+        });
+        let events = relay_client::query(relay_client::DEFAULT_RELAY_URL, filter)?;
+        let Some(event) = events
+            .into_iter()
+            .filter(|event| event.pubkey.to_hex() == owner.pubkey_hex && event.verify().is_ok())
+            .max_by_key(|event| event.created_at.as_secs())
+        else {
+            return Ok(());
+        };
+        let coordinate = format!(
+            "{}:{}:{}",
+            evermore_common::agent::KIND_AGENT_DEFINITION,
+            owner.pubkey_hex,
+            d_tag
+        );
+        let deletion: nostr::event::Event = signer_client::sign_event(
+            &owner.name,
+            5,
+            String::new(),
+            vec![
+                vec!["e".to_string(), event.id.to_hex()],
+                vec!["a".to_string(), coordinate],
+            ],
+        )
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("invalid signed deletion: {error}"))
+        })?;
+        relay_client::publish(relay_client::DEFAULT_RELAY_URL, &deletion)
     }
 
     fn agents_ui(&mut self, ui: &mut egui::Ui) {
@@ -1385,6 +1418,9 @@ impl PanelApp {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         ui.add_space(8.0);
+
+        self.assistant_card_ui(ui);
+        ui.add_space(12.0);
 
         if let Some(error) = self.agents_error.clone() {
             let mut retry = false;
@@ -1416,6 +1452,111 @@ impl PanelApp {
             open_section(ui, |ui| self.agent_card_ui(ui, &agent));
             ui.add_space(8.0);
         }
+    }
+
+    fn assistant_card_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(owner) = self.owner_identity() else {
+            return;
+        };
+        let assistant_name = format!("{}-assistant", owner.name);
+        let assistant = self
+            .identities
+            .iter()
+            .find(|identity| identity.name == assistant_name)
+            .cloned();
+
+        open_section(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Evermore Assistant")
+                        .strong()
+                        .size(16.0),
+                );
+                ui.weak("built-in · interactive");
+            });
+            let Some(assistant) = assistant else {
+                ui.weak(
+                    "The assistant identity isn't loaded yet. The signer provisions it at login.",
+                );
+                return;
+            };
+            let now = now_unix();
+            let grant = self
+                .operation_grants
+                .iter()
+                .find(|grant| grant.agent_pubkey == assistant.pubkey_hex && !grant.revoked)
+                .cloned();
+            if let Some(grant) = &grant
+                && grant.grant_published
+                && now < grant.expires_at
+            {
+                ui.weak(format!(
+                    "Ready · {} operation(s) · grant expires {}",
+                    grant.allowed_operations.len(),
+                    relative_future(grant.expires_at)
+                ));
+                ui.weak("Writes still stop at the approval window.");
+                return;
+            }
+            if let Some(grant) = &grant
+                && !grant.grant_published
+            {
+                ui.weak("The assistant grant is publishing to the relay…");
+                return;
+            }
+
+            ui.weak(
+                "Enable the assistant once to let it propose catalogue operations. \
+                 Every write still needs your exact approval.",
+            );
+            let operations = self.assistant_operations();
+            ui.weak(format!(
+                "Default capabilities: {} operation(s) from the built-in recipes.",
+                operations.len()
+            ));
+            ui.collapsing("Show operations", |ui| {
+                for name in &operations {
+                    ui.monospace(name);
+                }
+            });
+            if ui
+                .add_enabled(
+                    !operations.is_empty(),
+                    egui::Button::new("Enable assistant"),
+                )
+                .clicked()
+            {
+                match operations_client::submit_grant(
+                    &owner.name,
+                    &assistant.pubkey_hex,
+                    &operations,
+                    365 * 24 * 60 * 60,
+                ) {
+                    Ok(_) => {
+                        self.agent_status = Some(
+                            "Assistant enabled. It can now propose operations; writes still need approval."
+                                .into(),
+                        );
+                        self.agent_error = None;
+                        self.refresh_operations();
+                    }
+                    Err(error) => self.agent_error = Some(error),
+                }
+            }
+            if operations.is_empty() {
+                ui.weak("Waiting for the built-in recipes from the agent runner.");
+            }
+        });
+    }
+
+    fn assistant_operations(&self) -> Vec<String> {
+        let mut operations = std::collections::BTreeSet::new();
+        for recipe in &self.agent_recipes {
+            if recipe.source == "builtin" {
+                operations.extend(recipe.operations.iter().cloned());
+            }
+        }
+        operations.into_iter().collect()
     }
 
     fn agent_card_ui(&mut self, ui: &mut egui::Ui, agent: &evermore_common::agent::AgentView) {
@@ -1495,26 +1636,150 @@ impl PanelApp {
             }
         }
 
-        ui.add_space(4.0);
-        if let Some(grant) = &grant
-            && grant.grant_published
-            && !grant.grant_id.is_empty()
-        {
-            if ui.button("Revoke grant").clicked() {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let toggle_label = if definition.enabled {
+                "Pause"
+            } else {
+                "Resume"
+            };
+            if ui.button(toggle_label).clicked() {
                 if let Some(owner) = self.owner_identity() {
-                    match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
-                        Ok(_) => {
-                            self.agent_status =
-                                Some("Grant revoked. The agent will stop at its next run.".into());
+                    let mut updated = definition.clone();
+                    updated.enabled = !updated.enabled;
+                    updated.updated_at = now_unix();
+                    match self.publish_agent_definition(&owner, &updated) {
+                        Ok(()) => {
+                            self.agent_status = Some(format!(
+                                "Agent '{}' {}.",
+                                definition.id,
+                                if updated.enabled { "resumed" } else { "paused" }
+                            ));
                             self.agent_error = None;
-                            self.refresh_operations();
-                            self.refresh_agents();
+                            self.reload_agents();
                         }
                         Err(error) => self.agent_error = Some(error),
                     }
                 } else {
                     self.agent_error = Some("The configured owner identity is not loaded.".into());
                 }
+            }
+            if let Some(grant) = &grant {
+                if grant.grant_published && !grant.grant_id.is_empty() {
+                    if ui.button("Revoke grant").clicked() {
+                        if let Some(owner) = self.owner_identity() {
+                            match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
+                                Ok(_) => {
+                                    self.agent_status = Some(
+                                        "Grant revoked. The agent will stop at its next run."
+                                            .into(),
+                                    );
+                                    self.agent_error = None;
+                                    self.refresh_operations();
+                                    self.refresh_agents();
+                                }
+                                Err(error) => self.agent_error = Some(error),
+                            }
+                        } else {
+                            self.agent_error =
+                                Some("The configured owner identity is not loaded.".into());
+                        }
+                    }
+                }
+                if !grant.allowed_operations.is_empty()
+                    && ui.button("Renew grant (90 days)").clicked()
+                {
+                    if let Some(owner) = self.owner_identity() {
+                        match operations_client::submit_grant(
+                            &owner.name,
+                            &definition.agent_pubkey,
+                            &grant.allowed_operations,
+                            90 * 24 * 60 * 60,
+                        ) {
+                            Ok(_) => {
+                                self.agent_status =
+                                    Some(format!("Grant renewed for agent '{}'.", definition.id));
+                                self.agent_error = None;
+                                self.refresh_operations();
+                            }
+                            Err(error) => self.agent_error = Some(error),
+                        }
+                    } else {
+                        self.agent_error =
+                            Some("The configured owner identity is not loaded.".into());
+                    }
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        if self.agent_delete_confirm.as_deref() == Some(definition.id.as_str()) {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    "Delete this agent? Its identity and grant will be removed.",
+                );
+                if ui.button("Delete permanently").clicked() {
+                    self.delete_agent(definition, grant.as_ref());
+                }
+                if ui.button("Cancel").clicked() {
+                    self.agent_delete_confirm = None;
+                }
+            });
+        } else if ui.button("Delete agent").clicked() {
+            self.agent_delete_confirm = Some(definition.id.clone());
+        }
+    }
+
+    fn delete_agent(
+        &mut self,
+        definition: &evermore_common::agent::AgentDefinition,
+        grant: Option<&operations_client::AgentGrant>,
+    ) {
+        self.agent_status = None;
+        self.agent_error = None;
+        let Some(owner) = self.owner_identity() else {
+            self.agent_error = Some("The configured owner identity is not loaded.".into());
+            return;
+        };
+
+        // Remove it from the membership list first so the runner stops
+        // projecting it even if a later cleanup step fails.
+        if let Err(error) =
+            self.publish_agents_membership(&owner, None, Some(&definition.agent_pubkey))
+        {
+            self.agent_error = Some(format!("Could not remove the agent from the list: {error}"));
+            return;
+        }
+        if let Some(grant) = grant
+            && grant.grant_published
+            && !grant.grant_id.is_empty()
+            && let Err(error) = operations_client::revoke_grant(&owner.name, &grant.grant_id)
+        {
+            self.agent_error = Some(format!("Could not revoke the grant: {error}"));
+        }
+        let mut cleanup_error = self.agent_error.take();
+        if let Err(error) = self.delete_agent_definition(&owner, &definition.id)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(format!("Could not publish the deletion event: {error}"));
+        }
+        if let Err(error) = signer_client::delete_agent_identity(&definition.id)
+            && cleanup_error.is_none()
+        {
+            cleanup_error = Some(format!("Could not delete the agent identity: {error}"));
+        }
+
+        self.agent_delete_confirm = None;
+        self.reload_agents();
+        match cleanup_error {
+            Some(error) => {
+                self.agent_error = Some(error);
+                self.agent_status =
+                    Some("Agent removed from the list; cleanup did not finish.".into());
+            }
+            None => {
+                self.agent_status = Some(format!("Deleted agent '{}'.", definition.id));
             }
         }
     }

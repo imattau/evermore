@@ -1989,8 +1989,10 @@ interval and records local runtime state. M11.9 and the first form of M11.10
 are implemented in the panel: an **Agents** rail item lists the projected
 definitions with grant and runtime state, creates a new agent end to end
 (identity → grant → encrypted definition → membership list → runner reload),
-runs a job now, and revokes a grant. Pause/delete/renew, VM screenshots, and
-the VM acceptance pass remain.
+pauses/resumes, renews or revokes a grant, deletes an agent (membership,
+definition deletion, identity, grant), and enables the built-in Evermore
+Assistant with a default grant derived from the built-in recipes. VM
+screenshots and the VM acceptance pass remain.
 
 L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,
 validates it against the catalogue, repairs malformed or out-of-catalogue

@@ -1500,6 +1500,37 @@ impl PanelApp {
                     relative_future(grant.expires_at)
                 ));
                 ui.weak("Writes still stop at the approval window.");
+                ui.horizontal(|ui| {
+                    if ui.button("Renew 90 days").clicked() {
+                        match operations_client::submit_grant(
+                            &owner.name,
+                            &assistant.pubkey_hex,
+                            &grant.allowed_operations,
+                            90 * 24 * 60 * 60,
+                        ) {
+                            Ok(_) => {
+                                self.agent_status =
+                                    Some("Assistant grant renewed for 90 days.".into());
+                                self.agent_error = None;
+                                self.refresh_operations();
+                            }
+                            Err(error) => self.agent_error = Some(error),
+                        }
+                    }
+                    if !grant.grant_id.is_empty() && ui.button("Revoke").clicked() {
+                        match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
+                            Ok(_) => {
+                                self.agent_status = Some(
+                                    "Assistant grant revoked. Enable it again to use the AI tab."
+                                        .into(),
+                                );
+                                self.agent_error = None;
+                                self.refresh_operations();
+                            }
+                            Err(error) => self.agent_error = Some(error),
+                        }
+                    }
+                });
                 return;
             }
             if let Some(grant) = &grant
@@ -1605,7 +1636,7 @@ impl PanelApp {
             }
             None => {
                 ui.colored_label(
-                    egui::Color32::from_rgb(229, 181, 103),
+                    ui.visuals().warn_fg_color,
                     "No active grant — this agent cannot run.",
                 );
             }
@@ -1744,7 +1775,7 @@ impl PanelApp {
         if self.agent_delete_confirm.as_deref() == Some(definition.id.as_str()) {
             ui.horizontal(|ui| {
                 ui.colored_label(
-                    egui::Color32::LIGHT_RED,
+                    ui.visuals().error_fg_color,
                     "Delete this agent? Its identity and grant will be removed.",
                 );
                 if ui.button("Delete permanently").clicked() {
@@ -2647,7 +2678,7 @@ impl PanelApp {
         ui.heading("Review operation request");
         ui.label("This notification opens the request for review. It never approves the operation by itself.");
         let Some(request_id) = self.approval_review_id.clone() else {
-            ui.colored_label(egui::Color32::LIGHT_RED, "Missing operation request ID.");
+            ui.colored_label(ui.visuals().error_fg_color, "Missing operation request ID.");
             return;
         };
         let pending = self
@@ -3875,7 +3906,7 @@ impl eframe::App for PanelApp {
                                         == evermore_common::operations::Approval::Required
                                     {
                                         ui.colored_label(
-                                            egui::Color32::from_rgb(230, 180, 90),
+                                            ui.visuals().warn_fg_color,
                                             "approval required",
                                         );
                                     }

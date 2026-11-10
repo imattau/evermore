@@ -239,6 +239,31 @@ enum SetupStep {
     Saving,
 }
 
+/// Total step count for the wizard's progress indicator, fixed at the
+/// *longer* of its two paths (generating a new identity visits
+/// `Recovery`; importing an existing `nsec` skips straight from
+/// `Identity` to `Pairing`). Wizard UX guidance is consistent that a
+/// step count which can grow mid-flow (e.g. "step 2 of 5" becoming
+/// "step 2 of 6") damages trust more than a fixed total with one step
+/// skipped ever does, so the import path's indicator jumps 3 -> 5
+/// rather than renumbering down to a count of 5.
+const SETUP_TOTAL_STEPS: usize = 6;
+
+/// `None` for `Saving`, which isn't a step the user acts on -- it's a
+/// transient processing state with its own "Creating your encrypted
+/// home…" message, not something to count toward "done".
+fn setup_step_number(step: SetupStep) -> Option<usize> {
+    match step {
+        SetupStep::Welcome => Some(1),
+        SetupStep::Details => Some(2),
+        SetupStep::Identity => Some(3),
+        SetupStep::Recovery => Some(4),
+        SetupStep::Pairing => Some(5),
+        SetupStep::Passphrase => Some(6),
+        SetupStep::Saving => None,
+    }
+}
+
 struct FirstUserSetup {
     step: SetupStep,
     username: String,
@@ -759,6 +784,9 @@ impl GreeterApp {
         ui.vertical_centered(|ui| {
             ui.add_space(36.0);
             ui.heading("Set up Evermore");
+            if let Some(step_number) = setup_step_number(setup.step) {
+                ui.weak(format!("Step {step_number} of {SETUP_TOTAL_STEPS}"));
+            }
             ui.add_space(16.0);
             match setup.step {
                 SetupStep::Welcome => {

@@ -8,11 +8,15 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 bins=(evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-relay-supervisor \
   evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd \
-  evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge)
+  evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge npack npack-gui)
 for bin in "${bins[@]}"; do
   [[ -x "$STAGE/bin/$bin" ]] || { echo "missing staged executable: $STAGE/bin/$bin" >&2; exit 1; }
 done
 [[ -s "$STAGE/lib/evermore-pkcs11.so" ]] || { echo 'missing staged PKCS#11 module' >&2; exit 1; }
+for file in "$STAGE/systemd/user/npackd.service" "$STAGE/share/io.npack.Gui.desktop" \
+  "$STAGE/share/io.npack.Gui.svg" "$STAGE/share/io.npack.Gui.metainfo.xml"; do
+  [[ -s "$file" ]] || { echo "missing staged npack desktop asset: $file" >&2; exit 1; }
+done
 for task in mcp panel; do
   model="$MODEL_STORE/p8.model.qwen2.5-1.5b.$task-1.0.0-dev.1"
   [[ -s "$model/base.gguf" && -s "$model/adapter.gguf" && -s "$model/manifest.json" ]] || {
@@ -25,9 +29,18 @@ done
 install -d /usr/bin /usr/lib/pkcs11 /usr/share/p11-kit/modules /usr/lib/systemd/user \
   /etc/greetd /etc/sudoers.d /etc/skel/.config/sway /etc/skel/.config/waybar \
   /etc/skel/.config/wofi /etc/skel/.config/fuzzel /etc/skel/.config/swaync \
-  /etc/skel/.config/evermore \
-  /etc/skel/.local/share/applications /var/lib/evermore-profiles
+  /etc/skel/.config/evermore /etc/skel/.config/npack \
+  /etc/skel/.local/share/applications /var/lib/evermore-profiles \
+  /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/metainfo
 for bin in "${bins[@]}"; do install -m 0755 "$STAGE/bin/$bin" "/usr/bin/$bin"; done
+install -m 0644 "$STAGE/share/io.npack.Gui.desktop" /usr/share/applications/
+install -m 0644 "$STAGE/share/io.npack.Gui.svg" /usr/share/icons/hicolor/scalable/apps/
+sed -e 's/@VERSION@/0.9.4/' -e "s/@DATE@/$(date -u +%F)/" \
+  "$STAGE/share/io.npack.Gui.metainfo.xml" > /usr/share/metainfo/io.npack.Gui.metainfo.xml
+install -m 0644 "$STAGE/systemd/user/npackd.service" /usr/lib/systemd/user/
+install -m 0644 "$ROOT/packaging/npack/default-config.toml" /etc/skel/.config/npack/config.toml
+desktop-file-validate /usr/share/applications/io.npack.Gui.desktop
+update-desktop-database /usr/share/applications
 install -m 0755 "$STAGE/lib/evermore-pkcs11.so" /usr/lib/pkcs11/evermore-pkcs11.so
 install -d -m 0755 /var/lib/evermore/models
 cp -a "$MODEL_STORE/." /var/lib/evermore/models/
@@ -67,7 +80,7 @@ printf '\ninclude ~/.config/sway/evermore-desktop.conf\ninclude ~/.config/sway/e
   >> /etc/skel/.config/sway/config
 install -d /usr/lib/systemd/user/default.target.wants
 for unit in evermore-signer.service evermore-relay.service evermore-contextd.service \
-  evermore-indexd.service evermore-inferd.service evermore-sway-ai-bridge.service; do
+  evermore-indexd.service evermore-inferd.service evermore-sway-ai-bridge.service npackd.service; do
   ln -sfn "../$unit" "/usr/lib/systemd/user/default.target.wants/$unit"
 done
 chmod 1777 /var/lib/evermore-profiles

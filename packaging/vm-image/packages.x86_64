@@ -22,6 +22,14 @@ xdg-desktop-portal
 xdg-desktop-portal-wlr
 mesa
 vulkan-swrast
+vulkan-icd-loader
+libx11
+libxcb
+libxcursor
+libxi
+libxkbcommon
+libxkbcommon-x11
+wayland
 fontconfig
 ttf-dejavu
 noto-fonts

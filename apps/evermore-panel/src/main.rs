@@ -1237,13 +1237,13 @@ impl PanelApp {
             ui.weak(status);
         }
         if let Some(error) = &self.agent_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(error) = &self.agent_recipes_error {
             ui.weak(error);
         }
         if let Some(error) = &self.agent_tasks_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if self.agent_tasks.is_empty() {
             ui.weak("No tasks recorded.");
@@ -1292,7 +1292,7 @@ impl PanelApp {
                             );
                         }
                         if let Some(error) = &step.error {
-                            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                            ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                     }
                     if let Some(result) = &task.result {
@@ -1303,7 +1303,7 @@ impl PanelApp {
                         }
                     }
                     if let Some(error) = &task.error {
-                        ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                        ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     let pending_count = self
                         .pending_operations
@@ -1474,7 +1474,7 @@ impl PanelApp {
             ui.weak(status);
         }
         if let Some(error) = &self.proposal_prompt_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
     }
 
@@ -1633,13 +1633,13 @@ impl PanelApp {
             ui.weak(status);
         }
         if let Some(error) = &self.proposal_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(error) = &self.identity_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         if let Some(error) = &self.operations_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 170, 110), error);
+            ui.colored_label(ui.visuals().warn_fg_color, error);
         }
             });
     }
@@ -1668,7 +1668,7 @@ impl PanelApp {
         let Some(pending) = pending else {
             ui.label("This request is no longer pending. Refresh the approval list in the Evermore panel.");
             if let Some(error) = &self.approval_error {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             return;
         };
@@ -1706,7 +1706,7 @@ impl PanelApp {
         }
         if pending.status_source.is_some() {
             ui.colored_label(
-                egui::Color32::from_rgb(230, 170, 110),
+                ui.visuals().warn_fg_color,
                 "This is an offline journal snapshot. Start the operation daemon before deciding.",
             );
         }
@@ -1763,10 +1763,10 @@ impl PanelApp {
             ui.weak(status);
         }
         if let Some(error) = &self.approval_error {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         } else if pending.status_source.is_none() && owner_identity.is_none() {
             ui.colored_label(
-                egui::Color32::from_rgb(230, 120, 110),
+                ui.visuals().error_fg_color,
                 "The configured owner identity is not loaded in the signer. No decision can be signed.",
             );
         }
@@ -1890,7 +1890,7 @@ impl eframe::App for PanelApp {
                     let mut retry = false;
                     open_section(ui, |ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(230, 120, 110),
+                            ui.visuals().error_fg_color,
                             "Couldn't reach the identity service.",
                         );
                         ui.weak(&err);
@@ -1961,7 +1961,7 @@ impl eframe::App for PanelApp {
                     let mut retry = false;
                     open_section(ui, |ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(230, 120, 110),
+                            ui.visuals().error_fg_color,
                             "Couldn't load settings.",
                         );
                         ui.weak(&err);
@@ -2022,7 +2022,7 @@ impl eframe::App for PanelApp {
                 if let Some(err) = self.notifications_error.clone() {
                     open_section(ui, |ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(230, 120, 110),
+                            ui.visuals().error_fg_color,
                             "Couldn't open the inbox.",
                         );
                         ui.weak(&err);
@@ -2261,7 +2261,7 @@ impl eframe::App for PanelApp {
                     });
                 }
                 if let Some(error) = &self.ai_chat_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 });
 
@@ -2341,7 +2341,7 @@ impl eframe::App for PanelApp {
                     ui.weak(status);
                 }
                 if let Some(error) = &self.proposal_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 });
 
@@ -2367,7 +2367,7 @@ impl eframe::App for PanelApp {
                     ui.weak(status);
                 }
                 if let Some(error) = &self.approval_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if self.pending_operations.is_empty() {
                     ui.weak("No pending requests.");
@@ -2546,7 +2546,7 @@ impl eframe::App for PanelApp {
                                 ui.label(serde_json::to_string_pretty(result).unwrap_or_default());
                             }
                             if let Some(error) = &entry.error {
-                                ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                                ui.colored_label(ui.visuals().error_fg_color, error);
                             }
                         });
                     }
@@ -2613,7 +2613,7 @@ impl eframe::App for PanelApp {
                     ui.weak(status);
                 }
                 if let Some(error) = &self.ai_index_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 for scope in self.ai_index_scopes.clone() {
                     ui.horizontal(|ui| {
@@ -2800,7 +2800,7 @@ impl eframe::App for PanelApp {
                     self.save_ai_session();
                 }
                 if let Some(error) = &self.ai_context_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if let Some((source, data)) = &self.ai_context_data {
                     ui.vertical(|ui| {
@@ -2810,7 +2810,7 @@ impl eframe::App for PanelApp {
                 }
 
                 if let Some(error) = &self.operations_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 } else if self.operations.is_empty() {
                     ui.label("No operations available. Start evermore-operationsd to load the catalogue.");
                 } else {

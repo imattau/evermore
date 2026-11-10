@@ -8,18 +8,19 @@ BASE_URL="${EVERMORE_ARCH_CLOUD_IMAGE_URL:-https://geo.mirror.pkgbuild.com/image
 BASE_SOURCE="${EVERMORE_ARCH_CLOUD_IMAGE:-$ROOT/vm/.local/images/Arch-Linux-x86_64-cloudimg.qcow2}"
 MEMORY="${EVERMORE_IMAGE_MEMORY:-6G}"; VCPUS="${EVERMORE_IMAGE_VCPUS:-4}"
 DISK_SIZE="${EVERMORE_IMAGE_DISK_SIZE:-32G}"; PORT="${EVERMORE_IMAGE_SSH_PORT:-2239}"
+NPACK_UPSTREAM_REV="900b836cc743d6036fe284750b8e688468e01685" # v0.9.4
 VM_PID=""
-for bin in cargo go python3 qemu-system-x86_64 qemu-img genisoimage curl ssh ssh-keygen rsync; do
+for bin in cargo go git python3 qemu-system-x86_64 qemu-img genisoimage curl ssh ssh-keygen rsync; do
   command -v "$bin" >/dev/null || { echo "missing required host tool: $bin" >&2; exit 1; }
 done
 mkdir -p "$IMAGE_DIR" "$OUTPUT_DIR"
 IMAGE_DIR="$(cd "$IMAGE_DIR" && pwd)"; OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
-STAGE="$IMAGE_DIR/stage"; BASE="$IMAGE_DIR/Arch-Linux-x86_64-cloudimg.qcow2"
+STAGE="$IMAGE_DIR/stage"; NPACK_SRC="$IMAGE_DIR/npack-src"; BASE="$IMAGE_DIR/Arch-Linux-x86_64-cloudimg.qcow2"
 DISK="$IMAGE_DIR/evermore-build.qcow2"; SEED="$IMAGE_DIR/seed"; KEY="$IMAGE_DIR/id_ed25519"
 OUT="$OUTPUT_DIR/evermore-arch-x86_64.qcow2"
 cleanup() { if [[ -n "$VM_PID" ]] && kill -0 "$VM_PID" 2>/dev/null; then kill "$VM_PID" 2>/dev/null || true; wait "$VM_PID" 2>/dev/null || true; fi; }
 trap cleanup EXIT
-rm -rf "$STAGE"; mkdir -p "$STAGE/bin" "$STAGE/lib"
+rm -rf "$STAGE"; mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/share" "$STAGE/systemd/user"
 [[ -d "$MODEL_STORE" ]] || { echo "model store missing: $MODEL_STORE" >&2; exit 1; }
 python3 - "$MODEL_STORE" <<'PY'
 import hashlib, json, pathlib, sys
@@ -71,6 +72,28 @@ PY
 echo '==> Building release binaries'
 mkdir -p "$IMAGE_DIR/go-cache"
 (cd "$ROOT" && cargo build --release --workspace)
+if [[ ! -d "$NPACK_SRC/.git" ]] || [[ "$(git -C "$NPACK_SRC" rev-parse HEAD 2>/dev/null || true)" != "$NPACK_UPSTREAM_REV" ]]; then
+  rm -rf "$NPACK_SRC"
+  git clone --quiet --depth 1 --branch v0.9.4 https://github.com/imattau/npack.git "$NPACK_SRC"
+fi
+[[ "$(git -C "$NPACK_SRC" rev-parse HEAD)" == "$NPACK_UPSTREAM_REV" ]] || {
+  echo "unexpected npack source revision; expected v0.9.4 at $NPACK_UPSTREAM_REV" >&2
+  exit 1
+}
+cargo build --manifest-path "$NPACK_SRC/Cargo.toml" --locked --release -p npack -p npack-gui
+for name in npack npack-gui; do
+  source="$NPACK_SRC/target/release/$name"
+  [[ -x "$source" ]] || { echo "npack release binary missing: $source" >&2; exit 1; }
+  install -m 0755 "$source" "$STAGE/bin/$name"
+done
+[[ "$("$STAGE/bin/npack" --version)" == "npack 0.9.4" ]] || {
+  echo 'unexpected npack CLI version in staged image' >&2
+  exit 1
+}
+install -m 0644 "$NPACK_SRC/packaging/npackd.service" "$STAGE/systemd/user/"
+install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.desktop" "$STAGE/share/"
+install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.svg" "$STAGE/share/"
+install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.metainfo.xml" "$STAGE/share/"
 (cd "$ROOT/relay" && GOCACHE="$IMAGE_DIR/go-cache" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$IMAGE_DIR/evermore-relay-supervisor" .)
 for name in evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge; do
   source="$ROOT/target/release/$name"
@@ -108,10 +131,15 @@ package_update: true
 packages:
 EOF
   sed -e 's/^/  - /' "$ROOT/packaging/vm-image/packages.x86_64"
-  cat <<'EOF'
+  PACKAGE_NAMES="$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+    "$ROOT/packaging/vm-image/packages.x86_64" | tr '\n' ' ')"
+  cat <<EOF
 runcmd:
   - systemctl enable --now sshd
-  - touch /var/lib/cloud/evermore-image-ready
+  - |
+    set -eu
+    for package in $PACKAGE_NAMES; do pacman -Q "\$package" >/dev/null; done
+    touch /var/lib/cloud/evermore-image-ready
 EOF
 } > "$SEED/user-data"
 genisoimage -quiet -output "$SEED/seed.iso" -volid cidata -joliet -rock "$SEED/user-data" "$SEED/meta-data"

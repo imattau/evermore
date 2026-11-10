@@ -17,6 +17,11 @@ schema-valid calls on the full development set; the panel adapter scored
 end-to-end release evaluation has not passed, so this image is for VM use and
 continued evaluation rather than a certified release.
 
+The image also builds and installs upstream `npack` v0.9.4 (pinned to commit
+`900b836cc743d6036fe284750b8e688468e01685`), including `npack-gui`, its
+launcher and its per-user daemon. The daemon starts with each user session;
+new homes receive Evermore's default trusted-publisher and relay configuration.
+
 This workflow does not touch `vm/.local` or the developer VM. The output has
 no human account, no SSH access, and no cloud-init provisioning state. On its
 first graphical boot it starts Evermore's greeter; the guided first-user

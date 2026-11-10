@@ -114,6 +114,8 @@ instance-id: evermore-image-build
 local-hostname: evermore
 EOF
 {
+  PACKAGE_NAMES="$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
+    "$ROOT/packaging/vm-image/packages.x86_64" | tr '\n' ' ')"
   cat <<EOF
 #cloud-config
 hostname: evermore
@@ -127,17 +129,13 @@ users:
       - $(cat "$KEY.pub")
 ssh_pwauth: false
 disable_root: true
-package_update: true
-packages:
-EOF
-  sed -e 's/^/  - /' "$ROOT/packaging/vm-image/packages.x86_64"
-  PACKAGE_NAMES="$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' \
-    "$ROOT/packaging/vm-image/packages.x86_64" | tr '\n' ' ')"
-  cat <<EOF
+package_update: false
 runcmd:
   - systemctl enable --now sshd
   - |
     set -eu
+    pacman -Syu --noconfirm
+    pacman -S --noconfirm --needed $PACKAGE_NAMES
     for package in $PACKAGE_NAMES; do pacman -Q "\$package" >/dev/null; done
     touch /var/lib/cloud/evermore-image-ready
 EOF

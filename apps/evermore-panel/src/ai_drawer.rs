@@ -14,6 +14,40 @@ use crate::{
 };
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(110, 168, 254);
+/// From the "Evermore Desktop — UI improvements" Figma file's "AI drawer"
+/// page -- rendered in the app's dark Evermore Graphite palette rather
+/// than that page's light cream/sage mockup (the user's call: everything
+/// else in the app is the dark ink/blue theme, and a drawer that looks
+/// like a different product isn't the goal). `ACCENT_CHIP` is the same
+/// accent-tinted highlight the wizard and the Nostr drawer already use for
+/// "this is attached/selected" surfaces; the mockup's equivalent soft-green
+/// tint maps to it.
+const ACCENT_CHIP: egui::Color32 = egui::Color32::from_rgb(38, 70, 120); // #264678
+const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(7, 9, 12); // #07090C
+
+/// The drawer's one filled accent call-to-action (the operation-approval
+/// "Submit for owner approval" button) -- everything else stays the
+/// neutral bordered style `build_visuals` now gives every button.
+fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(label).strong().color(ACCENT_INK))
+            .fill(ACCENT)
+            .corner_radius(8.0),
+    )
+    .clicked()
+}
+
+/// The small uppercase muted caption the design uses above grouped
+/// content ("SUGGESTED OPERATION…", "CHATS", "INDEXED FILES"…).
+fn caption(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.0)
+            .strong()
+            .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+    );
+}
 
 impl PanelApp {
     pub(crate) fn ai_drawer_ui(&mut self, ui: &mut egui::Ui) {
@@ -61,9 +95,43 @@ impl PanelApp {
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
                 self.ai_drawer_header(ui);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.weak(if self.ai_model_selected.is_empty() {
+                    "LOCAL \u{b7} no model selected".to_owned()
+                } else {
+                    format!("LOCAL \u{b7} {}", self.ai_model_selected)
+                });
                 ui.add_space(6.0);
 
-                let footer_reserve = 118.0;
+                if self.ai_chat_messages.is_empty() {
+                    ui.add_space(24.0);
+                    ui.label(
+                        egui::RichText::new("What would you like to work on?")
+                            .size(18.0)
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Your chats stay on this device. Ask a question or attach context to get started.",
+                        )
+                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                    );
+                    ui.add_space(24.0);
+                }
+                // Measured *after* the empty-state block above (when shown)
+                // has already consumed its space -- computing this first and
+                // reusing it regardless left the scroll area over-claiming
+                // height on a fresh chat, pushing the composer below the
+                // visible window on first open. 160 (not the original 118)
+                // covers everything actually drawn below the scroll area:
+                // the "Local inference…" hint line, the composer, and the
+                // always-visible "Advanced context settings" header --
+                // confirmed on the dev VM that 118 still clipped the
+                // composer's button row against the window's bottom edge.
+                let footer_reserve = 160.0;
                 let chat_height = (ui.available_height() - footer_reserve).max(140.0);
                 egui::ScrollArea::vertical()
                     .id_salt("ai-drawer-chat")
@@ -89,7 +157,7 @@ impl PanelApp {
                                     Err(error) => {
                                         ui.vertical(|ui| {
                                             ui.strong("Operation proposal");
-                                            ui.colored_label(egui::Color32::LIGHT_RED, error);
+                                            ui.colored_label(ui.visuals().error_fg_color, error);
                                         });
                                     }
                                 }
@@ -98,6 +166,12 @@ impl PanelApp {
                     });
 
                 ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Local inference \u{b7} model selection and chat history in \u{22ef}")
+                        .size(11.0)
+                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                );
+                ui.add_space(4.0);
                 self.ai_attachment_chips(ui);
                 self.ai_input_row(ui, dragging_file);
 
@@ -105,24 +179,37 @@ impl PanelApp {
                     ui.weak(status);
                 }
                 if let Some(error) = &self.ai_context_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if let Some(error) = &self.ai_chat_error {
-                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
 
                 if !self.ai_chat_loading && self.ai_chat_input.trim().is_empty() {
                     let suggestions = self.context_prompt_suggestions();
                     if !suggestions.is_empty() {
                         ui.add_space(6.0);
-                        ui.weak("Try with selected context");
-                        ui.horizontal_wrapped(|ui| {
-                            for suggestion in suggestions {
-                                if ui.small_button(&suggestion).clicked() {
-                                    self.ai_chat_input = suggestion;
-                                }
-                            }
-                        });
+                        egui::Frame::new()
+                            .fill(ACCENT_CHIP)
+                            .corner_radius(9)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    egui::RichText::new("TRY WITH SELECTED CONTEXT")
+                                        .size(10.0)
+                                        .strong()
+                                        .color(ACCENT),
+                                );
+                                ui.add_space(4.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    for suggestion in suggestions {
+                                        if ui.small_button(&suggestion).clicked() {
+                                            self.ai_chat_input = suggestion;
+                                        }
+                                    }
+                                });
+                            });
                     }
                 }
 
@@ -179,15 +266,15 @@ impl PanelApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("⋯", |ui| {
                     ui.set_min_width(200.0);
-                    if ui.button("New chat").clicked() {
+                    caption(ui, "CHAT MENU");
+                    if ui.button("\u{2795}  New chat").clicked() {
                         self.new_ai_session();
                         ui.close();
                     }
-                    ui.separator();
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut self.ai_session_name)
-                                .hint_text("Name this session"),
+                                .hint_text("\u{270e}  Rename current chat"),
                         )
                         .changed()
                     {
@@ -195,11 +282,17 @@ impl PanelApp {
                     }
                     if !self.ai_sessions.is_empty() {
                         ui.separator();
-                        ui.weak("Sessions");
+                        caption(ui, "CHATS");
                         let mut selected = self.ai_session_id.clone();
                         for session in self.ai_sessions.clone() {
+                            let current = session.id == self.ai_session_id;
+                            let label = format!(
+                                "{}  {}",
+                                if current { "\u{25cf}" } else { "\u{25cb}" },
+                                session.name
+                            );
                             if ui
-                                .selectable_value(&mut selected, session.id.clone(), &session.name)
+                                .selectable_value(&mut selected, session.id.clone(), label)
                                 .clicked()
                             {
                                 ui.close();
@@ -213,7 +306,7 @@ impl PanelApp {
                     if self.ai_models.is_empty() {
                         ui.weak("Local inference unavailable on this device.");
                     } else {
-                        ui.weak("Local model");
+                        caption(ui, "LOCAL MODEL");
                         let mut changed = false;
                         for model in self.ai_models.clone() {
                             changed |= ui
@@ -269,13 +362,19 @@ impl PanelApp {
                     format!("Note from {author}\u{2026}")
                 };
                 egui::Frame::new()
-                    .fill(ui.visuals().faint_bg_color)
+                    .fill(ACCENT_CHIP)
                     .corner_radius(10)
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.add(egui::Label::new(label).wrap());
-                            if ui.small_button("Remove").clicked() {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(label).color(ACCENT)).wrap(),
+                            );
+                            if ui
+                                .small_button("\u{00d7}")
+                                .on_hover_text("Remove")
+                                .clicked()
+                            {
                                 self.ai_context_grants.retain(|g| g.source != grant.source);
                                 self.save_ai_session();
                             }
@@ -316,10 +415,12 @@ impl PanelApp {
         ui.horizontal(|ui| {
             ui.menu_button("Attach", |ui| {
                 ui.set_min_width(220.0);
+                ui.strong("Add context");
+                ui.add_space(6.0);
                 if self.ai_index_scopes.is_empty() {
                     ui.weak("No indexed files yet. Drop one on this window, or add a path below.");
                 } else {
-                    ui.weak("Indexed files");
+                    caption(ui, "INDEXED FILES");
                     for scope in self.ai_index_scopes.clone() {
                         let label = std::path::Path::new(&scope.path)
                             .file_name()
@@ -333,18 +434,25 @@ impl PanelApp {
                     }
                     ui.separator();
                 }
+                caption(ui, "OR ENTER A TEXT FILE PATH");
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.ai_index_path)
                             .hint_text("Path to a text file"),
                     );
-                    if ui.button("Attach").clicked() && !self.ai_index_path.trim().is_empty() {
+                    if primary_button(ui, "Attach file", !self.ai_index_path.trim().is_empty()) {
                         let path = self.ai_index_path.clone();
                         self.attach_file_for_ai(&path);
                         self.ai_index_path.clear();
                         ui.close();
                     }
                 });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("You can also drop a file onto the drawer.")
+                        .size(10.0)
+                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.ai_chat_loading {
@@ -352,13 +460,11 @@ impl PanelApp {
                         self.cancel_ai_chat();
                     }
                 } else {
-                    if ui
-                        .add_enabled(
-                            !self.ai_models.is_empty() && !self.ai_chat_input.trim().is_empty(),
-                            egui::Button::new("Send"),
-                        )
-                        .clicked()
-                    {
+                    if primary_button(
+                        ui,
+                        "Send",
+                        !self.ai_models.is_empty() && !self.ai_chat_input.trim().is_empty(),
+                    ) {
                         self.send_ai_chat();
                     }
                     if ui.small_button("Clear").clicked() {
@@ -524,24 +630,42 @@ impl PanelApp {
             self.proposal_identity = eligible_actors.first().cloned().unwrap_or_default();
         }
         egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
+            .fill(ui.visuals().panel_fill)
+            .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color))
             .corner_radius(10)
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(229, 181, 103), "▏");
-                    ui.vertical(|ui| {
-                        ui.strong("Suggested operation · review before submitting");
+                ui.vertical(|ui| {
+                        caption(ui, "SUGGESTED OPERATION \u{b7} REVIEW BEFORE SUBMITTING");
+                        ui.add_space(4.0);
                         match &validation {
                             Err(error) => {
-                                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                                ui.colored_label(ui.visuals().error_fg_color, error);
                             }
                             Ok((definition, arguments)) => {
-                                ui.label(&definition.name);
+                                ui.strong(&definition.name);
                                 ui.weak(&definition.description);
-                                ui.monospace(
-                                    serde_json::to_string_pretty(arguments)
-                                        .unwrap_or_else(|_| "{}".into()),
+                                ui.add_space(4.0);
+                                egui::Frame::new()
+                                    .fill(ui.visuals().extreme_bg_color)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().widgets.inactive.bg_stroke.color,
+                                    ))
+                                    .corner_radius(7)
+                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.monospace(
+                                            serde_json::to_string_pretty(arguments)
+                                                .unwrap_or_else(|_| "{}".into()),
+                                        );
+                                    });
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new("Requesting identity")
+                                        .size(11.0)
+                                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
                                 );
                                 egui::ComboBox::from_id_salt(("ai-proposal-actor", &definition.name))
                                     .selected_text(if self.proposal_identity.is_empty() {
@@ -558,6 +682,12 @@ impl PanelApp {
                                             );
                                         }
                                     });
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("Configured owner identity")
+                                        .size(11.0)
+                                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                                );
                                 egui::ComboBox::from_id_salt(("ai-proposal-owner", &definition.name))
                                     .selected_text(if self.approval_identity.is_empty() {
                                         "Configured owner unavailable"
@@ -625,25 +755,23 @@ impl PanelApp {
                                     }
                                 } else if !distinct {
                                     ui.colored_label(
-                                        egui::Color32::LIGHT_RED,
+                                        ui.visuals().error_fg_color,
                                         "Choose a separate owner identity; an agent cannot approve its own request.",
                                     );
                                 } else {
                                     ui.weak(
-                                        "Submitting creates a signed pending request. The owner still decides whether it runs.",
+                                        "Submitting creates a signed pending request. It does not run the operation.",
                                     );
                                 }
                                 let owner_pubkey = owner.map(|identity| identity.pubkey_hex.clone());
-                                if ui
-                                    .add_enabled(
-                                        identities_available
-                                            && distinct
-                                            && owner_pubkey.is_some()
-                                            && self.proposal_status.is_none(),
-                                        egui::Button::new("Submit for owner approval"),
-                                    )
-                                    .clicked()
-                                {
+                                if primary_button(
+                                    ui,
+                                    "Submit for owner approval",
+                                    identities_available
+                                        && distinct
+                                        && owner_pubkey.is_some()
+                                        && self.proposal_status.is_none(),
+                                ) {
                                     self.proposal_operation = proposal.operation.clone();
                                     self.proposal_arguments = arguments.to_string();
                                     self.submit_proposal(owner_pubkey.as_deref().unwrap_or_default());
@@ -652,12 +780,11 @@ impl PanelApp {
                                     ui.weak(status);
                                 }
                                 if let Some(error) = &self.proposal_error {
-                                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                                    ui.colored_label(ui.visuals().error_fg_color, error);
                                 }
                             }
                         }
                     });
-                });
             });
     }
 }

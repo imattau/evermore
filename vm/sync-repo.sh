@@ -30,7 +30,7 @@ command -v rsync >/dev/null || { echo "rsync not found on host" >&2; exit 1; }
 # that; --checksum makes rsync's own change detection content-based instead
 # of relying on mtime+size, so edits still get synced correctly either way.
 rsync -rlpzc --delete -e "ssh ${SSH_OPTS[*]}" \
-  --exclude target --exclude vm/.local --exclude .git \
+  --exclude target --exclude vm/.local --exclude .git --exclude .image-build \
   "$REPO_ROOT/" builder@127.0.0.1:~/evermore/
 
 if [[ $# -gt 0 ]]; then

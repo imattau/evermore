@@ -44,7 +44,12 @@ impl PanelApp {
         // move the window flush against the workspace's right edge once it
         // has mapped. Retry briefly; give up if this is not Sway.
         if !self.nostr_feed_positioned {
-            if sway_windows::anchor_to_right_edge(std::process::id()).is_ok() {
+            let expected_width = if self.nostr_feed_collapsed {
+                40.0
+            } else {
+                340.0
+            };
+            if sway_windows::anchor_to_right_edge(std::process::id(), expected_width).is_ok() {
                 self.nostr_feed_positioned = true;
             } else {
                 let deadline = *self.nostr_feed_position_deadline.get_or_insert_with(|| {
@@ -227,6 +232,10 @@ impl PanelApp {
             if collapsed { 40.0 } else { 340.0 },
             680.0,
         )));
+        // The click that triggered this resize already had this window
+        // focused; re-asserting that after the resize keeps it on top of
+        // Sway's floating stack instead of leaving that to chance.
+        let _ = sway_windows::raise_window("Evermore feed");
     }
 
     fn note_card(&mut self, ui: &mut egui::Ui, note: &nostr_feed_client::Note) {

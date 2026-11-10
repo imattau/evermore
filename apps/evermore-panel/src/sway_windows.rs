@@ -74,8 +74,23 @@ pub fn window_exists(title: &str) -> bool {
 /// sitting ~300px off the right edge instead of flush against it). Refusing
 /// to proceed until the reported width matches what was actually requested
 /// turns that race into a harmless retry instead of a silent wrong answer.
-pub fn anchor_to_right_edge(pid: u32, expected_width: f32) -> Result<(), String> {
-    anchor_to("Evermore feed", pid, expected_width, right_edge_target, "feed")
+/// `reserved_gap` is how many pixels we have already carved off this edge
+/// via `reserve_edge_gap`, if any (0 before the first reservation, the
+/// reserved amount after). `get_tree` reports the workspace's *gap-adjusted*
+/// rect -- confirmed live: reserving a 40px left gap shrinks the reported
+/// workspace from `x:0 width:1280` to `x:40 width:1240` -- so recomputing the
+/// target from that rect on a later collapse/expand (after the first
+/// reservation already ran) would anchor 40px short of the true edge,
+/// compounding on every toggle. Adding the reserved amount back cancels out
+/// our own earlier reservation so the target always reflects the true edge.
+pub fn anchor_to_right_edge(pid: u32, expected_width: f32, reserved_gap: f32) -> Result<(), String> {
+    anchor_to(
+        "Evermore feed",
+        pid,
+        expected_width,
+        move |workspace, window| right_edge_target(workspace, window, reserved_gap),
+        "feed",
+    )
 }
 
 /// Moves the AI drawer flush to the top-left corner of the workspace it
@@ -86,12 +101,15 @@ pub fn anchor_to_right_edge(pid: u32, expected_width: f32) -> Result<(), String>
 /// app's own Wayland resize request or an external `swaymsg resize`, so
 /// this has to re-anchor the same way it already does for the feed
 /// drawer's right edge below.
-pub fn anchor_to_left_edge(pid: u32, expected_width: f32) -> Result<(), String> {
+/// `reserved_gap` is how many pixels we have already carved off the left
+/// edge via `reserve_edge_gap` -- see `anchor_to_right_edge`'s doc comment
+/// for why this has to be added back before computing the target.
+pub fn anchor_to_left_edge(pid: u32, expected_width: f32, reserved_gap: f32) -> Result<(), String> {
     anchor_to(
         "Evermore AI",
         pid,
         expected_width,
-        |workspace, _window| (workspace.x, workspace.y),
+        move |workspace, _window| (workspace.x - reserved_gap, workspace.y),
         "AI",
     )
 }
@@ -157,8 +175,11 @@ fn compute_anchor_move(
     )))
 }
 
-fn right_edge_target(workspace: Rect, window: Rect) -> (f32, f32) {
-    (workspace.x + workspace.width - window.width, workspace.y)
+fn right_edge_target(workspace: Rect, window: Rect, reserved_gap: f32) -> (f32, f32) {
+    (
+        workspace.x + workspace.width + reserved_gap - window.width,
+        workspace.y,
+    )
 }
 
 /// Raises this title to the top of Sway's floating stack. A floating
@@ -346,7 +367,7 @@ mod tests {
             width: 340.0,
             height: 680.0,
         };
-        assert_eq!(right_edge_target(workspace, window), (1580.0, 30.0));
+        assert_eq!(right_edge_target(workspace, window, 0.0), (1580.0, 30.0));
 
         let second = Rect {
             x: 1920.0,
@@ -354,7 +375,30 @@ mod tests {
             width: 1920.0,
             height: 1050.0,
         };
-        assert_eq!(right_edge_target(second, window), (3500.0, 30.0));
+        assert_eq!(right_edge_target(second, window, 0.0), (3500.0, 30.0));
+    }
+
+    #[test]
+    fn right_edge_target_adds_back_an_already_reserved_gap() {
+        // Reproduces the inset-drawer bug: once `reserve_edge_gap` has
+        // shrunk the reported workspace rect, recomputing the target from
+        // that shrunk rect without compensation lands 40px short of the
+        // true edge. Passing back the amount we ourselves reserved must
+        // cancel that out and land at the same target as an unshrunk
+        // workspace would.
+        let workspace = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1240.0,
+            height: 720.0,
+        };
+        let window = Rect {
+            x: 1200.0,
+            y: 0.0,
+            width: 40.0,
+            height: 680.0,
+        };
+        assert_eq!(right_edge_target(workspace, window, 40.0), (1240.0, 0.0));
     }
 
     #[test]
@@ -423,7 +467,9 @@ mod tests {
         // job done, is what left the collapsed drawer sitting ~300px short
         // of the true edge -- this must be rejected, not silently used.
         let tree = feed_tree(340.0, 1580.0);
-        let result = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target);
+        let result = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |w, win| {
+            right_edge_target(w, win, 0.0)
+        });
         assert!(
             result.is_err(),
             "a stale (pre-resize) width must be rejected"
@@ -437,16 +483,21 @@ mod tests {
         // 340px width), the target follows the same math as
         // `right_edge_target_sits_flush_against_the_workspace` above.
         let tree = feed_tree(40.0, 1200.0);
-        let (con_id, x, y) = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target)
-            .unwrap()
-            .expect("window is not yet at the target position");
+        let (con_id, x, y) = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |w, win| {
+            right_edge_target(w, win, 0.0)
+        })
+        .unwrap()
+        .expect("window is not yet at the target position");
         assert_eq!((con_id, x, y), (7, 1880, 0));
     }
 
     #[test]
     fn already_correctly_positioned_needs_no_move() {
         let tree = feed_tree(40.0, 1880.0);
-        let move_needed = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target).unwrap();
+        let move_needed = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |w, win| {
+            right_edge_target(w, win, 0.0)
+        })
+        .unwrap();
         assert!(move_needed.is_none());
     }
 

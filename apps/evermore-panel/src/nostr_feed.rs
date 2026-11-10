@@ -49,13 +49,25 @@ impl PanelApp {
             } else {
                 340.0
             };
-            if sway_windows::anchor_to_right_edge(std::process::id(), expected_width).is_ok() {
+            // `anchor_to_right_edge` needs to know how much of the reported
+            // workspace rect is our own earlier gap reservation (see its
+            // doc comment) -- 0 before it has ever run, 40 on every later
+            // collapse/expand once it has.
+            let reserved_gap = if self.nostr_edge_gap_reserved {
+                40.0
+            } else {
+                0.0
+            };
+            if sway_windows::anchor_to_right_edge(std::process::id(), expected_width, reserved_gap)
+                .is_ok()
+            {
                 self.nostr_feed_positioned = true;
                 // Reserve the collapsed width permanently so a tiled
                 // window never renders underneath the resting 40px
                 // sliver; see `reserve_edge_gap`'s doc comment for what
                 // this does and doesn't cover.
                 let _ = sway_windows::reserve_edge_gap("right", 40);
+                self.nostr_edge_gap_reserved = true;
             } else {
                 let deadline = *self.nostr_feed_position_deadline.get_or_insert_with(|| {
                     std::time::Instant::now() + std::time::Duration::from_secs(2)

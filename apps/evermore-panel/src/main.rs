@@ -426,6 +426,7 @@ struct PanelApp {
     ai_drawer_collapsed: bool,
     ai_drawer_positioned: bool,
     ai_drawer_position_deadline: Option<std::time::Instant>,
+    ai_edge_gap_reserved: bool,
     drawer_focused_output: Option<String>,
     drawer_next_output_poll: Option<std::time::Instant>,
     palette_query: String,
@@ -473,6 +474,7 @@ struct PanelApp {
     nostr_feed_error: Option<String>,
     nostr_feed_positioned: bool,
     nostr_feed_position_deadline: Option<std::time::Instant>,
+    nostr_edge_gap_reserved: bool,
     nostr_attached_note: Option<nostr_feed_client::Note>,
     nostr_drag_note: Option<nostr_feed_client::Note>,
     nostr_drag_pos: Option<egui::Pos2>,
@@ -3317,13 +3319,25 @@ impl eframe::App for PanelApp {
             // deadline bounds how long it keeps retrying if this isn't Sway.
             if !self.ai_drawer_positioned {
                 let expected_width = if self.ai_drawer_collapsed { 40.0 } else { 400.0 };
-                if sway_windows::anchor_to_left_edge(std::process::id(), expected_width).is_ok() {
+                // `anchor_to_left_edge` needs to know how much of the
+                // reported workspace rect is our own earlier gap
+                // reservation (see its doc comment) -- 0 before it has ever
+                // run, 40 on every later collapse/expand once it has.
+                let reserved_gap = if self.ai_edge_gap_reserved { 40.0 } else { 0.0 };
+                if sway_windows::anchor_to_left_edge(
+                    std::process::id(),
+                    expected_width,
+                    reserved_gap,
+                )
+                .is_ok()
+                {
                     self.ai_drawer_positioned = true;
                     // Reserve the collapsed width permanently so a tiled
                     // window never renders underneath the resting 40px
                     // sliver; see `reserve_edge_gap`'s doc comment for what
                     // this does and doesn't cover.
                     let _ = sway_windows::reserve_edge_gap("left", 40);
+                    self.ai_edge_gap_reserved = true;
                 } else {
                     let deadline = *self.ai_drawer_position_deadline.get_or_insert_with(|| {
                         std::time::Instant::now() + std::time::Duration::from_secs(2)

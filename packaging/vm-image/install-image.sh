@@ -78,6 +78,9 @@ install -m 0644 "$ROOT/packaging/swaync/style.css" /etc/skel/.config/swaync/
 for file in "$ROOT"/packaging/applications/*.desktop; do install -m 0644 "$file" /etc/skel/.local/share/applications/; done
 printf '\ninclude ~/.config/sway/evermore-desktop.conf\ninclude ~/.config/sway/evermore-waybar.conf\n' \
   >> /etc/skel/.config/sway/config
+install -d -m 0700 /tmp/evermore-sway-config-check
+XDG_RUNTIME_DIR=/tmp/evermore-sway-config-check sway -C -c /etc/skel/.config/sway/config
+rm -rf /tmp/evermore-sway-config-check
 install -d /usr/lib/systemd/user/default.target.wants
 for unit in evermore-signer.service evermore-relay.service evermore-contextd.service \
   evermore-indexd.service evermore-inferd.service evermore-sway-ai-bridge.service npackd.service; do

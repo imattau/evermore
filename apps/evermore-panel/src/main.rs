@@ -1469,6 +1469,9 @@ impl PanelApp {
             {
                 self.generate_proposal();
             }
+            if self.proposal_generating {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
         });
         if let Some(status) = &self.proposal_prompt_status {
             ui.weak(status);
@@ -1506,16 +1509,22 @@ impl PanelApp {
         if !self.identities_loaded {
             self.refresh_identities();
         }
+        // Escape dismisses, matching every other transient surface in this
+        // app (and the design note's own accessibility commitment) -- the
+        // only way to close this window used to be clicking "Close".
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
         ui.heading("Evermore command palette");
         ui.label("Search a catalogued operation. Every write still needs its exact grant and owner approval.");
         ui.add_space(8.0);
-        ui.label("Find an operation");
         ui.add(
             egui::TextEdit::singleline(&mut self.palette_query)
-                .hint_text("Search settings, packages, notifications, or Sway"),
+                .hint_text("Search settings, packages, notifications, or Sway")
+                .desired_width(f32::INFINITY),
         );
         self.proposal_prompt_ui(ui);
         ui.add_space(6.0);
@@ -1536,26 +1545,62 @@ impl PanelApp {
                             .contains(&self.palette_query.to_ascii_lowercase()))
             })
             .collect();
-        if !writable
+        let selected_index = writable
             .iter()
-            .any(|definition| definition.name == self.proposal_operation)
+            .position(|definition| definition.name == self.proposal_operation);
+        if selected_index.is_none()
             && let Some(first) = writable.first()
         {
             self.proposal_operation = first.name.clone();
         }
-        egui::ComboBox::from_label("Operation")
-            .selected_text(if self.proposal_operation.is_empty() {
-                "No matching write operations"
-            } else {
-                &self.proposal_operation
-            })
-            .show_ui(ui, |ui| {
+        // Arrow keys move the highlighted row within the filtered,
+        // category-grouped list below -- Up/Down are the one keyboard
+        // pattern every launcher/palette UX (and the design note's
+        // accessibility section) treats as a baseline, not a nicety.
+        // Enter is deliberately NOT wired to submit: this picks an
+        // operation, it never fires the write itself, so a stray Enter
+        // can't skip the explicit "Submit for owner approval" click.
+        if !writable.is_empty() {
+            ui.input(|i| {
+                let index = selected_index.unwrap_or(0);
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    let next = (index + 1).min(writable.len() - 1);
+                    self.proposal_operation = writable[next].name.clone();
+                } else if i.key_pressed(egui::Key::ArrowUp) {
+                    let next = index.saturating_sub(1);
+                    self.proposal_operation = writable[next].name.clone();
+                }
+            });
+        }
+        ui.label(if writable.is_empty() {
+            "No matching write operations".to_owned()
+        } else {
+            format!(
+                "{} matching operation{}",
+                writable.len(),
+                if writable.len() == 1 { "" } else { "s" }
+            )
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("command-palette-results")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                let mut last_category = None;
                 for definition in &writable {
-                    ui.selectable_value(
-                        &mut self.proposal_operation,
-                        definition.name.clone(),
-                        &definition.name,
-                    );
+                    let category = definition
+                        .name
+                        .split_once('.')
+                        .map_or(definition.name.as_str(), |(prefix, _)| prefix);
+                    if last_category != Some(category) {
+                        section_heading(ui, category);
+                        last_category = Some(category);
+                    }
+                    let selected = definition.name == self.proposal_operation;
+                    if command_palette_row(ui, selected, &definition.name, &definition.description)
+                        .clicked()
+                    {
+                        self.proposal_operation = definition.name.clone();
+                    }
                 }
             });
         if let Some(definition) = self
@@ -1563,7 +1608,6 @@ impl PanelApp {
             .iter()
             .find(|definition| definition.name == self.proposal_operation)
         {
-            ui.weak(&definition.description);
             ui.collapsing("Input schema", |ui| {
                 ui.monospace(
                     serde_json::to_string_pretty(&definition.input_schema)
@@ -1641,6 +1685,13 @@ impl PanelApp {
         if let Some(error) = &self.operations_error {
             ui.colored_label(ui.visuals().warn_fg_color, error);
         }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.weak("↑↓ Navigate");
+            ui.weak("·");
+            ui.weak("Esc Close");
+        });
             });
     }
 
@@ -1838,17 +1889,24 @@ impl eframe::App for PanelApp {
             self.ai_drawer_ui(ui);
             return;
         } else {
-            // Rail width per the design note: 220px labelled (this window
-            // stays above the 760px breakpoint where it would collapse to
-            // 72px icon-only).
+            // Rail width per the design note: 220px labelled above a
+            // 760px window width, 72px icon-only (labels become hover
+            // tooltips) below it -- this app runs under Sway, a tiling
+            // WM where a window landing at a narrow width from a split
+            // is routine, not an edge case, so the breakpoint has to be
+            // live rather than assumed away by the initial window size.
+            let labelled = ui.input(|i| i.viewport_rect().width()) >= 760.0;
+            let rail_width = if labelled { 220.0 } else { 72.0 };
             egui::Panel::left("nav")
                 .resizable(false)
-                .exact_size(220.0)
+                .exact_size(rail_width)
                 .show_separator_line(false)
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 18)))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Evermore").strong().size(15.0));
-                    ui.add_space(16.0);
+                    if labelled {
+                        ui.label(egui::RichText::new("Evermore").strong().size(15.0));
+                        ui.add_space(16.0);
+                    }
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (tab, icon_id, icon, label) in [
                         (Tab::Identity, "key-round", ICON_KEY_ROUND, "Identity"),
@@ -1856,7 +1914,7 @@ impl eframe::App for PanelApp {
                         (Tab::Notifications, "bell", ICON_BELL, "Notifications"),
                         (Tab::Ai, "sparkles", ICON_SPARKLES, "AI"),
                     ] {
-                        if nav_item(ui, self.tab == tab, icon_id, icon, label) {
+                        if nav_item(ui, self.tab == tab, icon_id, icon, label, labelled) {
                             self.tab = tab;
                         }
                     }
@@ -1864,7 +1922,7 @@ impl eframe::App for PanelApp {
                     // separate eframe app exercising npackd's full
                     // JSON-RPC API), so this launches it rather than
                     // switching to in-panel content.
-                    if nav_item(ui, false, "package", ICON_PACKAGE, "Packages") {
+                    if nav_item(ui, false, "package", ICON_PACKAGE, "Packages", labelled) {
                         spawn_npack_gui();
                     }
                 });
@@ -2202,13 +2260,14 @@ impl eframe::App for PanelApp {
                                         Role::System => "System",
                                     };
                                     ui.strong(role);
-                                    ui.label(
-                                        if message.content.is_empty() && self.ai_chat_loading {
-                                            "Thinking…"
-                                        } else {
-                                            &message.content
-                                        },
-                                    );
+                                    if message.content.is_empty() && self.ai_chat_loading {
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::Spinner::new().size(12.0));
+                                            ui.label("Thinking…");
+                                        });
+                                    } else {
+                                        ui.label(&message.content);
+                                    }
                                 });
                             }
                         });
@@ -2879,13 +2938,17 @@ fn open_section(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
 
 /// A rail row per the design note: 36 px tall, a 24 px / 2 px-stroke Lucide
 /// icon plus label, the active row gets stronger text and a 2 px left
-/// accent rule, with no filled row background.
+/// accent rule, with no filled row background. Below the design note's
+/// 760px rail breakpoint, `labelled` is false: the icon centers in the
+/// narrow rail and the label moves to a hover tooltip instead of being
+/// drawn, rather than overflowing a rail too narrow to hold it.
 fn nav_item(
     ui: &mut egui::Ui,
     selected: bool,
     icon_id: &str,
     icon: &'static [u8],
     label: &str,
+    labelled: bool,
 ) -> bool {
     let desired = egui::vec2(ui.available_width(), 36.0);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
@@ -2905,22 +2968,30 @@ fn nav_item(
                 .unwrap_or_else(|| ui.visuals().text_color())
         };
         let icon_size = egui::vec2(18.0, 18.0);
-        let icon_rect = egui::Rect::from_center_size(
-            rect.left_center() + egui::vec2(14.0 + icon_size.x / 2.0, 0.0),
-            icon_size,
-        );
+        let icon_center = if labelled {
+            rect.left_center() + egui::vec2(14.0 + icon_size.x / 2.0, 0.0)
+        } else {
+            rect.center()
+        };
+        let icon_rect = egui::Rect::from_center_size(icon_center, icon_size);
         egui::Image::from_bytes(format!("bytes://{icon_id}.svg"), icon)
             .tint(text_color)
             .paint_at(ui, icon_rect);
-        ui.painter().text(
-            rect.left_center() + egui::vec2(14.0 + icon_size.x + 10.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::FontId::proportional(13.0),
-            text_color,
-        );
+        if labelled {
+            ui.painter().text(
+                rect.left_center() + egui::vec2(14.0 + icon_size.x + 10.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(13.0),
+                text_color,
+            );
+        }
     }
-    response.clicked()
+    if labelled {
+        response.clicked()
+    } else {
+        response.on_hover_text(label).clicked()
+    }
 }
 
 /// A section heading per the design note's screen mockup: a small muted
@@ -2933,6 +3004,53 @@ fn section_heading(ui: &mut egui::Ui, label: &str) {
             .strong(),
     );
     ui.add_space(6.0);
+}
+
+/// A command-palette result row per the design note's "44 px rows grouped
+/// by category" -- the operation name plus a truncated one-line
+/// description, with the same painter-based selected/hover feedback
+/// `nav_item` uses so the two row styles read as one system.
+fn command_palette_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    name: &str,
+    description: &str,
+) -> egui::Response {
+    let desired = egui::vec2(ui.available_width(), 44.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        if selected {
+            ui.painter()
+                .rect_filled(rect, 6.0, ui.visuals().faint_bg_color);
+        } else if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        let text_color = if selected {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().text_color()
+        };
+        let desc_color = ui
+            .visuals()
+            .weak_text_color
+            .unwrap_or_else(|| ui.visuals().text_color());
+        ui.painter().text(
+            rect.left_top() + egui::vec2(10.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            name,
+            egui::FontId::proportional(13.0),
+            text_color,
+        );
+        ui.painter().text(
+            rect.left_top() + egui::vec2(10.0, 24.0),
+            egui::Align2::LEFT_TOP,
+            truncate_picker_text(description, 90),
+            egui::FontId::proportional(11.0),
+            desc_color,
+        );
+    }
+    response
 }
 
 /// Tucks technical/debug detail (socket paths, raw settings keys, hex

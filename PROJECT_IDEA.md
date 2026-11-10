@@ -1995,8 +1995,15 @@ Assistant with a default grant derived from the built-in recipes. The screen
 keeps ids, identities, and public keys under advanced details, explains that
 the grant expires, distinguishes pausing the schedule from revoking authority,
 shows catalogue descriptions for every capability, auto-refreshes definitions
-every 30 seconds, and surfaces unused agent identities for cleanup. VM
-screenshots and the VM acceptance pass remain.
+every 30 seconds, and surfaces unused agent identities for cleanup. A curated
+gallery now ships five starting points (Desktop check, Update watch, AI
+readiness, Package doctor, Notification triage); the first three are nscript
+recipes loaded as built-ins, and the gallery supplies cadence, expiry, and a
+manual/scheduled default. The wizard renders the recipe's typed input schema
+for the input-driven templates, and the assistant's default grant is a
+curated recipe set rather than every built-in recipe. Finished agent tasks
+publish a local `evermore-notify` event so observers surface as desktop
+notifications. VM screenshots and the VM acceptance pass remain.
 
 L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,
 validates it against the catalogue, repairs malformed or out-of-catalogue

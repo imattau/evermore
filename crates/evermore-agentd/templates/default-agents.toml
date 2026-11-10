@@ -1,0 +1,61 @@
+# Curated starting points for the Agents gallery.
+#
+# The recipe is the behaviour (an nscript or TOML built-in); this file only
+# supplies product metadata and defaults. `manual = true` creates an agent
+# whose schedule starts disabled; Run now still works.
+
+[[template]]
+id = "desktop-check"
+recipe = "desktop.check"
+name = "Desktop check"
+summary = "A daily one-line health check for notifications, trusted updates, and local AI."
+category = "Overview"
+cadence_seconds = 86400
+expiry_days = 365
+badge = "Read-only"
+requires = ["npack", "local AI"]
+
+[[template]]
+id = "update-watch"
+recipe = "updates.watch"
+name = "Update watch"
+summary = "See when trusted package updates, resolver errors, or revoked releases are waiting."
+category = "Packages"
+cadence_seconds = 86400
+expiry_days = 365
+badge = "Read-only"
+requires = ["npack"]
+
+[[template]]
+id = "ai-readiness"
+recipe = "ai.check"
+name = "AI readiness"
+summary = "Check the local inference, model, index, and context services."
+category = "Local AI"
+cadence_seconds = 604800
+expiry_days = 365
+badge = "Read-only"
+requires = ["local AI"]
+
+[[template]]
+id = "package-doctor"
+recipe = "packages.doctor"
+name = "Package doctor"
+summary = "Explain why one installed package is missing a dependency or needs attention."
+category = "Packages"
+cadence_seconds = 604800
+expiry_days = 365
+badge = "Read-only · manual"
+manual = true
+requires = ["npack"]
+
+[[template]]
+id = "notification-triage"
+recipe = "notifications.triage"
+name = "Notification triage"
+summary = "Review recent notifications and dismiss one by its local ID."
+category = "Notifications"
+cadence_seconds = 604800
+expiry_days = 90
+badge = "Asks before changing"
+manual = true

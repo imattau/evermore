@@ -2,8 +2,10 @@ module evermore_packages @ 0.1.0
 language ">=0.1.0 <0.2.0"
 reference "https://github.com/imattau/evermore/blob/main/crates/evermore-common/src/lib.rs"
 
-record PackageListing {
-    field count: Integer
+record Package {
+    field publisher: Text
+    field name: Text
+    field version: Text
 }
 
 record Dependency {
@@ -21,9 +23,43 @@ record DependencyExplanation {
     field dependencies: List<Dependency>
 }
 
+record Update {
+    field publisher: Text
+    field name: Text
+    field current_version: Text
+    field available_version: Text
+    field sha256: Text
+    field reference: Text
+}
+
+record RevokedRelease {
+    field publisher: Text
+    field name: Text
+}
+
+record ResolverError {
+    field message: Text
+}
+
+record UpdatePlan {
+    field count: Integer
+    field updates: List<Update>
+    field revoked: List<RevokedRelease>
+    field errors: List<ResolverError>
+}
+
+record InstallResult {
+    field publisher: Text
+    field name: Text
+    field version: Text
+    field sha256: Text
+}
+
 error PackagesError {
     field message: Text
 }
 
-operation list_installed() -> Result<PackageListing,PackagesError> effect Storage permission packages_read
+operation list_installed() -> Result<List<Package>,PackagesError> effect Storage permission packages_read
 operation explain_dependencies(publisher: Text, name: Text) -> Result<DependencyExplanation,PackagesError> effect Storage permission packages_read
+operation update_plan() -> Result<UpdatePlan,PackagesError> effect Storage permission packages_read
+operation install_pinned(publisher: Text, name: Text, version: Text, sha256: Text) -> Result<InstallResult,PackagesError> effect Storage permission packages_write

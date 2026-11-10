@@ -1,0 +1,36 @@
+module evermore_ai @ 0.1.0
+language ">=0.1.0 <0.2.0"
+reference "https://github.com/imattau/evermore/blob/main/crates/evermore-common/src/lib.rs"
+
+record InferStatus {
+    field protocol_version: Integer
+    field backend: Text
+    field ready: Bool
+}
+
+record Model {
+    field name: Text
+    field loaded: Bool
+    field context_size: Option<Integer>
+    field capabilities: List<Text>
+}
+
+record IndexStatus {
+    field protocol_version: Integer
+    field ready: Bool
+    field selected_files: Integer
+}
+
+record ContextStatus {
+    field protocol_version: Integer
+    field ready: Bool
+}
+
+error AiError {
+    field message: Text
+}
+
+operation infer_status() -> Result<InferStatus,AiError> effect Storage permission ai_read
+operation model_list() -> Result<List<Model>,AiError> effect Storage permission ai_read
+operation index_status() -> Result<IndexStatus,AiError> effect Storage permission ai_read
+operation context_status() -> Result<ContextStatus,AiError> effect Storage permission ai_read

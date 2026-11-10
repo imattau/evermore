@@ -8,15 +8,20 @@
 
 use std::sync::Arc;
 
-use evermore_common::agent::{AgentDefinition, AgentJob, AgentJobRuntime, Task};
-use serde_json::json;
+use evermore_common::agent::{AgentDefinition, AgentJob, AgentJobRuntime, Task, TaskStatus};
+use serde_json::{Value, json};
 
 use crate::agent_runtime::AgentRuntimeStore;
 use crate::agents::AgentStore;
 use crate::clients;
-use crate::{recipe, runner::Runner};
+use crate::{recipe, relay_client, runner::Runner};
 
-pub fn spawn(agents: Arc<AgentStore>, runtime: Arc<AgentRuntimeStore>, base: Arc<Runner>) {
+pub fn spawn(
+    agents: Arc<AgentStore>,
+    runtime: Arc<AgentRuntimeStore>,
+    base: Arc<Runner>,
+    relay_url: String,
+) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -31,7 +36,7 @@ pub fn spawn(agents: Arc<AgentStore>, runtime: Arc<AgentRuntimeStore>, base: Arc
                     {
                         continue;
                     }
-                    match run_job(&agent, job, &base) {
+                    match run_job(&agent, job, &base, &relay_url) {
                         Ok(task) => {
                             let _ = runtime.mark_run(&agent.id, &job.id, Some(&task.task_id), None);
                         }
@@ -64,6 +69,7 @@ pub fn run_job(
     agent: &AgentDefinition,
     job: &AgentJob,
     base: &Arc<Runner>,
+    relay_url: &str,
 ) -> Result<Task, String> {
     if !agent.enabled {
         return Err(format!("agent '{}' is paused", agent.id));
@@ -90,8 +96,61 @@ pub fn run_job(
     })?;
     let task = base.store.get(&task.task_id)?;
     let task_id = task.task_id.clone();
-    std::thread::spawn(move || runner.run(task_id, recipe));
+    let notify_agent = agent.clone();
+    let store = Arc::clone(&base.store);
+    let relay_url = relay_url.to_string();
+    std::thread::spawn(move || {
+        runner.run(task_id.clone(), recipe);
+        if let Ok(finished) = store.get(&task_id) {
+            notify_finished(&notify_agent, &finished, &relay_url);
+        }
+    });
     Ok(task)
+}
+
+fn notify_finished(agent: &AgentDefinition, task: &Task, relay_url: &str) {
+    let summary = task
+        .result
+        .as_ref()
+        .map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .or_else(|| task.error.clone())
+        .unwrap_or_else(|| task_status_label(task.status).to_string());
+    let summary = summary
+        .replace(['\n', '\r'], " ")
+        .chars()
+        .take(400)
+        .collect::<String>();
+    let content = format!("{}: {}", agent.title, summary);
+    let tags = vec![vec!["t".to_string(), "evermore-notify".to_string()]];
+    let Ok(value) = clients::sign_event(&agent.identity, &content, tags) else {
+        return;
+    };
+    let Ok(event) = serde_json::from_value::<nostr::event::Event>(value) else {
+        return;
+    };
+    if let Err(error) = relay_client::publish(relay_url, &event) {
+        eprintln!("evermore-agentd: couldn't publish agent notification: {error}");
+    }
+}
+
+fn task_status_label(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Running => "running",
+        TaskStatus::AwaitingApproval => "waiting for your approval",
+        TaskStatus::Succeeded => "finished",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Denied => "denied",
+        TaskStatus::Expired => "expired",
+        TaskStatus::Cancelled => "cancelled",
+        TaskStatus::PartiallyCompleted => "partially completed",
+        TaskStatus::ExecutionUnknown => "execution unknown",
+        TaskStatus::Replanned => "replanned",
+        TaskStatus::Unknown => "unknown",
+    }
 }
 
 pub fn resolve_agent_pubkey(
@@ -176,6 +235,14 @@ mod tests {
             agent_pubkey: "b".repeat(64),
             owner_pubkey: "c".repeat(64),
         });
-        assert!(run_job(&agent, &agent.jobs[0], &base).is_err());
+        assert!(
+            run_job(
+                &agent,
+                &agent.jobs[0],
+                &base,
+                relay_client::DEFAULT_RELAY_URL
+            )
+            .is_err()
+        );
     }
 }

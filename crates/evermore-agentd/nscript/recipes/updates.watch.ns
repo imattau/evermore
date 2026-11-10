@@ -1,0 +1,18 @@
+// title: Update watch
+// description: Report trusted package updates, resolver errors, and revoked releases.
+use evermore_packages
+
+permissions {
+    packages_read
+    clock
+    log
+}
+
+every 1d {
+    let plan = evermore_packages.update_plan()?
+    print(
+        "Trusted updates: " + text(plan.count) +
+        " · Resolver errors: " + text(plan.errors.count) +
+        " · Revoked: " + text(plan.revoked.count)
+    )
+}

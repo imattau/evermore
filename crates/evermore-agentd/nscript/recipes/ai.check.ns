@@ -1,0 +1,23 @@
+// title: AI readiness
+// description: Check the local inference, model, index, and context services.
+use evermore_ai
+
+permissions {
+    ai_read
+    clock
+    log
+}
+
+every 7d {
+    let infer = evermore_ai.infer_status()?
+    let models = evermore_ai.model_list()?
+    let index = evermore_ai.index_status()?
+    let context = evermore_ai.context_status()?
+    print(
+        "Backend: " + infer.backend +
+        " · Ready: " + text(infer.ready) +
+        " · Models: " + text(models.count) +
+        " · Indexed files: " + text(index.selected_files) +
+        " · Context ready: " + text(context.ready)
+    )
+}

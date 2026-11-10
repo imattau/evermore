@@ -78,7 +78,28 @@ evermore-agentd status TASK_ID
 evermore-agentd cancel TASK_ID
 evermore-agentd agents
 evermore-agentd agents-reload
+evermore-agentd templates
 ```
+
+## Default agent templates
+
+`evermore-agentd` ships a small, curated gallery of starting points in
+`templates/default-agents.toml`. The recipe owns the behaviour; the template
+supplies the gallery name, one-line summary, default cadence, grant expiry,
+manual/scheduled default, and any advisory prerequisites.
+
+The first set is read-only or manual:
+
+- **Desktop check** (`desktop.check`) — daily notifications/updates/AI summary.
+- **Update watch** (`updates.watch`) — daily trusted-update summary.
+- **AI readiness** (`ai.check`) — weekly local inference/model/index/context check.
+- **Package doctor** (`packages.doctor`) — manual dependency explanation.
+- **Notification triage** (`notifications.triage`) — manual dismiss by local ID.
+
+`evermore-agentd templates` prints the gallery metadata. A `manual = true`
+template creates a disabled schedule; the panel's **Run now** still works.
+Recipes with required inputs expose their `inputs_schema`; the panel renders
+name/boolean/integer fields and stores the values in the agent job.
 
 ## Relay-backed agent definitions
 
@@ -110,6 +131,12 @@ without a manual reload. Attempts and errors are recorded in a separate 0600
 `last_run_at` so an expired grant or missing identity retries at the configured
 cadence rather than every tick. Running a job still requires the agent's
 active grant and still stops at owner approval for writes.
+
+When a task finishes, agentd publishes a local `kind:1` event tagged
+`evermore-notify` with a short result or failure summary, so
+`evermore-notifyd` shows it as a desktop notification. That is what makes a
+daily observer visible without opening the panel; the event stays on the
+loopback control-plane relay.
 
 ## Standing routines
 

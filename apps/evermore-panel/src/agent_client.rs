@@ -53,6 +53,11 @@ pub fn fetch_agents() -> Result<Vec<evermore_common::agent::AgentView>, String> 
     }
 }
 
+pub fn fetch_templates() -> Result<Vec<evermore_common::agent::AgentTemplate>, String> {
+    let value = request(&Request::ListAgentTemplates)?;
+    serde_json::from_value(value).map_err(|error| format!("invalid agent template list: {error}"))
+}
+
 pub fn reload_agents() -> Result<evermore_common::agent::AgentReload, String> {
     let value = request(&Request::ReloadAgents)?;
     serde_json::from_value(value).map_err(|error| format!("invalid agent reload: {error}"))

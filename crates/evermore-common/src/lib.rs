@@ -2515,6 +2515,8 @@ pub mod agent {
         },
         /// Return the cached, relay-projected agent definitions.
         ListAgents,
+        /// Return the curated starting points for the Agents gallery.
+        ListAgentTemplates,
         /// Re-read owner-authored agent definitions from the control-plane
         /// relay, replacing the local cache. Returns the projected agents and
         /// any per-definition warnings.
@@ -2685,6 +2687,29 @@ pub mod agent {
         pub last_task_id: Option<String>,
         #[serde(default)]
         pub last_error: Option<String>,
+    }
+
+    /// A curated starting point shown in the Agents gallery. The recipe is
+    /// the actual nscript behaviour; the manifest only supplies presentation
+    /// metadata and defaults.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AgentTemplate {
+        pub id: String,
+        #[serde(rename = "recipe")]
+        pub recipe_id: String,
+        pub name: String,
+        pub summary: String,
+        #[serde(default)]
+        pub category: String,
+        pub cadence_seconds: u64,
+        pub expiry_days: u64,
+        #[serde(default)]
+        pub badge: String,
+        /// Manual templates create a disabled schedule; Run now still works.
+        #[serde(default)]
+        pub manual: bool,
+        #[serde(default)]
+        pub requires: Vec<String>,
     }
 
     /// A cached definition plus whether its signing identity is available on

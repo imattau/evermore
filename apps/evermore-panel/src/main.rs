@@ -18,6 +18,7 @@ use ai_session_client::{ContextGrant, ContextScope, RefreshPolicy, Session};
 use eframe::egui;
 use evermore_common::ai::{Backend, Message, Role};
 use evermore_common::operations::Definition;
+use serde_json::Value;
 use signer_client::Identity;
 
 // Lucide icons (ISC license, see assets/icons/LICENSE), 24px / 2px-stroke
@@ -394,6 +395,11 @@ struct PanelApp {
     agents_loaded: bool,
     agents_error: Option<String>,
     agents_next_poll: Option<std::time::Instant>,
+    agent_templates: Vec<evermore_common::agent::AgentTemplate>,
+    agent_templates_loaded: bool,
+    agent_templates_error: Option<String>,
+    agent_job_inputs: serde_json::Map<String, serde_json::Value>,
+    agent_job_enabled: bool,
     agent_wizard_open: bool,
     agent_wizard_step: u8,
     agent_title: String,
@@ -1095,6 +1101,19 @@ impl PanelApp {
         self.agents_next_poll = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
+    fn refresh_agent_templates(&mut self) {
+        self.agent_templates_loaded = true;
+        match agent_client::fetch_templates() {
+            Ok(templates) => {
+                self.agent_templates = templates;
+                self.agent_templates_error = None;
+            }
+            Err(error) => {
+                self.agent_templates_error = Some(error);
+            }
+        }
+    }
+
     fn start_agent_runner(&mut self) {
         self.agent_error = None;
         self.agent_status = None;
@@ -1113,6 +1132,7 @@ impl PanelApp {
             Ok(output) if output.status.success() => {
                 self.agent_status = Some(format!("Starting {unit}…"));
                 self.agents_loaded = false;
+                self.agent_templates_loaded = false;
                 self.agents_next_poll =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
                 self.agents_error = None;
@@ -1184,6 +1204,24 @@ impl PanelApp {
             .unwrap_or_default();
         self.agent_interval_seconds = 86_400;
         self.agent_expiry_days = 90;
+        self.agent_job_inputs.clear();
+        self.agent_job_enabled = true;
+    }
+
+    fn open_agent_template(&mut self, template: &evermore_common::agent::AgentTemplate) {
+        self.agent_wizard_open = true;
+        // The template supplies the name, recipe, cadence, and expiry, so
+        // open directly on the review/inputs step.
+        self.agent_wizard_step = 1;
+        self.agent_title = template.name.clone();
+        self.agent_slug = template.id.clone();
+        self.agent_recipe = template.recipe_id.clone();
+        self.agent_interval_seconds = template.cadence_seconds;
+        self.agent_expiry_days = template.expiry_days;
+        self.agent_job_enabled = !template.manual;
+        self.agent_job_inputs.clear();
+        self.agent_status = None;
+        self.agent_error = None;
     }
 
     fn owner_identity(&self) -> Option<signer_client::Identity> {
@@ -1237,6 +1275,23 @@ impl PanelApp {
             self.agent_error = Some("Choose a recipe for this agent.".to_string());
             return;
         };
+        if let Some(required) = recipe
+            .inputs_schema
+            .get("required")
+            .and_then(Value::as_array)
+        {
+            for key in required.iter().filter_map(Value::as_str) {
+                let missing = match self.agent_job_inputs.get(key) {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(value)) => value.trim().is_empty(),
+                    _ => false,
+                };
+                if missing {
+                    self.agent_error = Some(format!("Fill in the '{key}' input."));
+                    return;
+                }
+            }
+        }
         let operations = recipe.operations.clone();
         if operations.is_empty() {
             self.agent_error = Some("That recipe declares no operations.".to_string());
@@ -1298,9 +1353,9 @@ impl PanelApp {
             jobs: vec![evermore_common::agent::AgentJob {
                 id: "main".to_string(),
                 recipe_id: recipe.id.clone(),
-                inputs: serde_json::json!({}),
+                inputs: serde_json::Value::Object(self.agent_job_inputs.clone()),
                 interval_seconds: self.agent_interval_seconds,
-                enabled: true,
+                enabled: self.agent_job_enabled,
             }],
             created_at: now,
             updated_at: now,
@@ -1452,6 +1507,47 @@ impl PanelApp {
         relay_client::publish(relay_client::DEFAULT_RELAY_URL, &deletion)
     }
 
+    fn agent_templates_ui(&mut self, ui: &mut egui::Ui) {
+        if self.agent_templates.is_empty() {
+            if let Some(error) = &self.agent_templates_error {
+                ui.weak(format!("Agent templates unavailable: {error}"));
+            }
+            return;
+        }
+        ui.label(egui::RichText::new("Start with a template").strong());
+        ui.weak(
+            "Ready-made agents. Review the details, fill in any inputs, and create one; \
+             nothing runs until you do.",
+        );
+        ui.add_space(6.0);
+        let templates = self.agent_templates.clone();
+        for template in templates {
+            open_section(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&template.name).strong().size(15.0));
+                    if !template.badge.is_empty() {
+                        ui.weak(&template.badge);
+                    }
+                });
+                ui.weak(&template.summary);
+                let cadence = if template.manual {
+                    "Manual".to_string()
+                } else {
+                    format_interval(template.cadence_seconds)
+                };
+                let requirements = if template.requires.is_empty() {
+                    "No extra setup".to_string()
+                } else {
+                    format!("Needs {}", template.requires.join(", "))
+                };
+                ui.weak(format!("{cadence} · {requirements}"));
+                if ui.button("Use this agent").clicked() {
+                    self.open_agent_template(&template);
+                }
+            });
+        }
+    }
+
     fn agents_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Agents");
         ui.weak(
@@ -1495,6 +1591,7 @@ impl PanelApp {
                 start = ui.button("Start agent runner").clicked();
             });
             if retry {
+                self.agent_templates_loaded = false;
                 self.refresh_agents();
             }
             if start {
@@ -1503,10 +1600,12 @@ impl PanelApp {
         }
 
         if self.agents.is_empty() {
+            self.agent_templates_ui(ui);
+            ui.add_space(12.0);
             open_section(ui, |ui| {
-                ui.label(egui::RichText::new("No agents yet").strong());
-                ui.weak("Create one to run a recipe on a schedule under its own identity.");
-                if ui.button("Create your first agent").clicked() {
+                ui.label(egui::RichText::new("Or start from scratch").strong());
+                ui.weak("Pick any installed recipe and set the cadence yourself.");
+                if ui.button("Create a custom agent").clicked() {
                     self.open_agent_wizard();
                 }
             });
@@ -1517,6 +1616,11 @@ impl PanelApp {
             open_section(ui, |ui| self.agent_card_ui(ui, &agent));
             ui.add_space(8.0);
         }
+
+        ui.add_space(12.0);
+        ui.collapsing("Add another agent from a template", |ui| {
+            self.agent_templates_ui(ui);
+        });
     }
 
     fn assistant_card_ui(&mut self, ui: &mut egui::Ui) {
@@ -1664,9 +1768,23 @@ impl PanelApp {
     }
 
     fn assistant_operations(&self) -> Vec<String> {
+        // Deliberately curated, not "every built-in recipe": adding a
+        // template such as notification triage must not silently widen the
+        // interactive assistant's default grant.
+        const ASSISTANT_RECIPE_IDS: &[&str] = &[
+            "audit.digest",
+            "packages.doctor",
+            "packages.updates",
+            "settings.concierge",
+            "workspace.compose",
+            "notifications.dnd",
+            "desktop.check",
+            "updates.watch",
+            "ai.check",
+        ];
         let mut operations = std::collections::BTreeSet::new();
         for recipe in &self.agent_recipes {
-            if recipe.source == "builtin" {
+            if ASSISTANT_RECIPE_IDS.contains(&recipe.id.as_str()) {
                 operations.extend(recipe.operations.iter().cloned());
             }
         }
@@ -1812,9 +1930,10 @@ impl PanelApp {
         for job in &definition.jobs {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&job.recipe_id).monospace());
-                ui.weak(format_interval(job.interval_seconds));
-                if !job.enabled {
-                    ui.weak("schedule off");
+                if job.enabled {
+                    ui.weak(format_interval(job.interval_seconds));
+                } else {
+                    ui.weak("Manual only");
                 }
                 if ui
                     .add_enabled(can_run, egui::Button::new("Run now"))
@@ -1824,15 +1943,19 @@ impl PanelApp {
                 }
             });
             if let Some(runtime) = agent.runtime.get(&job.id) {
-                if let Some(last) = runtime.last_run_at {
-                    ui.weak(format!(
-                        "Last run {} · next {}",
-                        relative_age(last),
-                        relative_next(last.saturating_add(job.interval_seconds))
-                    ));
+                if job.enabled {
+                    if let Some(last) = runtime.last_run_at {
+                        ui.weak(format!(
+                            "Last run {} · next {}",
+                            relative_age(last),
+                            relative_next(last.saturating_add(job.interval_seconds))
+                        ));
+                    } else {
+                        let first = definition.created_at.saturating_add(job.interval_seconds);
+                        ui.weak(format!("First run {}", relative_next(first)));
+                    }
                 } else {
-                    let first = definition.created_at.saturating_add(job.interval_seconds);
-                    ui.weak(format!("First run {}", relative_next(first)));
+                    ui.weak("Manual — use Run now when you need it.");
                 }
                 if let Some(task_id) = &runtime.last_task_id {
                     ui.weak(format!("Task {task_id}"));
@@ -1843,6 +1966,8 @@ impl PanelApp {
                         ui.monospace(error);
                     });
                 }
+            } else if !job.enabled {
+                ui.weak("Manual — use Run now when you need it.");
             }
         }
 
@@ -2075,6 +2200,7 @@ impl PanelApp {
         ui.add_space(6.0);
         ui.label("Recipe");
         let recipes = self.agent_recipes.clone();
+        let before_recipe = self.agent_recipe.clone();
         egui::ComboBox::from_id_salt("agent-wizard-recipe")
             .selected_text(if self.agent_recipe.is_empty() {
                 "Choose a recipe"
@@ -2090,6 +2216,9 @@ impl PanelApp {
                     );
                 }
             });
+        if self.agent_recipe != before_recipe {
+            self.agent_job_inputs.clear();
+        }
         if let Some(recipe) = recipes.iter().find(|recipe| recipe.id == self.agent_recipe) {
             ui.weak(&recipe.description);
             let reads = recipe
@@ -2133,6 +2262,10 @@ impl PanelApp {
                     ui.selectable_value(&mut self.agent_expiry_days, days, format!("{days} days"));
                 }
             });
+        ui.checkbox(
+            &mut self.agent_job_enabled,
+            "Run on the schedule (uncheck for manual only)",
+        );
 
         ui.add_space(8.0);
         if let Some(error) = &self.agent_error {
@@ -2150,6 +2283,82 @@ impl PanelApp {
                 self.agent_error = Some("Choose a recipe.".into());
             } else {
                 self.agent_wizard_step = 1;
+            }
+        }
+    }
+
+    fn agent_job_inputs_ui(&mut self, ui: &mut egui::Ui, schema: &Value) {
+        let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+            return;
+        };
+        let required: std::collections::BTreeSet<&str> = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for (name, property) in properties {
+            let label = if required.contains(name.as_str()) {
+                format!("{name} *")
+            } else {
+                name.clone()
+            };
+            match property.get("type").and_then(Value::as_str) {
+                Some("string") => {
+                    let mut value = self
+                        .agent_job_inputs
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    ui.label(&label);
+                    if ui.add(egui::TextEdit::singleline(&mut value)).changed() {
+                        if value.is_empty() {
+                            self.agent_job_inputs.remove(name);
+                        } else {
+                            self.agent_job_inputs
+                                .insert(name.clone(), Value::String(value));
+                        }
+                    }
+                }
+                Some("integer") => {
+                    let default = property.get("minimum").and_then(Value::as_i64).unwrap_or(0);
+                    if !self.agent_job_inputs.contains_key(name) {
+                        self.agent_job_inputs
+                            .insert(name.clone(), Value::from(default));
+                    }
+                    let mut value = self
+                        .agent_job_inputs
+                        .get(name)
+                        .and_then(Value::as_i64)
+                        .unwrap_or(default);
+                    ui.horizontal(|ui| {
+                        ui.label(&label);
+                        if ui.add(egui::DragValue::new(&mut value)).changed() {
+                            self.agent_job_inputs
+                                .insert(name.clone(), Value::from(value));
+                        }
+                    });
+                }
+                Some("boolean") => {
+                    if !self.agent_job_inputs.contains_key(name) {
+                        self.agent_job_inputs
+                            .insert(name.clone(), Value::Bool(false));
+                    }
+                    let mut value = self
+                        .agent_job_inputs
+                        .get(name)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if ui.checkbox(&mut value, &label).changed() {
+                        self.agent_job_inputs
+                            .insert(name.clone(), Value::Bool(value));
+                    }
+                }
+                _ => {
+                    ui.weak(format!("{label}: unsupported input type"));
+                }
             }
         }
     }
@@ -2180,6 +2389,25 @@ impl PanelApp {
              Use Run now on the card to test it immediately.",
         );
         ui.add_space(6.0);
+
+        if let Some(recipe) = self
+            .agent_recipes
+            .iter()
+            .find(|recipe| recipe.id == self.agent_recipe)
+            .cloned()
+        {
+            let schema = recipe.inputs_schema.clone();
+            if schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| !properties.is_empty())
+            {
+                ui.label("Inputs");
+                ui.weak("These values are fixed for every run of this agent.");
+                self.agent_job_inputs_ui(ui, &schema);
+                ui.add_space(6.0);
+            }
+        }
 
         let mut reads = Vec::new();
         let mut writes = Vec::new();
@@ -3045,36 +3273,54 @@ impl eframe::App for PanelApp {
             return;
         }
         if self.ai_drawer {
+            if self.ai_drawer_collapsed {
+                // A horizontal "AI  ›" button plus a trailing label doesn't
+                // fit a 40px-wide window -- same bug the Nostr drawer's
+                // collapsed state had, fixed there with the same vertical,
+                // single-control layout used here.
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(8, 10))
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            if ui
+                                .button("\u{203a}")
+                                .on_hover_text("Open the AI drawer")
+                                .clicked()
+                            {
+                                self.ai_drawer_collapsed = false;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                    egui::vec2(400.0, 680.0),
+                                ));
+                                // Re-assert focus after the resize so this
+                                // window stays on top of Sway's floating
+                                // stack instead of leaving that to chance --
+                                // the click that triggered this already had
+                                // it focused, so this isn't a focus steal.
+                                let _ = sway_windows::raise_window("Evermore AI");
+                            }
+                            ui.add_space(6.0);
+                            ui.weak("AI");
+                        });
+                    });
+                return;
+            }
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(14, 10))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let label = if self.ai_drawer_collapsed {
-                            "AI  ›"
-                        } else {
-                            "‹"
-                        };
-                        if ui.button(label).clicked() {
-                            self.ai_drawer_collapsed = !self.ai_drawer_collapsed;
+                        if ui
+                            .button("\u{2039}")
+                            .on_hover_text("Collapse the AI drawer")
+                            .clicked()
+                        {
+                            self.ai_drawer_collapsed = true;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                                egui::vec2(
-                                    if self.ai_drawer_collapsed {
-                                        40.0
-                                    } else {
-                                        400.0
-                                    },
-                                    680.0,
-                                ),
+                                egui::vec2(40.0, 680.0),
                             ));
-                        }
-                        if self.ai_drawer_collapsed {
-                            ui.weak("AI drawer");
+                            let _ = sway_windows::raise_window("Evermore AI");
                         }
                     });
                 });
-            if self.ai_drawer_collapsed {
-                return;
-            }
             self.ai_drawer_ui(ui);
             return;
         } else {
@@ -3321,6 +3567,9 @@ impl eframe::App for PanelApp {
                 }
                 if !self.agent_recipes_loaded {
                     self.refresh_agent();
+                }
+                if !self.agent_templates_loaded {
+                    self.refresh_agent_templates();
                 }
                 if !self.identities_loaded {
                     self.refresh_identities();

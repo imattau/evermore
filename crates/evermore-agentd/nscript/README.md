@@ -57,6 +57,19 @@ validation error (or, worse, a wrong one that still validates).
   This is the first recipe to exercise the projector's **write** path:
   `select` → `read` → `render` → `write`. Asserted by
   `nscript_recipe::tests::notifications_triage_ns_projects_a_read_then_a_render_then_a_write_step`.
+- `modules/evermore_ai/0.1.0.nsm` — the AI status/list subset:
+  `infer_status`, `model_list`, `index_status`, and `context_status`. The
+  catalogue nests these (`ai.infer.status`), so the projector maps the short
+  nscript names explicitly rather than deriving `ai.<name>` from the module.
+- `recipes/desktop.check.ns`, `recipes/updates.watch.ns`, and
+  `recipes/ai.check.ns` — the first **default agent templates**, all
+  read-only. They are loaded as built-ins and paired with
+  `templates/default-agents.toml`, which supplies the gallery name, summary,
+  cadence, expiry, and manual/scheduled default.
+- The module signature test now also compares the **return shape** (array vs
+  object) against the real catalogue. This is what caught
+  `notifications.list_recent` and `packages.list_installed` declaring records
+  while the catalogue returns arrays.
 
 ## The conventions the projector requires
 
@@ -71,8 +84,12 @@ fixes a convention for each rather than guessing:
   text, in either order, before parsing. A recipe without a `// title: ...`
   line is refused.
 - **Module naming.** `use evermore_<prefix>` resolves to the real catalogue
-  operation prefix `<prefix>` (`evermore_packages` → `packages.*`). A module
-  that doesn't follow this is refused rather than silently skipped.
+  operation prefix `<prefix>` (`evermore_packages` → `packages.*`). The AI
+  namespace is explicitly mapped because its catalogue names are three
+  segments: `evermore_ai.infer_status` → `ai.infer.status`,
+  `model_list` → `ai.model.list`, `index_status` → `ai.index.status`, and
+  `context_status` → `ai.context.status`. A module that doesn't map to a real
+  catalogue operation is refused rather than silently skipped.
 - **Shape.** Zero or more `input name: Type` declarations (→ one `select`
   step, id `choose`); exactly one `every`/`at` block whose body is zero or
   more `let name = module.op(args)?` statements (each → one `read` or

@@ -1,0 +1,26 @@
+// title: Desktop check
+// description: A daily summary of pending notifications, trusted updates, and local AI readiness.
+use evermore_notifications
+use evermore_packages
+use evermore_ai
+
+permissions {
+    notifications_read
+    packages_read
+    ai_read
+    clock
+    log
+}
+
+every 1d {
+    let notes = evermore_notifications.list_recent()?
+    let plan = evermore_packages.update_plan()?
+    let infer = evermore_ai.infer_status()?
+    let index = evermore_ai.index_status()?
+    print(
+        "Notifications: " + text(notes.count) +
+        " · Trusted updates: " + text(plan.count) +
+        " · AI ready: " + text(infer.ready) +
+        " · Indexed files: " + text(index.selected_files)
+    )
+}

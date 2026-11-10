@@ -6,6 +6,7 @@ use std::sync::Arc;
 use evermore_agentd::{
     agent_runtime::AgentRuntimeStore, agents::AgentStore, clients, mcp_agent, propose, recipe,
     relay_client, render, routine::RoutineStore, runner::Runner, scheduler, store::TaskStore,
+    templates,
 };
 use evermore_common::agent::{self, AgentHealth, Request, Response, Routine, Task};
 use serde_json::{Value, json};
@@ -33,6 +34,7 @@ fn main() {
         Some("routine-remove") => routine_remove_cli(),
         Some("agents") => agents_cli(),
         Some("agents-reload") => agents_reload_cli(),
+        Some("templates") => templates_cli(),
         _ => {
             eprintln!(
                 "usage: evermore-agentd <serve|recipes|run|propose|ask|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove|agents|agents-reload>"
@@ -55,6 +57,7 @@ fn main() {
             eprintln!("  routine-enable ID | routine-disable ID | routine-remove ID");
             eprintln!("  agents   list cached relay-backed agent definitions");
             eprintln!("  agents-reload  re-read agent definitions from the relay");
+            eprintln!("  templates  list curated agent starting points");
             std::process::exit(2);
         }
     };
@@ -155,6 +158,7 @@ fn serve() -> std::io::Result<()> {
         Arc::clone(&agents),
         Arc::clone(&runtime),
         Arc::clone(&runner),
+        relay_url.clone(),
     );
 
     let reload_config = AgentReloadConfig {
@@ -236,6 +240,7 @@ fn handle_request(
         Request::ListAgents => {
             Response::ok(agents.views(&runner.owner_pubkey, &runner.agent_pubkey, runtime))
         }
+        Request::ListAgentTemplates => Response::ok(templates::load()),
         Request::ReloadAgents => match reload_config.owner_identity.as_deref() {
             Some(owner_identity) => match agents.reload(
                 &reload_config.relay_url,
@@ -255,26 +260,28 @@ fn handle_request(
             None => Response::err(format!("unknown agent '{agent_id}'")),
             Some(agent) => match agent.jobs.iter().find(|job| job.id == job_id).cloned() {
                 None => Response::err(format!("agent '{}' has no job '{job_id}'", agent.id)),
-                Some(job) => match scheduler::run_job(&agent, &job, runner) {
-                    Ok(task) => {
-                        if let Err(error) =
-                            runtime.mark_run(&agent.id, &job.id, Some(&task.task_id), None)
-                        {
-                            eprintln!("evermore-agentd: could not record agent run: {error}");
+                Some(job) => {
+                    match scheduler::run_job(&agent, &job, runner, &reload_config.relay_url) {
+                        Ok(task) => {
+                            if let Err(error) =
+                                runtime.mark_run(&agent.id, &job.id, Some(&task.task_id), None)
+                            {
+                                eprintln!("evermore-agentd: could not record agent run: {error}");
+                            }
+                            Response::ok(task)
                         }
-                        Response::ok(task)
-                    }
-                    Err(error) => {
-                        if let Err(record_error) =
-                            runtime.mark_run(&agent.id, &job.id, None, Some(error.clone()))
-                        {
-                            eprintln!(
-                                "evermore-agentd: could not record agent error: {record_error}"
-                            );
+                        Err(error) => {
+                            if let Err(record_error) =
+                                runtime.mark_run(&agent.id, &job.id, None, Some(error.clone()))
+                            {
+                                eprintln!(
+                                    "evermore-agentd: could not record agent error: {record_error}"
+                                );
+                            }
+                            Response::err(error)
                         }
-                        Response::err(error)
                     }
-                },
+                }
             },
         },
         Request::ListRecipes => {
@@ -594,6 +601,14 @@ fn agents_reload_cli() -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn templates_cli() -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&templates::load()).map_err(|error| error.to_string())?
     );
     Ok(())
 }

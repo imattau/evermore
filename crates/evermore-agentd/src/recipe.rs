@@ -225,11 +225,29 @@ pub fn builtins() -> Vec<Recipe> {
         builtin(include_str!("../recipes/notifications.dnd.toml")),
         builtin(include_str!("../recipes/packages.doctor.toml")),
         builtin(include_str!("../recipes/packages.updates.toml")),
+        builtin_ns(
+            include_str!("../nscript/recipes/desktop.check.ns"),
+            "desktop.check",
+        ),
+        builtin_ns(
+            include_str!("../nscript/recipes/updates.watch.ns"),
+            "updates.watch",
+        ),
+        builtin_ns(include_str!("../nscript/recipes/ai.check.ns"), "ai.check"),
+        builtin_ns(
+            include_str!("../nscript/recipes/notifications.triage.ns"),
+            "notifications.triage",
+        ),
     ]
 }
 
 fn builtin(text: &str) -> Recipe {
     parse_recipe(text.as_bytes(), "builtin").expect("built-in recipe must be valid")
+}
+
+fn builtin_ns(source: &str, id: &str) -> Recipe {
+    crate::nscript_recipe::parse_ns_recipe(source.as_bytes(), "builtin", id)
+        .expect("built-in nscript recipe must be valid")
 }
 
 /// Load built-ins plus every valid local recipe. Invalid local recipes are
@@ -919,6 +937,30 @@ args = { domain = "theme", key = "mode", value = "{{choose.value}}" }
         for recipe in &recipes {
             validate_recipe(recipe).unwrap();
         }
+        let desktop = recipes
+            .iter()
+            .find(|recipe| recipe.id == "desktop.check")
+            .unwrap();
+        assert_eq!(desktop.steps.len(), 5);
+        assert!(matches!(desktop.steps[0].kind, StepKind::Read));
+        assert!(matches!(desktop.steps[4].kind, StepKind::Render));
+        assert!(
+            desktop.steps[4]
+                .template
+                .as_deref()
+                .is_some_and(|template| template.contains("{{notes.count}}"))
+        );
+        let updates = recipes
+            .iter()
+            .find(|recipe| recipe.id == "updates.watch")
+            .unwrap();
+        assert_eq!(updates.steps.len(), 2);
+        let ai = recipes
+            .iter()
+            .find(|recipe| recipe.id == "ai.check")
+            .unwrap();
+        assert_eq!(ai.steps.len(), 5);
+        assert!(matches!(ai.steps[4].kind, StepKind::Render));
         let workspace = recipes
             .iter()
             .find(|recipe| recipe.id == "workspace.compose")

@@ -66,6 +66,7 @@ use crate::recipe::{Recipe, RecipeStep, validate_recipe};
 const EVERMORE_PACKAGES_NSM: &str = include_str!("../nscript/modules/evermore_packages/0.1.0.nsm");
 const EVERMORE_NOTIFICATIONS_NSM: &str =
     include_str!("../nscript/modules/evermore_notifications/0.1.0.nsm");
+const EVERMORE_AI_NSM: &str = include_str!("../nscript/modules/evermore_ai/0.1.0.nsm");
 
 /// Every Evermore-specific, non-NIP `nscript` module this crate bundles, as
 /// `(module name, source text)`. The single list both
@@ -76,6 +77,7 @@ const EVERMORE_NOTIFICATIONS_NSM: &str =
 const BUNDLED_MODULES: &[(&str, &str)] = &[
     ("evermore_packages", EVERMORE_PACKAGES_NSM),
     ("evermore_notifications", EVERMORE_NOTIFICATIONS_NSM),
+    ("evermore_ai", EVERMORE_AI_NSM),
 ];
 
 /// A registry carrying `nscript`'s standard modules plus Evermore's own,
@@ -103,11 +105,24 @@ fn evermore_module_registry() -> ModuleRegistry {
     registry
 }
 
-/// The real catalogue operation prefix an `nscript` module name stands for,
-/// or `None` if it does not follow the `evermore_<prefix>` convention this
-/// projector requires of every non-NIP module it bundles.
+/// The real catalogue operation prefix an `nscript` module name stands for.
+/// Most modules follow the single-level `evermore_<prefix>` convention
+/// (`evermore_packages` -> `packages.*`).
 fn catalogue_prefix(module: &str) -> Option<&str> {
     module.strip_prefix("evermore_")
+}
+
+/// The exact catalogue operation a `(module, operation)` pair stands for.
+/// `evermore_ai` is special because the catalogue nests it
+/// (`ai.infer.status`), so its short nscript names map explicitly.
+fn catalogue_operation(module: &str, operation: &str) -> Option<String> {
+    match (module, operation) {
+        ("evermore_ai", "infer_status") => Some("ai.infer.status".to_string()),
+        ("evermore_ai", "model_list") => Some("ai.model.list".to_string()),
+        ("evermore_ai", "index_status") => Some("ai.index.status".to_string()),
+        ("evermore_ai", "context_status") => Some("ai.context.status".to_string()),
+        _ => catalogue_prefix(module).map(|prefix| format!("{prefix}.{operation}")),
+    }
 }
 
 fn describe_diagnostics(diagnostics: &[Diagnostic]) -> String {
@@ -394,13 +409,12 @@ pub fn parse_ns_recipe(bytes: &[u8], source: &str, recipe_id: &str) -> Result<Re
                     "every `let` in a recipe's schedule body must call one catalogue \
                             operation, ending in `?`",
                 )?;
-                let prefix = catalogue_prefix(module).ok_or_else(|| {
+                let real_name = catalogue_operation(module, operation).ok_or_else(|| {
                     format!(
                         "module `{module}` does not follow the `evermore_<prefix>` naming \
                               convention this projector requires"
                     )
                 })?;
-                let real_name = format!("{prefix}.{operation}");
                 let definition = operations::find(&real_name)
                     .ok_or_else(|| format!("`{real_name}` is not a known catalogue operation"))?;
                 let kind = match definition.access {
@@ -692,10 +706,14 @@ mod tests {
             let (descriptor, diagnostics) = parse_module(source);
             assert!(diagnostics.is_empty(), "{module_name}: {diagnostics:?}");
             let descriptor = descriptor.expect("a valid module has a descriptor");
-            let prefix = catalogue_prefix(module_name)
-                .expect("bundled modules follow the evermore_<prefix> convention");
             for operation in &descriptor.operations {
-                let real_name = format!("{prefix}.{}", operation.name);
+                let real_name =
+                    catalogue_operation(module_name, &operation.name).unwrap_or_else(|| {
+                        panic!(
+                            "{module_name}.{}: no catalogue operation mapping",
+                            operation.name
+                        )
+                    });
                 let definition = operations::find(&real_name).unwrap_or_else(|| {
                     panic!(
                         "{module_name}.{}: no catalogue operation `{real_name}`",
@@ -744,6 +762,26 @@ mod tests {
                         parameter.name, parameter.type_name
                     );
                 }
+
+                // The shape of the return value matters too: a recipe that
+                // prints `x.count` relies on the runtime value being the
+                // array the catalogue promises, not the record the module
+                // happens to declare. This caught a real drift in
+                // `notifications.list_recent`/`packages.list_installed`.
+                let output_is_array =
+                    definition.output_schema.get("type").and_then(Value::as_str) == Some("array");
+                let returns_list = operation.return_type.starts_with("Result<List<");
+                assert_eq!(
+                    output_is_array,
+                    returns_list,
+                    "`{real_name}`: catalogue output is {}, nscript returns `{}`",
+                    if output_is_array {
+                        "an array"
+                    } else {
+                        "an object"
+                    },
+                    operation.return_type
+                );
             }
         }
     }

@@ -5,6 +5,10 @@
 //! publishes, and agentd projects the result into a local cache. A one-shot
 //! query on startup and on an explicit `ReloadAgents` request is enough; the
 //! scheduler never needs a live subscription to keep running.
+//!
+//! Task-completion notices are the one exception: agentd publishes a local
+//! `kind:1` event tagged `evermore-notify` so `evermore-notifyd` can surface a
+//! finished observer's result as a desktop notification.
 
 use std::time::Duration;
 
@@ -64,4 +68,47 @@ pub fn query(relay_url: &str, filter: serde_json::Value) -> Result<Vec<Event>, S
         serde_json::json!(["CLOSE", sub_id]).to_string(),
     ));
     Ok(events)
+}
+
+/// Publishes `event` and waits for the relay's `OK` response. Used only for
+/// local task-completion notices; definitions and grants are published by the
+/// owner's editor, never by agentd.
+pub fn publish(relay_url: &str, event: &Event) -> Result<(), String> {
+    let (mut ws, _response) = tungstenite::connect(relay_url)
+        .map_err(|error| format!("couldn't connect to relay at {relay_url}: {error}"))?;
+    if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = ws.get_ref() {
+        let _ = tcp.set_read_timeout(Some(QUERY_TIMEOUT));
+    }
+    ws.send(Message::text(
+        serde_json::json!(["EVENT", event]).to_string(),
+    ))
+    .map_err(|error| format!("publishing: {error}"))?;
+    loop {
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                if value.get(0).and_then(|value| value.as_str()) == Some("OK") {
+                    if value
+                        .get(2)
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                    {
+                        return Ok(());
+                    }
+                    let reason = value
+                        .get(3)
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("rejected");
+                    return Err(format!("relay rejected event: {reason}"));
+                }
+            }
+            Ok(Message::Close(_)) => {
+                return Err("relay closed the connection before OK".to_string());
+            }
+            Ok(_) => {}
+            Err(error) => return Err(format!("publish connection error: {error}")),
+        }
+    }
 }

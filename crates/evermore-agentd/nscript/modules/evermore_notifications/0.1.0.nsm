@@ -10,10 +10,6 @@ record Notification {
     field received_at: Integer
 }
 
-record RecentNotifications {
-    field notifications: List<Notification>
-}
-
 record DismissResult {
     field dismissed: Bool
 }
@@ -22,5 +18,5 @@ error NotificationsError {
     field message: Text
 }
 
-operation list_recent() -> Result<RecentNotifications,NotificationsError> effect Storage permission notifications_read
+operation list_recent() -> Result<List<Notification>,NotificationsError> effect Storage permission notifications_read
 operation dismiss(notification_id: Text) -> Result<DismissResult,NotificationsError> effect Storage permission notifications_write

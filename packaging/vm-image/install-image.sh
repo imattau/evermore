@@ -79,7 +79,9 @@ for file in "$ROOT"/packaging/applications/*.desktop; do install -m 0644 "$file"
 printf '\ninclude ~/.config/sway/evermore-desktop.conf\ninclude ~/.config/sway/evermore-waybar.conf\n' \
   >> /etc/skel/.config/sway/config
 install -d -m 0700 /tmp/evermore-sway-config-check
-XDG_RUNTIME_DIR=/tmp/evermore-sway-config-check sway -C -c /etc/skel/.config/sway/config
+HOME=/etc/skel XDG_RUNTIME_DIR=/tmp/evermore-sway-config-check \
+  WLR_BACKENDS=headless WLR_RENDERER=pixman \
+  sway --validate --config /etc/skel/.config/sway/config
 rm -rf /tmp/evermore-sway-config-check
 install -d /usr/lib/systemd/user/default.target.wants
 for unit in evermore-signer.service evermore-relay.service evermore-contextd.service \

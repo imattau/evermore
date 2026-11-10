@@ -17,8 +17,6 @@ use crate::{
     PanelApp, ai_handoff, ai_session_client, nostr_feed_client, signer_client, sway_windows,
 };
 
-const ERROR: egui::Color32 = egui::Color32::from_rgb(230, 120, 110);
-
 impl PanelApp {
     pub(crate) fn nostr_feed_ui(&mut self, ui: &mut egui::Ui) {
         // The feed is a right-edge drawer. Sway has no right-anchor rule, so
@@ -96,6 +94,24 @@ impl PanelApp {
             self.finish_note_drag(ui.ctx());
         }
 
+        if self.nostr_feed_collapsed {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(8, 10))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if ui
+                            .button("\u{2039}")
+                            .on_hover_text("Open the Nostr feed drawer")
+                            .clicked()
+                        {
+                            self.set_nostr_feed_collapsed(ui.ctx(), false);
+                        }
+                        ui.add_space(6.0);
+                        ui.weak("Feed");
+                    });
+                });
+            return;
+        }
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -108,6 +124,13 @@ impl PanelApp {
                             .clicked()
                         {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui
+                            .small_button("\u{203a}")
+                            .on_hover_text("Collapse the feed drawer")
+                            .clicked()
+                        {
+                            self.set_nostr_feed_collapsed(ui.ctx(), true);
                         }
                         if self.nostr_attached_note.is_some()
                             && ui.small_button("Clear reply").clicked()
@@ -124,10 +147,10 @@ impl PanelApp {
                     ui.weak(status);
                 }
                 if let Some(error) = &self.nostr_feed_error {
-                    ui.colored_label(ERROR, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if let Some(error) = &self.nostr_post_error {
-                    ui.colored_label(ERROR, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 self.nostr_reply_composer(ui);
                 ui.add_space(6.0);
@@ -144,6 +167,21 @@ impl PanelApp {
                         }
                     });
             });
+    }
+
+    /// Resizes the feed window between its 40px collapsed sliver and its
+    /// full 340px width, then re-triggers the right-edge anchoring this
+    /// function already does on first map -- shrinking/growing the window
+    /// moves its right edge, so it has to re-snap flush against the
+    /// workspace edge rather than leaving a gap or overhanging it.
+    fn set_nostr_feed_collapsed(&mut self, ctx: &egui::Context, collapsed: bool) {
+        self.nostr_feed_collapsed = collapsed;
+        self.nostr_feed_positioned = false;
+        self.nostr_feed_position_deadline = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            if collapsed { 40.0 } else { 340.0 },
+            680.0,
+        )));
     }
 
     fn note_card(&mut self, ui: &mut egui::Ui, note: &nostr_feed_client::Note) {

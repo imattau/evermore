@@ -442,6 +442,7 @@ struct PanelApp {
     ai_chat_error: Option<String>,
     pending_ai_file: Option<String>,
     nostr_feed_drawer: bool,
+    nostr_feed_collapsed: bool,
     nostr_feed_notes: Vec<nostr_feed_client::Note>,
     nostr_feed_receiver: Option<std::sync::mpsc::Receiver<nostr_feed_client::Note>>,
     nostr_feed_handle: Option<nostr_feed_client::FeedHandle>,

@@ -1250,6 +1250,10 @@ impl PanelApp {
             created_at: now,
             updated_at: now,
         };
+        if let Err(error) = definition.validate() {
+            self.agent_error = Some(format!("The agent definition is invalid: {error}"));
+            return;
+        }
 
         if let Err(error) = self.publish_agent_definition(&owner, &definition) {
             self.agent_error = Some(error);
@@ -1564,11 +1568,11 @@ impl PanelApp {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&definition.title).strong().size(16.0));
             if !agent.available {
-                ui.colored_label(egui::Color32::LIGHT_RED, "unavailable");
+                ui.colored_label(ui.visuals().error_fg_color, "unavailable");
             } else if !definition.enabled {
                 ui.weak("paused");
             } else {
-                ui.colored_label(egui::Color32::from_rgb(139, 183, 255), "active");
+                ui.colored_label(ui.visuals().hyperlink_color, "active");
             }
         });
         if !definition.description.is_empty() {
@@ -1625,7 +1629,13 @@ impl PanelApp {
             });
             if let Some(runtime) = agent.runtime.get(&job.id) {
                 if let Some(last) = runtime.last_run_at {
-                    ui.weak(format!("Last run {}", relative_age(last)));
+                    ui.weak(format!(
+                        "Last run {} · next {}",
+                        relative_age(last),
+                        relative_next(last.saturating_add(job.interval_seconds))
+                    ));
+                } else {
+                    ui.weak("Next run due now");
                 }
                 if let Some(task_id) = &runtime.last_task_id {
                     ui.weak(format!("Task {task_id}"));
@@ -1634,6 +1644,24 @@ impl PanelApp {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
             }
+        }
+
+        let recent: Vec<_> = self
+            .agent_tasks
+            .iter()
+            .filter(|task| task.agent_id.as_deref() == Some(definition.id.as_str()))
+            .take(5)
+            .collect();
+        if !recent.is_empty() {
+            ui.collapsing("Recent tasks", |ui| {
+                for task in recent {
+                    ui.horizontal(|ui| {
+                        ui.monospace(&task.recipe_id);
+                        ui.weak(task_status_name(task.status));
+                        ui.weak(relative_age(task.created_at));
+                    });
+                }
+            });
         }
 
         ui.add_space(6.0);
@@ -4318,6 +4346,14 @@ fn relative_future(timestamp: u64) -> String {
         format!("in {} h", delta / 3_600)
     } else {
         format!("in {} d", delta / 86_400)
+    }
+}
+
+fn relative_next(timestamp: u64) -> String {
+    if timestamp <= now_unix() {
+        "due now".to_string()
+    } else {
+        relative_future(timestamp)
     }
 }
 

@@ -75,9 +75,37 @@ pub fn window_exists(title: &str) -> bool {
 /// to proceed until the reported width matches what was actually requested
 /// turns that race into a harmless retry instead of a silent wrong answer.
 pub fn anchor_to_right_edge(pid: u32, expected_width: f32) -> Result<(), String> {
+    anchor_to("Evermore feed", pid, expected_width, right_edge_target, "feed")
+}
+
+/// Moves the AI drawer flush to the top-left corner of the workspace it
+/// opened on. Sway's static `for_window ... move position 0 px 0 px` rule
+/// only places it there once, at initial map: a later resize (collapsing
+/// to 40px, or expanding back) recenters the window around its old center
+/// point instead of preserving a corner -- confirmed live, with either the
+/// app's own Wayland resize request or an external `swaymsg resize`, so
+/// this has to re-anchor the same way it already does for the feed
+/// drawer's right edge below.
+pub fn anchor_to_left_edge(pid: u32, expected_width: f32) -> Result<(), String> {
+    anchor_to(
+        "Evermore AI",
+        pid,
+        expected_width,
+        |workspace, _window| (workspace.x, workspace.y),
+        "AI",
+    )
+}
+
+fn anchor_to(
+    title: &str,
+    pid: u32,
+    expected_width: f32,
+    target: impl Fn(Rect, Rect) -> (f32, f32),
+    label: &str,
+) -> Result<(), String> {
     let tree = get_tree().ok_or_else(|| "swaymsg get_tree is unavailable".to_string())?;
     let Some((con_id, target_x, target_y)) =
-        compute_right_edge_move(&tree, "Evermore feed", pid, expected_width)?
+        compute_anchor_move(&tree, title, pid, expected_width, target)?
     else {
         return Ok(());
     };
@@ -89,34 +117,36 @@ pub fn anchor_to_right_edge(pid: u32, expected_width: f32) -> Result<(), String>
     if status.success() {
         Ok(())
     } else {
-        Err("swaymsg could not move the feed window".into())
+        Err(format!("swaymsg could not move the {label} window"))
     }
 }
 
-/// The decision logic behind `anchor_to_right_edge`, split out so it can be
-/// exercised against a crafted tree in a test without shelling out to a
-/// real compositor: `Ok(None)` means the window is already flush against
-/// the edge and nothing needs to move; `Ok(Some((con_id, x, y)))` is the
-/// move to issue; `Err` covers everything that should make the caller
-/// retry, including the stale-width guard documented on the caller.
-fn compute_right_edge_move(
+/// The decision logic behind `anchor_to_right_edge`/`anchor_to_left_edge`,
+/// split out so it can be exercised against a crafted tree in a test
+/// without shelling out to a real compositor: `Ok(None)` means the window
+/// is already at the target and nothing needs to move; `Ok(Some((con_id,
+/// x, y)))` is the move to issue; `Err` covers everything that should make
+/// the caller retry, including the stale-width guard documented on
+/// `anchor_to_right_edge`.
+fn compute_anchor_move(
     tree: &serde_json::Value,
     title: &str,
     pid: u32,
     expected_width: f32,
+    target: impl Fn(Rect, Rect) -> (f32, f32),
 ) -> Result<Option<(i64, i64, i64)>, String> {
     let (node, workspace) = find_view_with_workspace(tree, title, pid)
-        .ok_or_else(|| "feed window is not mapped yet".to_string())?;
-    let window = node_rect(node).ok_or_else(|| "feed window has no rect".to_string())?;
+        .ok_or_else(|| "window is not mapped yet".to_string())?;
+    let window = node_rect(node).ok_or_else(|| "window has no rect".to_string())?;
     if (window.width - expected_width).abs() > 1.0 {
-        return Err("feed window has not finished resizing yet".to_string());
+        return Err("window has not finished resizing yet".to_string());
     }
     let workspace = node_rect(workspace).ok_or_else(|| "workspace has no rect".to_string())?;
     let con_id = node
         .get("id")
         .and_then(|id| id.as_i64())
-        .ok_or_else(|| "feed window has no con_id".to_string())?;
-    let (target_x, target_y) = right_edge_target(workspace, window);
+        .ok_or_else(|| "window has no con_id".to_string())?;
+    let (target_x, target_y) = target(workspace, window);
     if (window.x - target_x).abs() < 1.0 && (window.y - target_y).abs() < 1.0 {
         return Ok(None);
     }
@@ -151,6 +181,35 @@ pub fn raise_window(title: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("swaymsg could not focus \"{title}\""))
+    }
+}
+
+/// Reserves `pixels` of permanent margin on `side` ("left" or "right") of
+/// the currently focused workspace, via Sway's live `gaps` adjustment --
+/// there is no exclusive-zone concept for an ordinary xdg_shell toplevel
+/// like these drawers (that is a wlr-layer-shell feature, e.g. what Waybar
+/// uses, and winit/eframe does not create layer-shell surfaces). This only
+/// covers each drawer's 40px *collapsed* width, which is its resting state
+/// for most of its lifetime -- the much larger expanded width still
+/// overlaps whatever tiled window is underneath while open, same as any
+/// ordinary app drawer sliding out. It also reserves the margin along the
+/// whole edge, not just the drawer's own height, since Sway's `gaps` has no
+/// partial-edge targeting; on a monitor much taller than the drawer's fixed
+/// 680px this reserves a bit more than strictly needed above/below it.
+/// "current" means whichever workspace is focused *when this command
+/// runs*, not necessarily the one the window is on -- fine for the normal
+/// case (the drawer opens via a keybinding on the workspace you're already
+/// looking at) but won't follow it across a later workspace switch.
+pub fn reserve_edge_gap(side: &str, pixels: i32) -> Result<(), String> {
+    let command = format!("gaps {side} current set {pixels}");
+    let status = Command::new("swaymsg")
+        .arg(command)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("swaymsg could not set the {side} gap"))
     }
 }
 
@@ -364,7 +423,7 @@ mod tests {
         // job done, is what left the collapsed drawer sitting ~300px short
         // of the true edge -- this must be rejected, not silently used.
         let tree = feed_tree(340.0, 1580.0);
-        let result = compute_right_edge_move(&tree, "Evermore feed", 42, 40.0);
+        let result = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target);
         assert!(
             result.is_err(),
             "a stale (pre-resize) width must be rejected"
@@ -378,7 +437,7 @@ mod tests {
         // 340px width), the target follows the same math as
         // `right_edge_target_sits_flush_against_the_workspace` above.
         let tree = feed_tree(40.0, 1200.0);
-        let (con_id, x, y) = compute_right_edge_move(&tree, "Evermore feed", 42, 40.0)
+        let (con_id, x, y) = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target)
             .unwrap()
             .expect("window is not yet at the target position");
         assert_eq!((con_id, x, y), (7, 1880, 0));
@@ -387,8 +446,25 @@ mod tests {
     #[test]
     fn already_correctly_positioned_needs_no_move() {
         let tree = feed_tree(40.0, 1880.0);
-        let move_needed = compute_right_edge_move(&tree, "Evermore feed", 42, 40.0).unwrap();
+        let move_needed = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, right_edge_target).unwrap();
         assert!(move_needed.is_none());
+    }
+
+    #[test]
+    fn left_edge_target_recentered_by_a_resize_is_corrected_back_to_the_corner() {
+        // Reproduces the AI drawer bug: Sway recenters a floating window
+        // around its old center point on resize instead of preserving a
+        // corner (confirmed live: collapsing from 400px at x=0 landed at
+        // x=180, not x=0), so the drawer has to explicitly re-anchor to
+        // the workspace's top-left corner rather than assume resizing
+        // alone keeps it there.
+        let tree = feed_tree(40.0, 180.0);
+        let (con_id, x, y) = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |workspace, _window| {
+            (workspace.x, workspace.y)
+        })
+        .unwrap()
+        .expect("recentered window should need a move back to the corner");
+        assert_eq!((con_id, x, y), (7, 0, 0));
     }
 
     #[test]

@@ -51,6 +51,11 @@ impl PanelApp {
             };
             if sway_windows::anchor_to_right_edge(std::process::id(), expected_width).is_ok() {
                 self.nostr_feed_positioned = true;
+                // Reserve the collapsed width permanently so a tiled
+                // window never renders underneath the resting 40px
+                // sliver; see `reserve_edge_gap`'s doc comment for what
+                // this does and doesn't cover.
+                let _ = sway_windows::reserve_edge_gap("right", 40);
             } else {
                 let deadline = *self.nostr_feed_position_deadline.get_or_insert_with(|| {
                     std::time::Instant::now() + std::time::Duration::from_secs(2)

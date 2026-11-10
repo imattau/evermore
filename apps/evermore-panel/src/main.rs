@@ -424,6 +424,8 @@ struct PanelApp {
     command_palette: bool,
     ai_drawer: bool,
     ai_drawer_collapsed: bool,
+    ai_drawer_positioned: bool,
+    ai_drawer_position_deadline: Option<std::time::Instant>,
     drawer_focused_output: Option<String>,
     drawer_next_output_poll: Option<std::time::Instant>,
     palette_query: String,
@@ -3269,6 +3271,20 @@ impl eframe::App for PanelApp {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    // Releases the gap a drawer reserved on open (see `reserve_edge_gap`)
+    // on a graceful shutdown -- the window's own "×"/Escape close, or
+    // `poll_drawer_output_focus`'s auto-close. A hard kill (SIGKILL, a
+    // crash) skips this, same caveat `reserve_edge_gap`'s doc comment
+    // already names; the next launch just reserves it again.
+    fn on_exit(&mut self) {
+        if self.ai_drawer {
+            let _ = sway_windows::reserve_edge_gap("left", 0);
+        }
+        if self.nostr_feed_drawer {
+            let _ = sway_windows::reserve_edge_gap("right", 0);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_ai_chat();
         if (self.ai_drawer || self.nostr_feed_drawer) && self.poll_drawer_output_focus(ui.ctx()) {
@@ -3291,6 +3307,35 @@ impl eframe::App for PanelApp {
             return;
         }
         if self.ai_drawer {
+            // The left edge is only correct once, at initial map, from
+            // Sway's static `move position 0 px 0 px` rule -- any resize
+            // after that (collapse/expand) recenters the window instead of
+            // keeping a corner fixed (confirmed live), so this re-anchors
+            // it the same way the feed drawer already does for its right
+            // edge. Reusing that exact retry pattern: `ai_drawer_positioned`
+            // resets to false whenever a resize is requested below, and the
+            // deadline bounds how long it keeps retrying if this isn't Sway.
+            if !self.ai_drawer_positioned {
+                let expected_width = if self.ai_drawer_collapsed { 40.0 } else { 400.0 };
+                if sway_windows::anchor_to_left_edge(std::process::id(), expected_width).is_ok() {
+                    self.ai_drawer_positioned = true;
+                    // Reserve the collapsed width permanently so a tiled
+                    // window never renders underneath the resting 40px
+                    // sliver; see `reserve_edge_gap`'s doc comment for what
+                    // this does and doesn't cover.
+                    let _ = sway_windows::reserve_edge_gap("left", 40);
+                } else {
+                    let deadline = *self.ai_drawer_position_deadline.get_or_insert_with(|| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(2)
+                    });
+                    if std::time::Instant::now() >= deadline {
+                        self.ai_drawer_positioned = true;
+                    } else {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
             if self.ai_drawer_collapsed {
                 // A horizontal "AI  ›" button plus a trailing label doesn't
                 // fit a 40px-wide window -- same bug the Nostr drawer's
@@ -3306,6 +3351,8 @@ impl eframe::App for PanelApp {
                                 .clicked()
                             {
                                 self.ai_drawer_collapsed = false;
+                                self.ai_drawer_positioned = false;
+                                self.ai_drawer_position_deadline = None;
                                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
                                     egui::vec2(400.0, 680.0),
                                 ));
@@ -3332,6 +3379,8 @@ impl eframe::App for PanelApp {
                             .clicked()
                         {
                             self.ai_drawer_collapsed = true;
+                            self.ai_drawer_positioned = false;
+                            self.ai_drawer_position_deadline = None;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
                                 egui::vec2(40.0, 680.0),
                             ));

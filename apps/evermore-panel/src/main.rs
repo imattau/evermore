@@ -1480,16 +1480,17 @@ impl PanelApp {
 
         self.assistant_card_ui(ui);
         ui.add_space(12.0);
+        self.orphan_identities_ui(ui);
+        ui.add_space(12.0);
 
         if let Some(error) = self.agents_error.clone() {
             let mut retry = false;
             let mut start = false;
             open_section(ui, |ui| {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    "Couldn't reach the agent runner.",
-                );
-                ui.weak(&error);
+                ui.colored_label(ui.visuals().error_fg_color, friendly_agent_error(&error));
+                ui.collapsing("Details", |ui| {
+                    ui.monospace(&error);
+                });
                 retry = ui.button("Try again").clicked();
                 start = ui.button("Start agent runner").clicked();
             });
@@ -1555,13 +1556,16 @@ impl PanelApp {
                 && now < grant.expires_at
             {
                 ui.weak(format!(
-                    "Ready · {} operation(s) · grant expires {}",
+                    "Ready · {} operation(s) · authority expires {}",
                     grant.allowed_operations.len(),
                     relative_future(grant.expires_at)
                 ));
-                ui.weak("Writes still stop at the approval window.");
+                ui.weak(
+                    "The assistant's authority is an expiring grant. \
+                     Renew it to keep the AI tab working; writes still stop at the approval window.",
+                );
                 ui.horizontal(|ui| {
-                    if ui.button("Renew 90 days").clicked() {
+                    if ui.button("Renew authority (90 days)").clicked() {
                         match operations_client::submit_grant(
                             &owner.name,
                             &assistant.pubkey_hex,
@@ -1577,7 +1581,15 @@ impl PanelApp {
                             Err(error) => self.agent_error = Some(error),
                         }
                     }
-                    if !grant.grant_id.is_empty() && ui.button("Revoke").clicked() {
+                    if !grant.grant_id.is_empty()
+                        && ui
+                            .button("Revoke authority")
+                            .on_hover_text(
+                                "Removes the assistant's permission to propose operations. \
+                                 Enable it again to use the AI tab.",
+                            )
+                            .clicked()
+                    {
                         match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
                             Ok(_) => {
                                 self.agent_status = Some(
@@ -1612,8 +1624,15 @@ impl PanelApp {
             ui.collapsing("Show operations", |ui| {
                 for name in &operations {
                     ui.monospace(name);
+                    if let Some(definition) = evermore_common::operations::find(name) {
+                        ui.weak(&definition.description);
+                    }
                 }
             });
+            ui.weak(
+                "The grant expires after 365 days so the assistant's authority stays time-bounded. \
+                 You can renew it from this card.",
+            );
             if ui
                 .add_enabled(
                     !operations.is_empty(),
@@ -1654,6 +1673,62 @@ impl PanelApp {
         operations.into_iter().collect()
     }
 
+    fn orphan_identities_ui(&mut self, ui: &mut egui::Ui) {
+        // Never suggest deleting keys from an untrusted or unavailable agent
+        // list: an empty list during a runner outage is not proof that an
+        // identity is unused.
+        if !self.agents_loaded || self.agents_error.is_some() {
+            return;
+        }
+        let known: std::collections::BTreeSet<String> = self
+            .agents
+            .iter()
+            .map(|agent| agent.definition.identity.clone())
+            .collect();
+        let orphans: Vec<_> = self
+            .identities
+            .iter()
+            .filter(|identity| {
+                identity.name.starts_with("agent-") && !known.contains(&identity.name)
+            })
+            .cloned()
+            .collect();
+        if orphans.is_empty() {
+            return;
+        }
+        ui.collapsing(
+            format!("Unused agent identities ({})", orphans.len()),
+            |ui| {
+                ui.weak(
+                    "These keys were created but no current agent definition uses them. \
+                     Remove one only if you abandoned its setup; deleting an active agent's \
+                     key would stop it from signing.",
+                );
+                for identity in &orphans {
+                    ui.horizontal(|ui| {
+                        ui.monospace(&identity.name);
+                        if ui.button("Remove").clicked() {
+                            let slug = identity
+                                .name
+                                .strip_prefix("agent-")
+                                .unwrap_or(&identity.name)
+                                .to_string();
+                            match signer_client::delete_agent_identity(&slug) {
+                                Ok(()) => {
+                                    self.agent_status =
+                                        Some(format!("Removed unused identity {}.", identity.name));
+                                    self.agent_error = None;
+                                    self.refresh_identities();
+                                }
+                                Err(error) => self.agent_error = Some(error),
+                            }
+                        }
+                    });
+                }
+            },
+        );
+    }
+
     fn agent_card_ui(&mut self, ui: &mut egui::Ui, agent: &evermore_common::agent::AgentView) {
         let definition = &agent.definition;
         ui.horizontal(|ui| {
@@ -1669,11 +1744,11 @@ impl PanelApp {
         if !definition.description.is_empty() {
             ui.weak(&definition.description);
         }
-        ui.weak(format!(
-            "Identity {} · {}",
-            definition.identity,
-            short_pubkey(&definition.agent_pubkey)
-        ));
+        ui.weak(format!("Runs as {}", definition.identity));
+        ui.collapsing("Identity details", |ui| {
+            ui.weak(format!("Signer identity: {}", definition.identity));
+            ui.monospace(&definition.agent_pubkey);
+        });
         if let Some(reason) = &agent.unavailable_reason {
             ui.colored_label(ui.visuals().error_fg_color, reason);
         }
@@ -1686,20 +1761,27 @@ impl PanelApp {
         match &grant {
             Some(grant) if grant.grant_published => {
                 ui.weak(format!(
-                    "Grant covers {} operation(s), expires {}",
+                    "Authority covers {} operation(s); expires {}.",
                     grant.allowed_operations.len(),
                     relative_future(grant.expires_at)
                 ));
+                ui.weak(
+                    "The grant expires automatically so an abandoned agent stops on its own. \
+                     Renew it from this card to keep it running.",
+                );
             }
             Some(_) => {
-                ui.weak("Grant is publishing to the relay…");
+                ui.weak("The authority grant is publishing to the relay…");
             }
             None => {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    "No active grant — this agent cannot run.",
+                    "No active authority — this agent cannot run until it has a grant.",
                 );
             }
+        }
+        if !definition.enabled {
+            ui.weak("Schedule paused. The grant is still active until you revoke it.");
         }
 
         ui.add_space(6.0);
@@ -1726,13 +1808,17 @@ impl PanelApp {
                         relative_next(last.saturating_add(job.interval_seconds))
                     ));
                 } else {
-                    ui.weak("Next run due now");
+                    let first = definition.created_at.saturating_add(job.interval_seconds);
+                    ui.weak(format!("First run {}", relative_next(first)));
                 }
                 if let Some(task_id) = &runtime.last_task_id {
                     ui.weak(format!("Task {task_id}"));
                 }
                 if let Some(error) = &runtime.last_error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.weak("The last attempt failed.");
+                    ui.collapsing("Reason", |ui| {
+                        ui.monospace(error);
+                    });
                 }
             }
         }
@@ -1758,11 +1844,17 @@ impl PanelApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let toggle_label = if definition.enabled {
-                "Pause"
+                "Pause schedule"
             } else {
-                "Resume"
+                "Resume schedule"
             };
-            if ui.button(toggle_label).clicked() {
+            if ui
+                .button(toggle_label)
+                .on_hover_text(
+                    "Stops future scheduled runs. The grant stays active until you revoke it.",
+                )
+                .clicked()
+            {
                 if let Some(owner) = self.owner_identity() {
                     let mut updated = definition.clone();
                     updated.enabled = !updated.enabled;
@@ -1785,7 +1877,14 @@ impl PanelApp {
             }
             if let Some(grant) = &grant {
                 if grant.grant_published && !grant.grant_id.is_empty() {
-                    if ui.button("Revoke grant").clicked() {
+                    if ui
+                        .button("Revoke authority")
+                        .on_hover_text(
+                            "Removes the agent's permission to request operations. \
+                             The agent stays defined but cannot run until a new grant is created.",
+                        )
+                        .clicked()
+                    {
                         if let Some(owner) = self.owner_identity() {
                             match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
                                 Ok(_) => {
@@ -1806,7 +1905,7 @@ impl PanelApp {
                     }
                 }
                 if !grant.allowed_operations.is_empty()
-                    && ui.button("Renew grant (90 days)").clicked()
+                    && ui.button("Renew authority (90 days)").clicked()
                 {
                     if let Some(owner) = self.owner_identity() {
                         match operations_client::submit_grant(
@@ -1934,14 +2033,21 @@ impl PanelApp {
         if self.agent_title != before && self.agent_slug.trim().is_empty() {
             self.agent_slug = slugify(&self.agent_title);
         }
-        ui.label("Agent id");
-        ui.add(egui::TextEdit::singleline(&mut self.agent_slug).hint_text("morning-digest"));
-        if !self.agent_slug.trim().is_empty()
-            && let Err(error) = evermore_common::agent::validate_agent_slug(self.agent_slug.trim())
-        {
-            ui.weak(error);
-        }
-        ui.weak(format!("Identity: agent-{}", self.agent_slug.trim()));
+        ui.weak("A dedicated agent identity and id are derived from this name.");
+        ui.collapsing("Advanced: id and identity", |ui| {
+            ui.label("Agent id");
+            ui.add(egui::TextEdit::singleline(&mut self.agent_slug).hint_text("morning-digest"));
+            if !self.agent_slug.trim().is_empty()
+                && let Err(error) =
+                    evermore_common::agent::validate_agent_slug(self.agent_slug.trim())
+            {
+                ui.weak(error);
+            }
+            ui.weak(format!(
+                "Runs as its own dedicated identity, agent-{}.",
+                self.agent_slug.trim()
+            ));
+        });
 
         ui.add_space(6.0);
         ui.label("Recipe");
@@ -2028,40 +2134,70 @@ impl PanelApp {
     fn agent_wizard_step_two(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("2. Review the authority").strong());
         ui.add_space(6.0);
-        ui.strong(format!(
-            "{} (agent-{})",
-            self.agent_title.trim(),
-            self.agent_slug.trim()
-        ));
+        ui.strong(self.agent_title.trim());
         ui.weak(format!(
             "{} · {}",
             self.agent_recipe,
             format_interval(self.agent_interval_seconds)
         ));
+        if let Some(recipe) = self
+            .agent_recipes
+            .iter()
+            .find(|recipe| recipe.id == self.agent_recipe)
+        {
+            ui.weak(&recipe.description);
+        }
         ui.weak(format!(
-            "Grant expires after {} days.",
+            "The grant expires after {} days so an abandoned agent stops on its own. \
+             You can renew it from the agent's card.",
             self.agent_expiry_days
         ));
+        ui.weak(
+            "The first run happens one cadence after creation. \
+             Use Run now on the card to test it immediately.",
+        );
         ui.add_space(6.0);
-        ui.label("It may request:");
+
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
         if let Some(recipe) = self
             .agent_recipes
             .iter()
             .find(|recipe| recipe.id == self.agent_recipe)
         {
             for name in &recipe.operations {
-                let access = evermore_common::operations::find(name)
-                    .map(|definition| match definition.access {
-                        evermore_common::operations::Access::Read => "read",
-                        evermore_common::operations::Access::Write => "write · approval",
-                    })
-                    .unwrap_or("unknown");
-                ui.horizontal(|ui| {
-                    ui.monospace(name);
-                    ui.weak(access);
-                });
+                if let Some(definition) = evermore_common::operations::find(name) {
+                    match definition.access {
+                        evermore_common::operations::Access::Read => reads.push(definition),
+                        evermore_common::operations::Access::Write => writes.push(definition),
+                    }
+                }
             }
         }
+
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.label("It can read and use:");
+                if reads.is_empty() {
+                    ui.weak("—");
+                }
+                for definition in &reads {
+                    ui.monospace(&definition.name);
+                    ui.weak(&definition.description);
+                }
+                ui.add_space(6.0);
+                ui.label("It can ask you to change — each one needs approval:");
+                if writes.is_empty() {
+                    ui.weak("—");
+                }
+                for definition in &writes {
+                    ui.monospace(&definition.name);
+                    ui.weak(&definition.description);
+                }
+            });
+
         ui.add_space(6.0);
         ui.weak(
             "Writes still need your exact approval in the approval window. \
@@ -4187,18 +4323,24 @@ fn build_visuals(dark: bool) -> egui::Visuals {
         egui::Visuals::light()
     };
 
-    let (canvas, chrome, card, text, text_muted, hover_fill) = if dark {
+    // `raised`/`line` are the "Evermore Desktop — UI improvements" Figma
+    // file's ink-800 input/button surface and its hairline border
+    // (#21262F / #303743 in dark) -- every button, selector, and text
+    // field in that file is drawn as a visible bordered surface, not the
+    // flat/borderless treatment this function used before, so inactive
+    // widgets and `extreme_bg_color` (TextEdit's background) now use them
+    // instead of reusing `canvas`/transparent.
+    let (chrome, card, text, text_muted, raised, line) = if dark {
         (
-            egui::Color32::from_rgb(14, 16, 20), // ink-950
             egui::Color32::from_rgb(20, 23, 29), // ink-900
             egui::Color32::from_rgb(26, 30, 37), // ink-850
             egui::Color32::from_rgb(230, 233, 239),
             egui::Color32::from_rgb(167, 176, 191),
-            egui::Color32::TRANSPARENT,
+            egui::Color32::from_rgb(33, 38, 47), // ink-800 / #21262F
+            egui::Color32::from_rgb(48, 55, 67), // #303743
         )
     } else {
         (
-            egui::Color32::from_rgb(255, 255, 255),
             egui::Color32::from_rgb(255, 255, 255),
             // A small absolute delta from white reads as flat at this
             // luminance (perceived contrast scales with luminance, not raw
@@ -4207,7 +4349,8 @@ fn build_visuals(dark: bool) -> egui::Visuals {
             egui::Color32::from_rgb(223, 226, 231),
             egui::Color32::from_rgb(20, 23, 29),
             egui::Color32::from_rgb(90, 98, 112),
-            egui::Color32::TRANSPARENT,
+            egui::Color32::from_rgb(241, 243, 245),
+            egui::Color32::from_rgb(210, 214, 219),
         )
     };
     let accent = egui::Color32::from_rgb(110, 168, 254);
@@ -4215,7 +4358,7 @@ fn build_visuals(dark: bool) -> egui::Visuals {
 
     visuals.panel_fill = chrome;
     visuals.window_fill = chrome;
-    visuals.extreme_bg_color = canvas;
+    visuals.extreme_bg_color = raised;
     visuals.faint_bg_color = card;
     visuals.weak_text_color = Some(text_muted);
     visuals.override_text_color = Some(text);
@@ -4228,8 +4371,8 @@ fn build_visuals(dark: bool) -> egui::Visuals {
     visuals.widgets.noninteractive.bg_fill = egui::Color32::TRANSPARENT;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
-    visuals.widgets.inactive.bg_fill = hover_fill;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.inactive.bg_fill = raised;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, line);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
     // Per the design note, "blue means interactive": the scrollbar handle
     // and hover/press feedback on every widget share this accent, since both
@@ -4394,6 +4537,18 @@ fn is_system_identity(name: &str) -> bool {
     name.starts_with("agent-") || name.ends_with("-operations") || name.ends_with("-assistant")
 }
 
+fn friendly_agent_error(error: &str) -> &'static str {
+    if error.contains("connect") || error.contains("socket") || error.contains("agent runner") {
+        "The agent runner isn't reachable."
+    } else if error.contains("relay") {
+        "The local relay didn't accept the change."
+    } else if error.contains("owner identity") || error.contains("configured owner") {
+        "The owner identity isn't available."
+    } else {
+        "The agent action didn't finish."
+    }
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4461,10 +4616,6 @@ fn relative_next(timestamp: u64) -> String {
     } else {
         relative_future(timestamp)
     }
-}
-
-fn short_pubkey(pubkey: &str) -> String {
-    pubkey.chars().take(12).collect()
 }
 
 fn task_status_name(status: evermore_common::agent::TaskStatus) -> &'static str {

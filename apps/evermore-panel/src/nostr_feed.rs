@@ -17,6 +17,27 @@ use crate::{
     PanelApp, ai_handoff, ai_session_client, nostr_feed_client, signer_client, sway_windows,
 };
 
+/// Tokens from the "Evermore Desktop — UI improvements" Figma file's
+/// "Nostr feed drawer" page, reused from the greeter's identical values
+/// rather than re-deriving them: the accent-tinted highlight chip used
+/// for the attached-note card, and the near-black text that sits on it.
+const ACCENT_CHIP: egui::Color32 = egui::Color32::from_rgb(38, 70, 120); // #264678
+const ACCENT_INK: egui::Color32 = egui::Color32::from_rgb(7, 9, 12); // #07090C
+const LINE: egui::Color32 = egui::Color32::from_rgb(48, 55, 67); // #303743
+
+/// The reply composer's "Post" button, the drawer's one filled
+/// call-to-action -- every other button here is the neutral bordered
+/// style `build_visuals` now gives every button by default.
+fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(label).strong().color(ACCENT_INK))
+            .fill(ui.visuals().hyperlink_color)
+            .corner_radius(8.0),
+    )
+    .clicked()
+}
+
 impl PanelApp {
     pub(crate) fn nostr_feed_ui(&mut self, ui: &mut egui::Ui) {
         // The feed is a right-edge drawer. Sway has no right-anchor rule, so
@@ -112,6 +133,7 @@ impl PanelApp {
                 });
             return;
         }
+        let replying = self.nostr_attached_note.is_some();
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
@@ -132,17 +154,17 @@ impl PanelApp {
                         {
                             self.set_nostr_feed_collapsed(ui.ctx(), true);
                         }
-                        if self.nostr_attached_note.is_some()
-                            && ui.small_button("Clear reply").clicked()
-                        {
+                        if replying && ui.small_button("Clear reply").clicked() {
                             self.clear_nostr_attachment();
                         }
                     });
                 });
-                ui.weak(
+                ui.weak(if replying {
+                    "Compose a reply here, or bring in the AI drawer's most recent answer."
+                } else {
                     "Recent notes from your external relays. Drag one onto the AI drawer, \
-                     or click Attach to chat.",
-                );
+                     or click Attach to chat."
+                });
                 if let Some(status) = &self.nostr_post_status {
                     ui.weak(status);
                 }
@@ -152,20 +174,43 @@ impl PanelApp {
                 if let Some(error) = &self.nostr_post_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                self.nostr_reply_composer(ui);
-                ui.add_space(6.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("nostr-feed-scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if self.nostr_feed_notes.is_empty() && self.nostr_feed_error.is_none() {
-                            ui.weak("Loading recent notes\u{2026}");
-                        }
-                        for note in self.nostr_feed_notes.clone() {
-                            self.note_card(ui, &note);
-                            ui.add_space(6.0);
-                        }
-                    });
+                if replying {
+                    // Composing a reply is its own focused view, not the
+                    // browse-the-feed one: the full note list (which can run
+                    // to 200 entries) would just push the composer and the
+                    // note being replied to off screen.
+                    ui.add_space(6.0);
+                    self.nostr_reply_composer(ui);
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("ATTACHED NOTE")
+                            .size(10.0)
+                            .strong()
+                            .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                    );
+                    ui.add_space(4.0);
+                    if let Some(note) = self.nostr_attached_note.clone() {
+                        self.note_card(ui, &note);
+                    }
+                    ui.add_space(10.0);
+                    ui.weak("Posting signs and publishes this reply to your configured relays.");
+                } else {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("nostr-feed-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.nostr_feed_notes.is_empty() && self.nostr_feed_error.is_none() {
+                                ui.weak("Loading recent notes\u{2026}");
+                            }
+                            for note in self.nostr_feed_notes.clone() {
+                                self.note_card(ui, &note);
+                                ui.add_space(6.0);
+                            }
+                        });
+                }
             });
     }
 
@@ -196,41 +241,62 @@ impl PanelApp {
         let author = short_pubkey(&note.pubkey);
         let snippet: String = note.content.chars().take(220).collect();
         let mut attach = false;
-        egui::Frame::new()
-            .fill(if attached || dragging {
-                ui.visuals().selection.bg_fill.gamma_multiply(0.22)
-            } else {
-                ui.visuals().faint_bg_color
-            })
+        // Per the design: an attached note is a flat accent-tinted card
+        // with no border (it's already the focus of the view), while an
+        // ordinary feed card is the neutral surface with a hairline
+        // border; dragging gets the same accent treatment as a preview.
+        let frame = egui::Frame::new()
             .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(10, 8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let drag_id = ui.make_persistent_id(("nostr-note-drag", &note.id));
-                let content = ui
-                    .scope(|ui| {
-                        ui.weak(&author);
-                        ui.add(egui::Label::new(snippet).wrap());
-                    })
-                    .response;
-                // Sense both click and drag: a drag-only widget inside the
-                // scroll area loses the hit test to the scroll background,
-                // while click-and-drag is picked up reliably.
-                let drag = ui.interact(content.rect, drag_id, egui::Sense::click_and_drag());
-                drag.clone()
-                    .on_hover_text("Drag onto the AI drawer, or use Attach to chat");
-                if drag.drag_started() {
-                    self.copy_note_and_start_drag(note, ui.ctx());
-                }
-                ui.add_space(4.0);
-                attach = ui
-                    .small_button(if attached {
-                        "Attached"
-                    } else {
-                        "Attach to chat"
-                    })
-                    .clicked();
+            .inner_margin(egui::Margin::symmetric(10, 8));
+        let frame = if attached || dragging {
+            frame.fill(ACCENT_CHIP)
+        } else {
+            frame
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0, LINE))
+        };
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let drag_id = ui.make_persistent_id(("nostr-note-drag", &note.id));
+            let content = ui
+                .scope(|ui| {
+                    ui.weak(&author);
+                    ui.add(egui::Label::new(snippet).wrap());
+                })
+                .response;
+            // Sense both click and drag: a drag-only widget inside the
+            // scroll area loses the hit test to the scroll background,
+            // while click-and-drag is picked up reliably.
+            let drag = ui.interact(content.rect, drag_id, egui::Sense::click_and_drag());
+            drag.clone()
+                .on_hover_text("Drag onto the AI drawer, or use Attach to chat");
+            if drag.drag_started() {
+                self.copy_note_and_start_drag(note, ui.ctx());
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let button = egui::Button::new(if attached {
+                    "Attached"
+                } else {
+                    "Attach to chat"
+                });
+                let button = if attached {
+                    button
+                        .fill(ACCENT_CHIP)
+                        .stroke(egui::Stroke::new(1.0, LINE))
+                } else {
+                    button
+                };
+                attach = ui.add(button).clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new("Drag to AI")
+                            .size(10.0)
+                            .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                    ));
+                });
             });
+        });
         if attach {
             self.attach_note_to_ai(note);
         }
@@ -246,6 +312,7 @@ impl PanelApp {
         };
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, LINE))
             .corner_radius(10)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
@@ -274,6 +341,12 @@ impl PanelApp {
                         .hint_text("Write a reply, or draft one with the AI first\u{2026}")
                         .desired_rows(4),
                 );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Signing identity")
+                        .size(10.0)
+                        .color(ui.visuals().weak_text_color.unwrap_or(egui::Color32::GRAY)),
+                );
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("nostr-post-identity")
                         .selected_text(if self.nostr_post_identity.is_empty() {
@@ -290,14 +363,12 @@ impl PanelApp {
                                 );
                             }
                         });
-                    if ui
-                        .add_enabled(
-                            !self.nostr_compose_text.trim().is_empty()
-                                && !self.nostr_post_identity.is_empty(),
-                            egui::Button::new("Post"),
-                        )
-                        .clicked()
-                    {
+                    if primary_button(
+                        ui,
+                        "Post",
+                        !self.nostr_compose_text.trim().is_empty()
+                            && !self.nostr_post_identity.is_empty(),
+                    ) {
                         self.post_nostr_reply(&note);
                     }
                 });

@@ -90,6 +90,11 @@ impl AgentStore {
     pub fn replace_all(&self, mut agents: Vec<AgentDefinition>) -> Result<(), String> {
         agents.sort_by(|a, b| a.id.cmp(&b.id));
         agents.dedup_by(|a, b| a.id == b.id);
+        // The periodic relay refresh runs every 30 seconds; avoid rewriting
+        // the cache (and waking disk) when nothing actually changed.
+        if self.list() == agents {
+            return Ok(());
+        }
         self.persist(&agents)?;
         let mut guard = self
             .agents

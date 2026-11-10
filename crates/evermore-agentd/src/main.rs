@@ -102,25 +102,35 @@ fn serve() -> std::io::Result<()> {
         let assistant_pubkey = agent_pubkey.clone();
         let relay_url = relay_url.clone();
         std::thread::spawn(move || {
-            match agents.reload(
-                &relay_url,
-                &owner_pubkey,
-                &owner_identity,
-                &assistant_pubkey,
-                &runtime,
-            ) {
-                Ok(reload) => {
-                    for warning in reload.warnings {
-                        eprintln!("evermore-agentd: agent reload: {warning}");
+            let mut last_count: Option<usize> = None;
+            let mut seen_warnings = std::collections::BTreeSet::new();
+            loop {
+                match agents.reload(
+                    &relay_url,
+                    &owner_pubkey,
+                    &owner_identity,
+                    &assistant_pubkey,
+                    &runtime,
+                ) {
+                    Ok(reload) => {
+                        for warning in reload.warnings {
+                            if seen_warnings.insert(warning.clone()) {
+                                eprintln!("evermore-agentd: agent reload: {warning}");
+                            }
+                        }
+                        if last_count != Some(reload.agents.len()) {
+                            eprintln!(
+                                "evermore-agentd: projected {} agent definition(s)",
+                                reload.agents.len()
+                            );
+                            last_count = Some(reload.agents.len());
+                        }
                     }
-                    eprintln!(
-                        "evermore-agentd: projected {} agent definition(s)",
-                        reload.agents.len()
-                    );
+                    Err(error) => eprintln!(
+                        "evermore-agentd: couldn't reload agent definitions (using the local cache): {error}"
+                    ),
                 }
-                Err(error) => eprintln!(
-                    "evermore-agentd: couldn't reload agent definitions (using the local cache): {error}"
-                ),
+                std::thread::sleep(std::time::Duration::from_secs(30));
             }
         });
     } else {

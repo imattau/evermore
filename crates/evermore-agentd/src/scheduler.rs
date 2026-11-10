@@ -26,7 +26,9 @@ pub fn spawn(agents: Arc<AgentStore>, runtime: Arc<AgentRuntimeStore>, base: Arc
                     continue;
                 }
                 for job in &agent.jobs {
-                    if !job.enabled || !is_due(job, &runtime.job(&agent.id, &job.id), now) {
+                    if !job.enabled
+                        || !is_due(job, &runtime.job(&agent.id, &job.id), now, agent.created_at)
+                    {
                         continue;
                     }
                     match run_job(&agent, job, &base) {
@@ -47,11 +49,13 @@ pub fn spawn(agents: Arc<AgentStore>, runtime: Arc<AgentRuntimeStore>, base: Arc
     });
 }
 
-/// A job is due when it has never run or the interval has elapsed.
-pub fn is_due(job: &AgentJob, runtime: &AgentJobRuntime, now: u64) -> bool {
-    runtime.last_run_at.map_or(true, |last| {
-        now >= last.saturating_add(job.interval_seconds)
-    })
+/// A job is due when it has run before and the interval has elapsed, or — for
+/// a newly defined agent — one interval after the definition was created.
+/// That makes "every day" mean "starting tomorrow", not "right now"; the
+/// agent card's Run now button is the deliberate way to test it immediately.
+pub fn is_due(job: &AgentJob, runtime: &AgentJobRuntime, now: u64, created_at: u64) -> bool {
+    let baseline = runtime.last_run_at.unwrap_or(created_at);
+    now >= baseline.saturating_add(job.interval_seconds)
 }
 
 /// Validates the agent, resolves its identity, and starts one task. The
@@ -136,14 +140,17 @@ mod tests {
     }
 
     #[test]
-    fn due_respects_the_interval_and_never_run_jobs() {
+    fn due_respects_the_interval_and_the_creation_baseline() {
         let job = job(60);
+        let runtime = AgentJobRuntime::default();
+        // A fresh definition waits one interval instead of running instantly.
+        assert!(!is_due(&job, &runtime, 1_000, 1_000));
+        assert!(is_due(&job, &runtime, 1_060, 1_000));
+
         let mut runtime = AgentJobRuntime::default();
-        assert!(is_due(&job, &runtime, 1_000));
-        runtime.last_run_at = Some(1_000);
-        assert!(!is_due(&job, &runtime, 1_059));
-        assert!(is_due(&job, &runtime, 1_060));
-        assert!(is_due(&job, &runtime, 10_000));
+        runtime.last_run_at = Some(1_200);
+        assert!(!is_due(&job, &runtime, 1_259, 1_000));
+        assert!(is_due(&job, &runtime, 1_260, 1_000));
     }
 
     #[test]

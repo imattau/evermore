@@ -497,8 +497,56 @@ fn create_first_user_account(
         .map(|home| (home.1, home.3))
         .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
     install_identity_secret(username, uid, gid, &keys)?;
+    enable_identity_services(username, uid, gid)?;
     write_greeter_profile(&keys.public_key().to_hex(), display_name)?;
     write_first_user_marker()
+}
+
+/// Enable the per-identity user services needed by the desktop control plane.
+/// The user manager starts these links when the newly enrolled user logs in.
+fn enable_identity_services(username: &str, uid: u32, gid: u32) -> Result<(), String> {
+    let home = list_homes()?
+        .into_iter()
+        .find(|entry| entry.0 == username)
+        .map(|entry| PathBuf::from(entry.4))
+        .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
+    let wants = home.join(".config/systemd/user/default.target.wants");
+    std::fs::create_dir_all(&wants)
+        .map_err(|e| format!("creating user service directory {}: {e}", wants.display()))?;
+    for directory in [
+        home.join(".config"),
+        home.join(".config/systemd"),
+        home.join(".config/systemd/user"),
+        wants.clone(),
+    ] {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("setting permissions on {}: {e}", directory.display()))?;
+        chown(&directory, uid, gid)?;
+    }
+    for unit in ["evermore-settingsd", "evermore-operationsd"] {
+        let link = wants.join(format!("{unit}@{username}.service"));
+        let target = PathBuf::from(format!("../{unit}@.service"));
+        match std::fs::read_link(&link) {
+            Ok(existing) if existing == target => {}
+            Ok(_) => {
+                return Err(format!(
+                    "refusing to replace unexpected user service link {}",
+                    link.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::os::unix::fs::symlink(&target, &link)
+                    .map_err(|e| format!("enabling {unit} for {username}: {e}"))?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "checking user service link {}: {error}",
+                    link.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ensure_pkcs11_pairing() -> Result<(), String> {
@@ -619,6 +667,7 @@ fn first_user() -> Result<(), String> {
         .map(|home| (home.1, home.3))
         .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
     install_identity_secret(&username, uid, gid, &keys)?;
+    enable_identity_services(&username, uid, gid)?;
     write_greeter_profile(&pubkey.to_hex(), &display_name)?;
 
     println!("\nCreated the encrypted home for {display_name} ({username}).");

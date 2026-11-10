@@ -1784,6 +1784,29 @@ impl PanelApp {
             ui.weak("Schedule paused. The grant is still active until you revoke it.");
         }
 
+        let mut capabilities = std::collections::BTreeSet::new();
+        for job in &definition.jobs {
+            if let Some(recipe) = self
+                .agent_recipes
+                .iter()
+                .find(|recipe| recipe.id == job.recipe_id)
+            {
+                capabilities.extend(recipe.operations.iter().cloned());
+            }
+        }
+        if !capabilities.is_empty() {
+            ui.collapsing(format!("Capabilities ({})", capabilities.len()), |ui| {
+                for name in capabilities {
+                    if let Some(operation) = evermore_common::operations::find(&name) {
+                        ui.monospace(&operation.name);
+                        ui.weak(&operation.description);
+                    } else {
+                        ui.monospace(name);
+                    }
+                }
+            });
+        }
+
         ui.add_space(6.0);
         let can_run = agent.available && definition.enabled;
         for job in &definition.jobs {

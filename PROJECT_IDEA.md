@@ -1991,7 +1991,11 @@ definitions with grant and runtime state, creates a new agent end to end
 (identity → grant → encrypted definition → membership list → runner reload),
 pauses/resumes, renews or revokes a grant, deletes an agent (membership,
 definition deletion, identity, grant), and enables the built-in Evermore
-Assistant with a default grant derived from the built-in recipes. VM
+Assistant with a default grant derived from the built-in recipes. The screen
+keeps ids, identities, and public keys under advanced details, explains that
+the grant expires, distinguishes pausing the schedule from revoking authority,
+shows catalogue descriptions for every capability, auto-refreshes definitions
+every 30 seconds, and surfaces unused agent identities for cleanup. VM
 screenshots and the VM acceptance pass remain.
 
 L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,

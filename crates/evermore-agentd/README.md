@@ -102,7 +102,10 @@ last local cache and reports that reloads are unavailable. The cache lives at
 schedule through a relay restart.
 
 Each enabled job runs on its own interval through the same bounded `Runner`
-as a routine. Attempts and errors are recorded in a separate 0600
+as a routine. A newly defined job first runs one interval after the definition
+was created; use the panel's **Run now** to test it immediately. The daemon
+re-reads the relay every 30 seconds, so definitions edited elsewhere appear
+without a manual reload. Attempts and errors are recorded in a separate 0600
 `$XDG_DATA_HOME/evermore/agents/runtime.json`; a failed attempt advances
 `last_run_at` so an expired grant or missing identity retries at the configured
 cadence rather than every tick. Running a job still requires the agent's

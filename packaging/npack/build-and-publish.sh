@@ -16,7 +16,7 @@
 #     [--secret-key <nsec-or-hex>] [--dry-run]
 #
 # <package> is one of: settingsd, notifyd, blossom-fs, contextd, indexd,
-# inferd, operationsd, sway-ai-bridge, mcp, panel. (Not greeter -- see
+# inferd, operationsd, agentd, sway-ai-bridge, mcp, panel. (Not greeter -- see
 # README.md's caveat; not signer/relay/enroll/pkcs11 -- bootstrap-only,
 # never npack packages at all.)
 #
@@ -76,6 +76,7 @@ case "$PACKAGE" in
   indexd)         DEPS="";               UNIT="evermore-indexd.service" ;;
   inferd)         DEPS="";               UNIT="evermore-inferd.service" ;;
   operationsd)    DEPS="settingsd";      UNIT="evermore-operationsd@.service" ;;
+  agentd)         DEPS="operationsd";    UNIT="evermore-agentd@.service" ;;
   sway-ai-bridge) DEPS="contextd";       UNIT="evermore-sway-ai-bridge.service" ;;
   mcp)            DEPS="operationsd";    UNIT="" ;;
   panel)          DEPS="";               UNIT="" ;;

@@ -1422,6 +1422,7 @@ dependencies = [
  "evermore-common",
  "getrandom 0.2.17",
  "hex",
+ "nostr",
  "nscript-modules",
  "nscript-semantics",
  "nscript-syntax",
@@ -1429,7 +1430,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "toml",
+ "tungstenite",
 ]
 
 [[package]]

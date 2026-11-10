@@ -7,10 +7,12 @@ edition.workspace = true
 evermore-common = { version = "0.1.0", path = "../evermore-common" }
 getrandom = "0.2.17"
 hex = "0.4.3"
+nostr = { version = "0.45.7", features = ["nip44", "os-rng"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 toml = "0.8.23"
+tungstenite = "0.30.0"
 # Pinned to an exact commit, not a branch or tag: nscript is a pre-1.0,
 # actively-changing sibling project. This is the authoring front end for
 # `.ns` recipes (crates/evermore-agentd/nscript/); evermore-agentd's own
@@ -21,3 +23,6 @@ nscript-syntax = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea
 nscript-semantics = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea99ffd77d0bea3055d837a4a2289950" }
 nscript-modules = { git = "https://github.com/imattau/nscript", rev = "bea18e94ea99ffd77d0bea3055d837a4a2289950" }
 semver = "1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

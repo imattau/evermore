@@ -50,6 +50,26 @@ pub fn fetch_identities() -> Result<Vec<Identity>, String> {
     Ok(identities)
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CreatedAgentIdentity {
+    pub identity: String,
+    pub pubkey_hex: String,
+}
+
+pub fn create_agent_identity(slug: &str) -> Result<CreatedAgentIdentity, String> {
+    let mut stream = connect()?;
+    match request(
+        &mut stream,
+        Request::CreateAgentIdentity {
+            slug: slug.to_string(),
+        },
+    )? {
+        Response::Ok { data } => serde_json::from_value(data)
+            .map_err(|error| format!("invalid agent identity response: {error}")),
+        Response::Err { message } => Err(message),
+    }
+}
+
 pub fn sign_event(
     identity: &str,
     kind: u16,

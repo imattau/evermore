@@ -22,6 +22,15 @@ pub fn runtime_socket_path() -> std::path::PathBuf {
 pub enum Request {
     /// List the identity names currently loaded in the daemon.
     ListIdentities,
+    /// Generate a new agent identity named `agent-<slug>` and load it into
+    /// the daemon's keyring. The secret is also written to the signer's
+    /// private identity directory so it survives logout and is reloaded on
+    /// the next start. Only identities in the `agent-` namespace may be
+    /// created or deleted through this request.
+    CreateAgentIdentity { slug: String },
+    /// Delete an agent identity from the keyring and, if present, from the
+    /// persisted identity directory. Refuses anything outside `agent-`.
+    DeleteAgentIdentity { slug: String },
     /// Get an identity's public key (hex and bech32/npub).
     GetPublicKey { identity: String },
     /// Build and sign a Nostr event under the given identity, returning the
@@ -2363,11 +2372,82 @@ pub mod agent {
     pub const STEP_TAG: &str = "step";
     pub const TASKS_FILE: &str = "evermore/tasks/tasks.json";
     pub const ROUTINES_FILE: &str = "evermore/routines/routines.json";
+    pub const AGENTS_FILE: &str = "evermore/agents/agents.json";
+    pub const AGENT_RUNTIME_FILE: &str = "evermore/agents/runtime.json";
     pub const MAX_LOCAL_RECIPE_BYTES: u64 = 256 * 1024;
     pub const MAX_RECIPE_STEPS: u32 = 32;
     pub const MAX_RECIPE_SECONDS: u64 = 300;
     pub const PROPOSAL_MARKER: &str = "EVERMORE_PROPOSAL:";
     pub const PROPOSAL_CONTEXT_TOKENS: u32 = 4096;
+
+    /// Agent definitions live on the control-plane relay as owner-authored
+    /// NIP-78 events. The `d` tag is `evermore:agent:<id>`; a NIP-51 list at
+    /// `evermore:agents` records which agent pubkeys are currently enrolled.
+    pub const AGENT_PREFIX: &str = "agent-";
+    pub const AGENT_D_TAG_PREFIX: &str = "evermore:agent:";
+    pub const AGENTS_LIST_D_TAG: &str = "evermore:agents";
+    pub const KIND_AGENT_DEFINITION: u16 = 30078;
+    pub const KIND_AGENTS_LIST: u16 = 30000;
+    pub const AGENT_DEFINITION_VERSION: u32 = 1;
+
+    /// The user-facing agent id. It is the `d`-tag suffix and the suffix of
+    /// the signer identity (`agent-<slug>`); keep it filesystem- and
+    /// systemd-instance-safe.
+    pub fn validate_agent_slug(slug: &str) -> Result<(), String> {
+        if slug.is_empty() {
+            return Err("agent slug must not be empty".to_string());
+        }
+        if slug.len() > 48 {
+            return Err("agent slug must be at most 48 characters".to_string());
+        }
+        if slug.starts_with(AGENT_PREFIX) {
+            return Err("agent slug must not include the 'agent-' prefix".to_string());
+        }
+        if !slug.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        }) {
+            return Err(
+                "agent slug may only contain lowercase ASCII letters, digits, '-' or '_'"
+                    .to_string(),
+            );
+        }
+        let first = slug.as_bytes()[0];
+        let last = slug.as_bytes()[slug.len() - 1];
+        if !(first.is_ascii_alphanumeric() && last.is_ascii_alphanumeric()) {
+            return Err("agent slug must start and end with a letter or digit".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn agent_identity_name(slug: &str) -> Result<String, String> {
+        validate_agent_slug(slug)?;
+        Ok(format!("{AGENT_PREFIX}{slug}"))
+    }
+
+    pub fn agent_d_tag(slug: &str) -> Result<String, String> {
+        validate_agent_slug(slug)?;
+        Ok(format!("{AGENT_D_TAG_PREFIX}{slug}"))
+    }
+
+    pub fn agents_file_path() -> Result<PathBuf, String> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+        Ok(base.join(AGENTS_FILE))
+    }
+
+    pub fn agent_runtime_file_path() -> Result<PathBuf, String> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .ok_or_else(|| "neither XDG_DATA_HOME nor HOME is set".to_string())?;
+        Ok(base.join(AGENT_RUNTIME_FILE))
+    }
 
     pub fn runtime_socket_path() -> PathBuf {
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -2433,6 +2513,17 @@ pub mod agent {
         CancelTask {
             task_id: String,
         },
+        /// Return the cached, relay-projected agent definitions.
+        ListAgents,
+        /// Re-read owner-authored agent definitions from the control-plane
+        /// relay, replacing the local cache. Returns the projected agents and
+        /// any per-definition warnings.
+        ReloadAgents,
+        /// Run one agent job immediately, without changing its schedule.
+        RunAgentJob {
+            agent_id: String,
+            job_id: String,
+        },
         ListRoutines,
         AddRoutine {
             id: String,
@@ -2475,6 +2566,151 @@ pub mod agent {
         #[serde(default)]
         pub last_error: Option<String>,
         pub created_at: u64,
+    }
+
+    /// One scheduled recipe inside an agent definition. An agent can have
+    /// several independent jobs, each with its own cadence.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct AgentJob {
+        pub id: String,
+        pub recipe_id: String,
+        #[serde(default)]
+        pub inputs: Value,
+        pub interval_seconds: u64,
+        #[serde(default = "default_enabled")]
+        pub enabled: bool,
+    }
+
+    /// The owner-authored definition of one automated agent. This is the
+    /// decrypted JSON content of the relay's `kind:30078` event; the `d` tag
+    /// carries `id` and is not part of the payload.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct AgentDefinition {
+        #[serde(default = "default_agent_definition_version")]
+        pub version: u32,
+        pub id: String,
+        pub title: String,
+        #[serde(default)]
+        pub description: String,
+        /// Signer identity name; always `agent-<id>`.
+        pub identity: String,
+        /// Hex public key of that identity, checked against the signer.
+        pub agent_pubkey: String,
+        #[serde(default = "default_enabled")]
+        pub enabled: bool,
+        pub jobs: Vec<AgentJob>,
+        #[serde(default)]
+        pub created_at: u64,
+        #[serde(default)]
+        pub updated_at: u64,
+    }
+
+    impl AgentDefinition {
+        pub fn validate(&self) -> Result<(), String> {
+            if self.version != AGENT_DEFINITION_VERSION {
+                return Err(format!(
+                    "agent definition version {} is not supported (expected {AGENT_DEFINITION_VERSION})",
+                    self.version
+                ));
+            }
+            validate_agent_slug(&self.id)?;
+            let expected = agent_identity_name(&self.id)?;
+            if self.identity != expected {
+                return Err(format!(
+                    "agent '{}' must use identity '{expected}', not '{}'",
+                    self.id, self.identity
+                ));
+            }
+            if self.agent_pubkey.len() != 64
+                || !self.agent_pubkey.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(format!("agent '{}' has an invalid agent_pubkey", self.id));
+            }
+            if self.title.trim().is_empty() || self.title.len() > 128 {
+                return Err(format!(
+                    "agent '{}' title must be 1-128 characters",
+                    self.id
+                ));
+            }
+            if self.description.len() > 4096 {
+                return Err(format!("agent '{}' description is too long", self.id));
+            }
+            if self.jobs.is_empty() {
+                return Err(format!("agent '{}' must have at least one job", self.id));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for job in &self.jobs {
+                if job.id.is_empty()
+                    || job.id.len() > 64
+                    || !job.id.bytes().all(|b| {
+                        b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || b == b'.'
+                            || b == b'-'
+                            || b == b'_'
+                    })
+                {
+                    return Err(format!(
+                        "agent '{}' has an invalid job id '{}'",
+                        self.id, job.id
+                    ));
+                }
+                if !seen.insert(job.id.clone()) {
+                    return Err(format!("agent '{}' repeats job id '{}'", self.id, job.id));
+                }
+                if job.recipe_id.trim().is_empty() {
+                    return Err(format!(
+                        "agent '{}' job '{}' has no recipe",
+                        self.id, job.id
+                    ));
+                }
+                if job.interval_seconds == 0 || job.interval_seconds > 365 * 24 * 60 * 60 {
+                    return Err(format!(
+                        "agent '{}' job '{}' interval must be between 1 second and 365 days",
+                        self.id, job.id
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Local execution state for one job. This is never part of the relay
+    /// definition; it follows the machine, not the identity.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct AgentJobRuntime {
+        #[serde(default)]
+        pub last_run_at: Option<u64>,
+        #[serde(default)]
+        pub last_task_id: Option<String>,
+        #[serde(default)]
+        pub last_error: Option<String>,
+    }
+
+    /// A cached definition plus whether its signing identity is available on
+    /// this device. A relay definition synced from another machine can exist
+    /// without its key; the UI shows it as unavailable instead of dropping it.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AgentView {
+        #[serde(flatten)]
+        pub definition: AgentDefinition,
+        pub available: bool,
+        #[serde(default)]
+        pub unavailable_reason: Option<String>,
+        /// Runtime state keyed by job id.
+        #[serde(default)]
+        pub runtime: BTreeMap<String, AgentJobRuntime>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AgentReload {
+        pub agents: Vec<AgentView>,
+        #[serde(default)]
+        pub warnings: Vec<String>,
+    }
+
+    fn default_agent_definition_version() -> u32 {
+        AGENT_DEFINITION_VERSION
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2598,6 +2834,11 @@ pub mod agent {
         /// Set when the task was created by a standing routine.
         #[serde(default)]
         pub routine_id: Option<String>,
+        /// Set when the task was created by a relay-defined agent job.
+        #[serde(default)]
+        pub agent_id: Option<String>,
+        #[serde(default)]
+        pub job_id: Option<String>,
         pub recipe_id: String,
         pub recipe_version: u32,
         /// `builtin` or `local`; local recipes are unsigned and recorded so the
@@ -2923,6 +3164,73 @@ pub mod agent {
                 write_constrained_proposal_instructions("change the theme to dark", &catalog)
                     .unwrap();
             assert!(constrained.contains("\"refusal\""));
+        }
+
+        fn valid_agent() -> AgentDefinition {
+            AgentDefinition {
+                version: AGENT_DEFINITION_VERSION,
+                id: "morning-digest".into(),
+                title: "Morning digest".into(),
+                description: String::new(),
+                identity: "agent-morning-digest".into(),
+                agent_pubkey: "a".repeat(64),
+                enabled: true,
+                jobs: vec![AgentJob {
+                    id: "digest".into(),
+                    recipe_id: "audit.digest".into(),
+                    inputs: serde_json::json!({}),
+                    interval_seconds: 86_400,
+                    enabled: true,
+                }],
+                created_at: 0,
+                updated_at: 0,
+            }
+        }
+
+        #[test]
+        fn agent_definition_rejects_mismatched_identity_and_bad_jobs() {
+            let mut agent = valid_agent();
+            assert!(agent.validate().is_ok());
+            assert!(
+                agent_d_tag(&agent.id)
+                    .unwrap()
+                    .starts_with(AGENT_D_TAG_PREFIX)
+            );
+
+            agent.identity = "agent-other".into();
+            assert!(agent.validate().is_err());
+
+            let mut agent = valid_agent();
+            agent.jobs[0].interval_seconds = 0;
+            assert!(agent.validate().is_err());
+
+            let mut agent = valid_agent();
+            agent.jobs.push(agent.jobs[0].clone());
+            assert!(agent.validate().is_err());
+
+            let mut agent = valid_agent();
+            agent.jobs[0].id = "Digest".into();
+            assert!(agent.validate().is_err());
+        }
+
+        #[test]
+        fn agent_slugs_are_filesystem_and_systemd_safe() {
+            for slug in ["morning-digest", "a", "package_watch_2", "x1"] {
+                assert!(validate_agent_slug(slug).is_ok(), "{slug}");
+            }
+            for slug in [
+                "",
+                "Morning-Digest",
+                "agent-morning",
+                "../escape",
+                "with/slash",
+                ".hidden",
+                "-leading",
+                "trailing-",
+                "with space",
+            ] {
+                assert!(validate_agent_slug(slug).is_err(), "{slug}");
+            }
         }
     }
 }

@@ -108,6 +108,22 @@ pub fn nip44_encrypt(
         .ok_or_else(|| "signer returned an invalid ciphertext".into())
 }
 
+pub fn nip44_decrypt(
+    identity: &str,
+    sender_pubkey: &str,
+    ciphertext: &str,
+) -> Result<String, String> {
+    let data = request_signer(&SignerRequest::Nip44Decrypt {
+        identity: identity.to_string(),
+        sender_pubkey: sender_pubkey.to_string(),
+        ciphertext: ciphertext.to_string(),
+    })?;
+    data.get("plaintext")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "signer returned an invalid plaintext".into())
+}
+
 pub fn submit_request(event: Value) -> Result<Value, String> {
     request_operations(&Request::SubmitSignedRequest { event })
 }

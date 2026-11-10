@@ -64,6 +64,8 @@ impl Runner {
         let task = Task {
             task_id,
             routine_id,
+            agent_id: None,
+            job_id: None,
             recipe_id: recipe.id.clone(),
             recipe_version: recipe.version,
             recipe_source: recipe.source.clone(),

@@ -9,7 +9,7 @@ Type=simple
 # The assistant identity is distinct from the owner. It never signs an
 # approval and never holds execution authority; every write would still go
 # through evermore-operationsd and owner approval.
-ExecStart=/usr/bin/evermore-agentd serve --agent-identity %i-assistant
+ExecStart=/usr/bin/evermore-agentd serve --agent-identity %i-assistant --owner-identity %i
 Restart=on-failure
 RestartSec=2
 UMask=0077

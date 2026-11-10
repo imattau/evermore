@@ -523,7 +523,11 @@ fn enable_identity_services(username: &str, uid: u32, gid: u32) -> Result<(), St
             .map_err(|e| format!("setting permissions on {}: {e}", directory.display()))?;
         chown(&directory, uid, gid)?;
     }
-    for unit in ["evermore-settingsd", "evermore-operationsd"] {
+    for unit in [
+        "evermore-settingsd",
+        "evermore-operationsd",
+        "evermore-agentd",
+    ] {
         let link = wants.join(format!("{unit}@{username}.service"));
         let target = PathBuf::from(format!("../{unit}@.service"));
         match std::fs::read_link(&link) {

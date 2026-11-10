@@ -11,6 +11,10 @@ Type=simple
 # keyring before serving requests; existing sessions without a home key keep
 # their current behavior and can still load one explicitly.
 ExecStartPre=/usr/bin/evermore-signer load-home-identity %u --if-present
+# Idempotently create the built-in <owner>-operations and <owner>-assistant
+# identities on first login (and after a home restore), before serve loads
+# them. Existing keys are persisted, never replaced.
+ExecStartPre=/usr/bin/evermore-signer ensure-service-identities %u
 ExecStart=/usr/bin/evermore-signer serve
 ExecStopPost=/usr/bin/evermore-signer unload-home-identity %u
 Restart=on-failure
@@ -24,6 +28,10 @@ ReadWritePaths=%t/evermore
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# Agent identities are persisted as 0600 files so they survive logout. The
+# signer is the only process that writes them; Owner identity loading stays
+# on the separate `load-home-identity` path.
+ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
 
 [Install]

@@ -95,7 +95,7 @@ install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.desktop" "$STAGE/shar
 install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.svg" "$STAGE/share/"
 install -m 0644 "$NPACK_SRC/packaging/desktop/io.npack.Gui.metainfo.xml" "$STAGE/share/"
 (cd "$ROOT/relay" && GOCACHE="$IMAGE_DIR/go-cache" CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o "$IMAGE_DIR/evermore-relay-supervisor" .)
-for name in evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge; do
+for name in evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge evermore-agentd; do
   source="$ROOT/target/release/$name"
   [[ -x "$source" ]] || { echo "release binary missing: $source" >&2; exit 1; }
   install -m 0755 "$source" "$STAGE/bin/$name"

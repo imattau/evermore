@@ -35,12 +35,224 @@ const SESSION_CMD: &[&str] = &["/usr/bin/sway"];
 /// that needs it (phone-pairing confirmation) gets its own constant.
 const SUCCESS: Color32 = Color32::from_rgb(95, 191, 143);
 
-/// One consistent text-field width across the first-boot wizard's steps,
-/// instead of each step picking its own (320/340/380 previously) and
-/// making the centered column visibly shift width from screen to screen.
-/// The read-only recovery-key field is the one deliberate exception: it
-/// needs to fit a full bech32 `nsec1...` string without wrapping.
-const FORM_FIELD_WIDTH: f32 = 360.0;
+/// Tokens from the "Evermore Desktop — UI improvements" Figma file's
+/// first-boot wizard frames, which refine a few of `build_visuals`'s dark
+/// tuples and add the ones that file introduces (the ink-800 "raised
+/// surface" tier the design note always named but no code ever assigned a
+/// literal value to, a faint fourth text tier, an accent-tinted highlight
+/// chip, and the near-black text color used on filled-accent surfaces).
+mod setup_tokens {
+    use super::Color32;
+
+    pub const CARD_BG: Color32 = Color32::from_rgb(20, 23, 29); // #14171D (= ink-900/chrome)
+    pub const RAISED: Color32 = Color32::from_rgb(33, 38, 47); // #21262F
+    pub const LINE: Color32 = Color32::from_rgb(48, 55, 67); // #303743
+    pub const TEXT_FAINT: Color32 = Color32::from_rgb(126, 137, 153); // #7E8999
+    pub const ACCENT: Color32 = Color32::from_rgb(110, 168, 254); // #6EA8FE
+    pub const ACCENT_INK: Color32 = Color32::from_rgb(7, 9, 12); // #07090C
+    pub const ACCENT_CHIP: Color32 = Color32::from_rgb(38, 70, 120); // #264678
+
+    pub const CARD_MAX_WIDTH: f32 = 1080.0;
+    pub const SIDEBAR_WIDTH: f32 = 230.0;
+    pub const STEP_ROW_HEIGHT: f32 = 46.0;
+    pub const STEP_CIRCLE_SIZE: f32 = 26.0;
+}
+use setup_tokens::{
+    ACCENT as SETUP_ACCENT, ACCENT_CHIP, ACCENT_INK, CARD_BG, CARD_MAX_WIDTH, LINE, RAISED,
+    SIDEBAR_WIDTH, STEP_CIRCLE_SIZE, STEP_ROW_HEIGHT, TEXT_FAINT,
+};
+
+/// The step sidebar's connector line and circles, painted directly (same
+/// idiom as `nav_item`/`command_palette_row`) rather than built from
+/// stacked widgets: the connector has to span from the first circle's
+/// center to the last, which needs the geometry decided up front.
+fn setup_sidebar(ui: &mut egui::Ui, current_step: usize) {
+    const STEPS: [&str; SETUP_TOTAL_STEPS] = [
+        "Welcome",
+        "Account details",
+        "Identity",
+        "Recovery key",
+        "Pair phone (optional)",
+        "Passphrase",
+    ];
+    ui.label(
+        egui::RichText::new("YOUR SETUP")
+            .size(11.0)
+            .strong()
+            .color(ui.visuals().weak_text_color.unwrap_or(Color32::GRAY)),
+    );
+    ui.add_space(14.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), STEP_ROW_HEIGHT * STEPS.len() as f32),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let circle_x = rect.left() + STEP_CIRCLE_SIZE / 2.0;
+    let row_center = |index: usize| rect.top() + STEP_ROW_HEIGHT * (index as f32 + 0.5);
+    painter.line_segment(
+        [
+            egui::pos2(circle_x, row_center(0)),
+            egui::pos2(circle_x, row_center(STEPS.len() - 1)),
+        ],
+        egui::Stroke::new(2.0, LINE),
+    );
+    for (index, label) in STEPS.iter().enumerate() {
+        let step_number = index + 1;
+        let center = egui::pos2(circle_x, row_center(index));
+        if step_number <= current_step {
+            painter.circle_filled(center, STEP_CIRCLE_SIZE / 2.0, SETUP_ACCENT);
+            let glyph = if step_number < current_step {
+                "\u{2713}".to_owned()
+            } else {
+                step_number.to_string()
+            };
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(12.0),
+                ACCENT_INK,
+            );
+        } else {
+            painter.circle_stroke(center, STEP_CIRCLE_SIZE / 2.0, egui::Stroke::new(1.0, LINE));
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                step_number.to_string(),
+                egui::FontId::proportional(12.0),
+                ui.visuals().weak_text_color.unwrap_or(Color32::GRAY),
+            );
+        }
+        let label_pos = egui::pos2(rect.left() + STEP_CIRCLE_SIZE + 14.0, center.y);
+        let (color, strong) = match step_number.cmp(&current_step) {
+            std::cmp::Ordering::Equal => (ui.visuals().strong_text_color(), true),
+            std::cmp::Ordering::Less => (ui.visuals().weak_text_color.unwrap_or(Color32::GRAY), false),
+            std::cmp::Ordering::Greater => (TEXT_FAINT, false),
+        };
+        let font = if strong {
+            egui::FontId::new(13.0, egui::FontFamily::Name("inter-semibold".into()))
+        } else {
+            egui::FontId::proportional(13.0)
+        };
+        painter.text(label_pos, egui::Align2::LEFT_CENTER, *label, font, color);
+    }
+    ui.add_space(28.0);
+    ui.label(
+        egui::RichText::new("Your keys stay under your control.")
+            .size(13.0)
+            .color(ui.visuals().weak_text_color.unwrap_or(Color32::GRAY)),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("You can finish setup without network access.")
+            .size(12.0)
+            .color(TEXT_FAINT),
+    );
+}
+
+/// The "STEP N OF 6" chip above each step's heading.
+fn setup_step_pill(ui: &mut egui::Ui, current_step: usize) {
+    let text = format!("STEP {current_step} OF {SETUP_TOTAL_STEPS}");
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), SETUP_ACCENT);
+    let size = egui::vec2(galley.size().x + 28.0, 26.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, size.y / 2.0, ACCENT_CHIP);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(12.0),
+        SETUP_ACCENT,
+    );
+}
+
+/// The two info-box styles the design uses throughout the wizard: a
+/// neutral bordered box for general explanation, and a flat
+/// accent-tinted one (no border) for "pay attention to this" -- the
+/// Identity and Recovery steps' safety notices. Same shape, different
+/// fill, so one function covers both via `accent`.
+fn setup_callout(ui: &mut egui::Ui, title: &str, body: &str, accent: bool) {
+    let fill = if accent { ACCENT_CHIP } else { RAISED };
+    let frame = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(16, 14));
+    let frame = if accent {
+        frame
+    } else {
+        frame.stroke(egui::Stroke::new(1.0, LINE))
+    };
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(egui::RichText::new(title).strong().size(14.0));
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(body)
+                .size(12.5)
+                .color(ui.visuals().weak_text_color.unwrap_or(Color32::GRAY)),
+        );
+    });
+}
+
+/// A filled accent call-to-action button -- the wizard's one primary
+/// action per step. Distinct from the plain `ui.button`, which this
+/// theme renders flat/borderless (right for secondary actions like "Skip
+/// for now", wrong for the one button each step actually wants pressed).
+fn setup_primary_button(ui: &mut egui::Ui, label: &str) -> bool {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).strong().color(ACCENT_INK))
+            .fill(SETUP_ACCENT)
+            .corner_radius(10.0)
+            .min_size(egui::vec2(0.0, 44.0)),
+    )
+    .clicked()
+}
+
+/// A neutral bordered button -- "Skip for now" and the like. The
+/// `ui.button` default in this theme is flat/borderless; the wizard's
+/// secondary actions are drawn as a raised, bordered surface instead.
+fn setup_secondary_button(ui: &mut egui::Ui, label: &str) -> bool {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).strong())
+            .fill(RAISED)
+            .stroke(egui::Stroke::new(1.0, LINE))
+            .corner_radius(10.0)
+            .min_size(egui::vec2(0.0, 44.0)),
+    )
+    .clicked()
+}
+
+/// A labeled field: bold label, full-width input, optional muted helper
+/// line -- the pattern every text field in the redesigned wizard uses,
+/// replacing the previous single `ui.label` + bare `TextEdit`.
+fn setup_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+    password: bool,
+    helper: Option<&str>,
+) {
+    ui.label(egui::RichText::new(label).strong().size(13.0));
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .password(password)
+            .hint_text(hint)
+            .desired_width(ui.available_width())
+            .min_size(egui::vec2(0.0, 44.0)),
+    );
+    if let Some(helper) = helper {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(helper)
+                .size(11.5)
+                .color(ui.visuals().weak_text_color.unwrap_or(Color32::GRAY)),
+        );
+    }
+}
 
 /// Evermore Graphite dark palette and type scale, kept in lockstep with
 /// `apps/evermore-panel`'s `build_visuals`/`build_style`/`load_fonts` (the
@@ -56,16 +268,24 @@ fn build_visuals() -> egui::Visuals {
     let text_muted = Color32::from_rgb(167, 176, 191);
     let accent = Color32::from_rgb(110, 168, 254);
     let accent_strong = Color32::from_rgb(139, 183, 255);
+    // The Figma "Evermore Desktop — UI improvements" file is this app's
+    // newer source of truth for a few tokens the design note always named
+    // but never assigned a literal value in code: `ink-800` ("inputs,
+    // raised surfaces") turns out to be #21262F, and the hairline border
+    // around those surfaces is #303743 -- both reused from
+    // `setup_tokens` so this function and the wizard draw from one place.
+    let raised = setup_tokens::RAISED;
+    let line = setup_tokens::LINE;
 
     // Unlike `evermore-panel` (which has a separate chrome layer around its
     // content), this whole screen *is* the lock screen the design note
     // calls out `ink-950` for -- so the full-bleed `CentralPanel` fill is
     // the canvas tone, not the one-step-up panel-chrome tone. Text inputs
-    // then need to sit a tier above that to read as a raised surface at
-    // all, so they take the chrome tone instead of reusing canvas.
+    // sit a tier above that (now `ink-800`/`raised`, per the Figma file)
+    // to read as a raised surface at all.
     visuals.panel_fill = canvas;
     visuals.window_fill = chrome;
-    visuals.extreme_bg_color = chrome;
+    visuals.extreme_bg_color = raised;
     visuals.faint_bg_color = card;
     visuals.weak_text_color = Some(text_muted);
     visuals.override_text_color = Some(text);
@@ -78,8 +298,11 @@ fn build_visuals() -> egui::Visuals {
     visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
+    // Flat/borderless was the original minimal take; the Figma file draws
+    // every input and secondary button with a visible hairline border, so
+    // inactive widgets (which TextEdit's unfocused state uses) get one.
     visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, line);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
     // "Blue means interactive": hover/press feedback shares the accent,
     // same as every other Evermore egui surface.
@@ -781,132 +1004,217 @@ impl GreeterApp {
     fn ui_first_user(&mut self, ui: &mut egui::Ui, mut setup: FirstUserSetup) {
         let mut next = None;
         let mut create = false;
-        ui.vertical_centered(|ui| {
-            ui.add_space(36.0);
-            ui.heading("Set up Evermore");
-            if let Some(step_number) = setup_step_number(setup.step) {
-                ui.weak(format!("Step {step_number} of {SETUP_TOTAL_STEPS}"));
-            }
-            ui.add_space(16.0);
-            match setup.step {
-                SetupStep::Welcome => {
-                    ui.label("Create your first account and encrypted home.");
-                    ui.label("You can finish setup offline. A home passphrase will always unlock this account.");
-                    ui.add_space(16.0);
-                    ui.weak("Phone approval is optional; your home passphrase remains available for offline unlock.");
-                    ui.add_space(16.0);
-                    if ui.button("Begin setup").clicked() { next = Some(SetupStep::Details); }
-                }
-                SetupStep::Details => {
-                    ui.label("Choose your account name and display name.");
-                    ui.add_space(12.0);
-                    ui.label("Account name (lowercase, numbers, _ or -)");
-                    ui.add(egui::TextEdit::singleline(&mut setup.username).desired_width(FORM_FIELD_WIDTH));
-                    ui.label("Display name");
-                    ui.add(egui::TextEdit::singleline(&mut setup.display_name).desired_width(FORM_FIELD_WIDTH));
-                    ui.add_space(12.0);
-                    if ui.button("Continue").clicked() {
-                        let name = setup.username.trim();
-                        let valid = !name.is_empty() && name.len() <= 31 && (name.as_bytes()[0].is_ascii_lowercase() || name.as_bytes()[0] == b'_') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-                        if !valid { setup.error = Some("Use 1–31 lowercase letters, digits, _ or -, starting with a letter or _".into()); }
-                        else if setup.display_name.trim().is_empty() { setup.error = Some("Enter a display name.".into()); }
-                        else { setup.error = None; next = Some(SetupStep::Identity); }
-                    }
-                }
-                SetupStep::Identity => {
-                    ui.label("Create a new Nostr identity, or import an existing nsec.");
-                    ui.label("Leave the field empty to create a new identity.");
-                    ui.add(egui::TextEdit::singleline(&mut setup.imported_nsec).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("Existing nsec (optional)"));
-                    ui.add_space(12.0);
-                    if ui.button("Continue").clicked() { if let Err(e) = setup.prepare_identity() { setup.error = Some(e); } }
-                }
-                SetupStep::Recovery => {
-                    let recovery = setup.identity_secret.as_ref().and_then(|secret| SecretKey::parse(secret.as_str()).ok()).and_then(|key| key.to_bech32().ok()).unwrap_or_default();
-                    ui.label("Save your recovery key somewhere private. It is shown once.");
+        let highlight_step = setup_step_number(setup.step).unwrap_or(SETUP_TOTAL_STEPS);
+        let muted = ui.visuals().weak_text_color.unwrap_or(Color32::GRAY);
+
+        let available_width = ui.available_width();
+        let card_width = CARD_MAX_WIDTH.min((available_width - 64.0).max(480.0));
+        let margin = ((available_width - card_width) / 2.0).max(24.0);
+        let card_inner_margin = 32.0;
+        let column_gap = 32.0;
+        let content_width =
+            (card_width - card_inner_margin * 2.0 - SIDEBAR_WIDTH - column_gap).max(300.0);
+
+        ui.add_space(32.0);
+        ui.horizontal(|ui| {
+            ui.add_space(margin);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let (mark_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(mark_rect.center(), 12.0, SETUP_ACCENT);
                     ui.add_space(8.0);
-                    ui.add(egui::TextEdit::singleline(&mut recovery.clone()).desired_width(480.0).interactive(false));
-                    ui.add_space(8.0);
-                    ui.label("Anyone with this key can control your Nostr identity.");
-                    if ui.button("I have saved my recovery key").clicked() { next = Some(SetupStep::Pairing); }
-                }
-                SetupStep::Pairing => {
-                    ui.label("Optional: connect your phone for NIP-46 approval when unlocking this encrypted home.");
-                    ui.label("Both this computer and your phone need access to the same relay.");
-                    // Same nested-horizontal-in-vertical_centered gap as
-                    // `centered_row_padding` works around elsewhere, but for
-                    // a label + text field instead of a row of buttons.
-                    let relay_label_width = ui
-                        .painter()
-                        .layout_no_wrap("Relay".to_owned(), egui::FontId::default(), Color32::WHITE)
-                        .size()
-                        .x;
-                    let relay_pad = ((ui.available_width()
-                        - relay_label_width
-                        - ui.spacing().item_spacing.x
-                        - FORM_FIELD_WIDTH)
-                        / 2.0)
-                        .max(0.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(relay_pad);
-                        ui.label("Relay");
-                        ui.add(egui::TextEdit::singleline(&mut setup.relay).desired_width(FORM_FIELD_WIDTH));
+                    ui.label(egui::RichText::new("evermore").strong().size(16.0));
+                });
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Your identity and encrypted home.").color(muted));
+            });
+        });
+        ui.add_space(24.0);
+
+        ui.horizontal(|ui| {
+            ui.add_space(margin);
+            egui::Frame::new()
+                .fill(CARD_BG)
+                .corner_radius(18.0)
+                .inner_margin(egui::Margin::symmetric(card_inner_margin as i8, card_inner_margin as i8))
+                .show(ui, |ui| {
+                    ui.set_width(card_width - card_inner_margin * 2.0);
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(SIDEBAR_WIDTH);
+                            setup_sidebar(ui, highlight_step);
+                        });
+                        ui.add_space(column_gap);
+                        ui.vertical(|ui| {
+                            ui.set_width(content_width);
+                            setup_step_pill(ui, highlight_step);
+                            ui.add_space(10.0);
+                            match setup.step {
+                                SetupStep::Welcome => {
+                                    ui.label(egui::RichText::new("Set up Evermore").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Create your first account and encrypted home. You can create a Nostr identity or import one you already own.").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    setup_callout(ui, "Works offline", "A home passphrase will always unlock this account, even without network access.", false);
+                                    ui.add_space(12.0);
+                                    setup_callout(ui, "Phone approval is optional", "Connect a phone later for NIP-46 approval. Your passphrase remains available as a fallback.", false);
+                                    ui.add_space(20.0);
+                                    ui.horizontal(|ui| {
+                                        if setup_primary_button(ui, "Begin setup") { next = Some(SetupStep::Details); }
+                                        ui.add_space(16.0);
+                                        ui.label(egui::RichText::new("Next, choose your account name and display name.").size(13.0).color(TEXT_FAINT));
+                                    });
+                                }
+                                SetupStep::Details => {
+                                    ui.label(egui::RichText::new("Choose your account details").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Choose the account name used on this device and the name shown to people.").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    setup_field(ui, "Account name", &mut setup.username, "e.g. alex", false, Some("1–31 lowercase letters, digits, _ or -. Start with a letter or _."));
+                                    ui.add_space(16.0);
+                                    setup_field(ui, "Display name", &mut setup.display_name, "Name shown on your profile", false, Some("This name appears on your profile."));
+                                    ui.add_space(20.0);
+                                    if setup_primary_button(ui, "Continue") {
+                                        let name = setup.username.trim();
+                                        let valid = !name.is_empty() && name.len() <= 31 && (name.as_bytes()[0].is_ascii_lowercase() || name.as_bytes()[0] == b'_') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+                                        if !valid { setup.error = Some("Use 1–31 lowercase letters, digits, _ or -, starting with a letter or _".into()); }
+                                        else if setup.display_name.trim().is_empty() { setup.error = Some("Enter a display name.".into()); }
+                                        else { setup.error = None; next = Some(SetupStep::Identity); }
+                                    }
+                                }
+                                SetupStep::Identity => {
+                                    ui.label(egui::RichText::new("Create or import a Nostr identity").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Create a new identity, or import an existing secret key (nsec).").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    setup_field(ui, "Existing nsec (optional)", &mut setup.imported_nsec, "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}", true, Some("Leave this field empty to create a new identity. New keys are shown in the next step."));
+                                    ui.add_space(16.0);
+                                    setup_callout(ui, "Your secret stays on this device", "Importing an existing identity skips the new-key recovery step.", true);
+                                    ui.add_space(20.0);
+                                    if setup_primary_button(ui, "Continue") { if let Err(e) = setup.prepare_identity() { setup.error = Some(e); } }
+                                }
+                                SetupStep::Recovery => {
+                                    let recovery = setup.identity_secret.as_ref().and_then(|secret| SecretKey::parse(secret.as_str()).ok()).and_then(|key| key.to_bech32().ok()).unwrap_or_default();
+                                    ui.label(egui::RichText::new("Save your recovery key").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Save your recovery key somewhere private. It is shown once.").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    egui::Frame::new()
+                                        .fill(RAISED)
+                                        .stroke(egui::Stroke::new(1.0, LINE))
+                                        .corner_radius(12.0)
+                                        .inner_margin(egui::Margin::symmetric(16, 14))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.label(egui::RichText::new("RECOVERY KEY \u{b7} SHOWN ONCE").size(11.0).strong().color(muted));
+                                            ui.add_space(10.0);
+                                            ui.add(egui::TextEdit::singleline(&mut recovery.clone()).desired_width(ui.available_width()).interactive(false).font(egui::FontId::monospace(14.0)));
+                                        });
+                                    ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("The real key is displayed here as a single-line value.").size(12.0).color(TEXT_FAINT));
+                                    ui.add_space(16.0);
+                                    setup_callout(ui, "Keep this key private", "Anyone with this key can control your Nostr identity.", true);
+                                    ui.add_space(20.0);
+                                    if setup_primary_button(ui, "I have saved my recovery key") { next = Some(SetupStep::Pairing); }
+                                }
+                                SetupStep::Pairing => {
+                                    ui.label(egui::RichText::new("Connect your phone (optional)").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("Use NIP-46 approval when unlocking this encrypted home. Both devices need access to the same relay.").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    setup_field(ui, "Relay", &mut setup.relay, "wss://relay.damus.io", false, Some("Use the same relay on this computer and your phone."));
+                                    ui.add_space(16.0);
+                                    if let Some(qr) = &setup.pair_qr {
+                                        ui.add(egui::Image::new(qr).fit_to_exact_size(egui::vec2(200.0, 200.0)));
+                                        ui.add_space(12.0);
+                                    }
+                                    if let Some(uri) = &setup.pair_uri {
+                                        ui.label(egui::RichText::new("Waiting for phone approval\u{2026}").size(16.0).strong());
+                                        if setup.pair_qr.is_none() {
+                                            ui.label(egui::RichText::new("QR rendering is unavailable; select and copy the connection URI below.").color(muted));
+                                        }
+                                        ui.add_space(10.0);
+                                        setup_callout(ui, "Your identity key is not shared", "The phone signer approves the connection request.", false);
+                                        ui.add_space(12.0);
+                                        egui::Frame::new()
+                                            .fill(RAISED)
+                                            .stroke(egui::Stroke::new(1.0, LINE))
+                                            .corner_radius(10.0)
+                                            .inner_margin(egui::Margin::symmetric(16, 12))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.label(egui::RichText::new("Can't scan? Select and copy the connection URI.").strong().size(13.0));
+                                                ui.add_space(6.0);
+                                                ui.add(egui::Label::new(egui::RichText::new(uri).color(SETUP_ACCENT).size(12.0)).selectable(true));
+                                            });
+                                        ui.add_space(8.0);
+                                    } else if setup.pair_rx.is_some() {
+                                        ui.label(egui::RichText::new("Connecting to the relay\u{2026}").color(muted));
+                                        ui.add_space(8.0);
+                                    }
+                                    if setup.pairing_ready {
+                                        ui.colored_label(SUCCESS, "Phone paired. The home passphrase remains available as fallback.");
+                                        ui.label(egui::RichText::new("If homed asks for a token PIN during phone unlock, enter any non-empty value, then approve the request on your phone.").color(muted));
+                                        if let Some(pubkey) = &setup.paired_user_pubkey {
+                                            ui.add_space(6.0);
+                                            ui.label("Phone signer identity:");
+                                            ui.add(egui::Label::new(pubkey).selectable(true));
+                                        }
+                                        ui.add_space(8.0);
+                                    }
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        if !setup.pairing_ready && setup.pair_rx.is_none() && setup_primary_button(ui, "Pair phone") {
+                                            if let Err(e) = setup.start_pairing(ui.ctx().clone()) { setup.error = Some(e); }
+                                        }
+                                        if setup.pairing_ready && setup_primary_button(ui, "Continue with phone pairing") {
+                                            next = Some(SetupStep::Passphrase);
+                                        }
+                                        ui.add_space(12.0);
+                                        if setup_secondary_button(ui, "Skip for now") {
+                                            if let Some(cancel) = setup.pair_cancel.take() { let _ = cancel.send(()); }
+                                            setup.pair_rx = None;
+                                            if let Some(uri) = &mut setup.pair_uri { uri.zeroize(); }
+                                            setup.pair_uri = None;
+                                            setup.pair_qr = None;
+                                            setup.pairing_ready = false;
+                                            next = Some(SetupStep::Passphrase);
+                                        }
+                                        ui.add_space(12.0);
+                                        ui.label(egui::RichText::new("Skip pairing and continue to set your passphrase.").size(12.0).color(TEXT_FAINT));
+                                    });
+                                }
+                                SetupStep::Passphrase => {
+                                    ui.label(egui::RichText::new("Choose your home passphrase").size(24.0).strong());
+                                    ui.add_space(6.0);
+                                    ui.label(egui::RichText::new("This passphrase unlocks your encrypted home, including when you are offline.").size(14.0).color(muted));
+                                    ui.add_space(20.0);
+                                    setup_field(ui, "Passphrase", &mut setup.passphrase, "At least 8 characters", true, Some("Use at least 8 characters."));
+                                    ui.add_space(16.0);
+                                    setup_field(ui, "Repeat passphrase", &mut setup.confirmation, "Enter the same passphrase again", true, None);
+                                    ui.add_space(20.0);
+                                    ui.horizontal(|ui| {
+                                        if setup_primary_button(ui, "Create account") {
+                                            if setup.passphrase.len() < 8 { setup.error = Some("Use at least 8 characters.".into()); }
+                                            else if setup.passphrase != setup.confirmation { setup.error = Some("The passphrases do not match.".into()); }
+                                            else { setup.error = None; create = true; }
+                                        }
+                                        ui.add_space(16.0);
+                                        ui.label(egui::RichText::new("Evermore creates the encrypted home after you continue.").size(13.0).color(TEXT_FAINT));
+                                    });
+                                }
+                                SetupStep::Saving => {
+                                    ui.label(egui::RichText::new("Creating your encrypted home\u{2026}").size(24.0).strong());
+                                    ui.add_space(10.0);
+                                    ui.add(egui::Spinner::new());
+                                }
+                            }
+                            if let Some(error) = &setup.error { ui.add_space(12.0); ui.colored_label(ui.visuals().error_fg_color, error); }
+                        });
                     });
-                    if let Some(qr) = &setup.pair_qr {
-                        ui.add(egui::Image::new(qr).fit_to_exact_size(egui::vec2(240.0, 240.0)));
-                    }
-                    if let Some(uri) = &setup.pair_uri {
-                        ui.label("Scan with a NIP-46 remote signer:");
-                        if setup.pair_qr.is_none() { ui.weak("QR rendering is unavailable; select and copy the connection URI below."); }
-                        ui.add(egui::Label::new(uri).selectable(true));
-                        ui.label("Waiting for phone approval…");
-                    } else if setup.pair_rx.is_some() {
-                        ui.label("Connecting to the relay…");
-                    }
-                    if setup.pairing_ready {
-                        ui.colored_label(SUCCESS, "Phone paired. The home passphrase remains available as fallback.");
-                        ui.weak("If homed asks for a token PIN during phone unlock, enter any non-empty value, then approve the request on your phone.");
-                        if let Some(pubkey) = &setup.paired_user_pubkey {
-                            ui.label("Phone signer identity:");
-                            ui.add(egui::Label::new(pubkey).selectable(true));
-                        }
-                    }
-                    ui.add_space(8.0);
-                    let show_pair = !setup.pairing_ready && setup.pair_rx.is_none();
-                    let mut labels = Vec::new();
-                    if show_pair { labels.push("Pair phone"); }
-                    if setup.pairing_ready { labels.push("Continue with phone pairing"); }
-                    labels.push("Skip for now");
-                    let pad = centered_row_padding(ui, &labels);
-                    ui.horizontal(|ui| {
-                        ui.add_space(pad);
-                        if show_pair && ui.button("Pair phone").clicked() {
-                            if let Err(e) = setup.start_pairing(ui.ctx().clone()) { setup.error = Some(e); }
-                        }
-                        if setup.pairing_ready && ui.button("Continue with phone pairing").clicked() { next = Some(SetupStep::Passphrase); }
-                        if ui.button("Skip for now").clicked() {
-                            if let Some(cancel) = setup.pair_cancel.take() { let _ = cancel.send(()); }
-                            setup.pair_rx = None;
-                            if let Some(uri) = &mut setup.pair_uri { uri.zeroize(); }
-                            setup.pair_uri = None;
-                            setup.pair_qr = None;
-                            setup.pairing_ready = false;
-                            next = Some(SetupStep::Passphrase);
-                        }
-                    });
-                }
-                SetupStep::Passphrase => {
-                    ui.label("Choose a passphrase for your encrypted home. Keep it available; it is the offline unlock method.");
-                    ui.add(egui::TextEdit::singleline(&mut setup.passphrase).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("At least 8 characters"));
-                    ui.add(egui::TextEdit::singleline(&mut setup.confirmation).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("Repeat passphrase"));
-                    if ui.button("Create account").clicked() {
-                        if setup.passphrase.len() < 8 { setup.error = Some("Use at least 8 characters.".into()); }
-                        else if setup.passphrase != setup.confirmation { setup.error = Some("The passphrases do not match.".into()); }
-                        else { setup.error = None; create = true; }
-                    }
-                }
-                SetupStep::Saving => { ui.label("Creating your encrypted home…"); }
-            }
-            if let Some(error) = &setup.error { ui.add_space(8.0); ui.colored_label(ui.visuals().error_fg_color, error); }
+                });
         });
         if create {
             setup.step = SetupStep::Saving;

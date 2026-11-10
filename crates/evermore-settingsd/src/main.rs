@@ -86,6 +86,12 @@ fn on_settings_event(event: Event, signer: &SignerClient, store: &SettingsStore,
         return;
     };
 
+    // Agent definitions share kind:30078 but belong to agentd's projector, not
+    // the settings cache. Their `d` tags are `evermore:agent:<id>`.
+    if domain.starts_with("agent:") {
+        return;
+    }
+
     match signer.nip44_decrypt(own_pubkey, &event.content) {
         Ok(plaintext) => match serde_json::from_str::<serde_json::Value>(&plaintext) {
             Ok(serde_json::Value::Object(map)) => {

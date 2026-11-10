@@ -7,7 +7,9 @@ use nostr::prelude::*;
 use serde_json::json;
 
 use crate::backing::{self, Backing};
+use crate::identity_store;
 use crate::keyring_store;
+use zeroize::Zeroizing;
 
 pub fn run(socket_path: std::path::PathBuf) -> std::io::Result<()> {
     if let Some(parent) = socket_path.parent() {
@@ -89,6 +91,16 @@ fn handle_request(req: Request) -> Response {
             Err(e) => Response::err(e.to_string()),
         },
 
+        Request::CreateAgentIdentity { slug } => match create_agent_identity(&slug) {
+            Ok(value) => Response::ok(value),
+            Err(error) => Response::err(error),
+        },
+
+        Request::DeleteAgentIdentity { slug } => match delete_agent_identity(&slug) {
+            Ok(value) => Response::ok(value),
+            Err(error) => Response::err(error),
+        },
+
         Request::GetPublicKey { identity } => match load_keys(&identity) {
             Ok(Some(keys)) => {
                 let pk = keys.public_key();
@@ -160,4 +172,52 @@ fn handle_request(req: Request) -> Response {
             Err(e) => Response::err(e),
         },
     }
+}
+
+/// Generates a new agent key, loads it into this session's keyring, and
+/// persists it so the same identity is available after logout. A failure to
+/// persist rolls the keyring entry back rather than leaving a key that looks
+/// usable now but disappears at the next login.
+fn create_agent_identity(slug: &str) -> Result<serde_json::Value, String> {
+    let name = identity_store::identity_name(slug)?;
+    if keyring_store::exists(&name).map_err(|error| error.to_string())? {
+        return Err(format!("agent identity '{name}' is already loaded"));
+    }
+    if identity_store::exists(&name)? {
+        return Err(format!("agent identity '{name}' already exists on disk"));
+    }
+
+    let keys = Keys::generate();
+    let secret = Zeroizing::new(keys.secret_key().to_secret_hex());
+    let pubkey = keys.public_key();
+    keyring_store::store(&name, keys.secret_key().as_secret_bytes())
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = identity_store::persist(&name, secret.as_str()) {
+        let _ = keyring_store::remove(&name);
+        return Err(error);
+    }
+
+    Ok(json!({
+        "identity": name,
+        "slug": slug,
+        "pubkey_hex": pubkey.to_hex(),
+        "npub": pubkey.to_bech32().unwrap_or_default(),
+        "persisted": true,
+    }))
+}
+
+fn delete_agent_identity(slug: &str) -> Result<serde_json::Value, String> {
+    let name = identity_store::identity_name(slug)?;
+    let loaded = keyring_store::exists(&name).map_err(|error| error.to_string())?;
+    let persisted_removed = identity_store::remove(&name)?;
+    if !loaded && !persisted_removed {
+        return Err(format!("unknown agent identity '{name}'"));
+    }
+    keyring_store::remove(&name).map_err(|error| error.to_string())?;
+    Ok(json!({
+        "identity": name,
+        "slug": slug,
+        "deleted": true,
+        "persisted_removed": persisted_removed,
+    }))
 }

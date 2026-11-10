@@ -76,7 +76,37 @@ evermore-agentd ask "what is my current workspace?"
 evermore-agentd tasks
 evermore-agentd status TASK_ID
 evermore-agentd cancel TASK_ID
+evermore-agentd agents
+evermore-agentd agents-reload
 ```
+
+## Relay-backed agent definitions
+
+An agent is an owner-authored declaration on the local control-plane relay,
+not a private JSON side store. `evermore-agentd` only projects it:
+
+- One NIP-78 `kind:30078` event per agent, `d=evermore:agent:<id>`, with the
+  definition JSON (`id`, `title`, `identity`, `agent_pubkey`, `enabled`,
+  `jobs`) NIP-44-encrypted to the owner. Latest event wins.
+- A NIP-51 `kind:30000` list at `d=evermore:agents` whose `p` tags name the
+  enrolled agent pubkeys. It is the membership index; a definition outside the
+  list is ignored.
+- Grants stay separate owner-signed `kind:1` events. Runtime state (last run,
+  errors, task IDs) stays local.
+
+`agents` prints the cached definitions; `agents-reload` asks the running
+daemon to re-query the relay and replace the cache. The daemon needs
+`--owner-identity NAME` to decrypt the definitions; without it, it serves the
+last local cache and reports that reloads are unavailable. The cache lives at
+`$XDG_DATA_HOME/evermore/agents/agents.json` (`0600`), so an agent keeps its
+schedule through a relay restart.
+
+Each enabled job runs on its own interval through the same bounded `Runner`
+as a routine. Attempts and errors are recorded in a separate 0600
+`$XDG_DATA_HOME/evermore/agents/runtime.json`; a failed attempt advances
+`last_run_at` so an expired grant or missing identity retries at the configured
+cadence rather than every tick. Running a job still requires the agent's
+active grant and still stops at owner approval for writes.
 
 ## Standing routines
 
@@ -139,7 +169,8 @@ The daemon needs a loaded signer identity for its agent pubkey and for signing
 write requests:
 
 ```sh
-evermore-agentd serve --agent-identity NAME [--owner-pubkey HEX]
+evermore-agentd serve --agent-identity NAME \
+  [--owner-identity NAME] [--owner-pubkey HEX] [--relay-url URL]
 ```
 
 `packaging/systemd/evermore-agentd@.service` runs it as `%i-assistant`. It has

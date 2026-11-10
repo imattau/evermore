@@ -1975,6 +1975,23 @@ recipes, a CLI, and L1 generation. `evermore-operationsd` records optional
 `task`/`step` tags on request events; the panel folds recipe runs, task and step
 state, pending-write plans, approvals, and cancellation into Recent Activity.
 
+**Agent creation surface (2026-11-10):** M11.7's signer-side lifecycle is
+implemented: `CreateAgentIdentity`/`DeleteAgentIdentity` over the signer socket,
+0600 persistence under `$XDG_DATA_HOME/evermore/identities/`, and startup
+reload, with the agent runner now staged in the VM image and the npack package
+list. The signer also provisions the built-in `%u-operations`/`%u-assistant`
+identities idempotently at startup, and new users get `evermore-agentd@%u`
+enabled. M11.8 is implemented: `evermore-agentd` reads the NIP-78 definitions
+and NIP-51 membership list, decrypts through the signer, validates them, and
+keeps a private local cache exposed as `ListAgents`/`ReloadAgents` and
+`agentd agents`/`agents-reload`; the scheduler runs each enabled job on its
+interval and records local runtime state. M11.9 and the first form of M11.10
+are implemented in the panel: an **Agents** rail item lists the projected
+definitions with grant and runtime state, creates a new agent end to end
+(identity → grant → encrypted definition → membership list → runner reload),
+runs a job now, and revokes a grant. Pause/delete/renew, VM screenshots, and
+the VM acceptance pass remain.
+
 L1 `propose_operation` asks `ai-inferd` for one grammar-constrained proposal,
 validates it against the catalogue, repairs malformed or out-of-catalogue
 output at most once, returns a refusal as a refusal, and enforces a 4096-token
@@ -2090,6 +2107,60 @@ to steps without a second lifecycle.
   catalogue-derived dataset with recipe slot extraction and task-summary
   records, and evaluate them in the same held-out split. Keep one adapter (see
   the decision below); add no per-agent or per-routine LoRA.
+- **M11.7 — Agent identity lifecycle and a shipped runner.** Add signer socket
+  requests to create and delete a persisted agent identity
+  (`CreateAgentIdentity`/`DeleteAgentIdentity`, identity name `agent-<slug>`),
+  persist the 32-byte secret as a 0600 regular file under
+  `$XDG_DATA_HOME/evermore/identities/`, reload persisted identities when the
+  signer starts, and refuse deletion outside the `agent-` namespace. Ship
+  `evermore-agentd` in the VM image and as an npack package. Provision the
+  built-in `%u-operations` and `%u-assistant` identities idempotently from the
+  signer's startup path and enable `evermore-agentd@%u` for new users, so a
+  fresh install's control plane can start without hand-run `keygen` commands.
+  The assistant's default grant remains an explicit owner action (M11.9),
+  never an implicit startup grant.
+- **M11.8 — Relay-backed agent definitions.** An agent is an owner-authored
+  declaration on the local control-plane relay, not a private JSON side store.
+  Use NIP-78 `kind:30078`, one event per agent, `d=evermore:agent:<id>`,
+  NIP-44-encrypted to the owner, with JSON content for the title, identity
+  name/pubkey, jobs, schedules, inputs, and enabled flag. Publish a NIP-51
+  `kind:30000` list at `d=evermore:agents` as the canonical membership index
+  (one `p` tag per agent pubkey), regenerated on add or remove; removing an
+  agent also publishes a NIP-09 deletion for its definition event. Grants
+  remain separate owner-signed `kind:1` events. Runtime state (last run,
+  errors, task IDs) stays local to `evermore-agentd` and never rides the
+  relay. Agentd projects the two kinds into a local cache and schedules from
+  it, so a relay hiccup does not stop already-defined agents.
+  `evermore-settingsd` ignores `evermore:agent:*` domains. The panel signs and
+  publishes as the owner, then asks agentd to reload. No relay allowlist
+  change is needed: `30000` and `30078` are already allowed.
+- **M11.9 — Grant and agent management API.** Panel grant submit/revoke
+  (including `grant_id` and publication state), capability derivation from the
+  selected recipes' declared operations, and agentd runtime requests: list
+  agents, reload definitions, run one job now, list one agent's tasks, and
+  record last run/error. Agent definitions are edited only by republishing
+  owner-signed events; agentd never mutates them.
+- **M11.10 — Agents rail screen and creation wizard.** Add an **Agents** rail
+  item after **AI**, with a list (status, schedule, last run, grant expiry), a
+  detail screen (capabilities, schedule, activity, pause/revoke/delete), and a
+  five-step creation wizard: choose a curated recipe or set of jobs, set the
+  cadence, name the agent, review the derived read/write authority and expiry,
+  then create the identity, publish the definition and grant, and arm the
+  agent. Show relay publication as pending until acknowledged. Defer
+  "create an agent by chat" until the manual lifecycle is proven.
+
+**Agent store decision — the relay is the source of truth, not a list alone.**
+NIP-51 lists hold references (pubkeys and event addresses), not structured
+configuration, so a list is the right primitive for *which agents exist* but
+not for *what each agent does*. `kind:30000` at `d=evermore:agents` is the
+membership index; `kind:30078` at `d=evermore:agent:<id>` is the per-agent
+definition. The list is regenerated and never the only copy of a definition.
+Newer definitions replace older ones by addressable-event semantics, and the
+local relay stays loopback-only, so this is a durable local bus first and a
+cross-device sync path only once M2.4's external-relay bridge is real. A
+synced definition whose `agent-<slug>` key is absent on this device is shown
+as unavailable rather than silently skipped; identity secrets never ride the
+relay.
 
 **LoRA decision — one adapter, not one per agent.** Evermore ships one
 Qwen2.5-1.5B-Instruct base plus one multi-task tool-use LoRA covering catalogue
@@ -2937,6 +3008,16 @@ back to chat when no recipe matches.
 The AI drawer keeps the conversational surface and adds a single line of task
 status when one is running, so the drawer does not need a second layout.
 
+The panel also gains a first-class **Agents** screen (M11.10). It lists the
+owner's automated agents, shows each one's scheduled jobs, derived read/write
+capabilities, grant expiry, and recent tasks, and provides pause, revoke,
+renew, run-now, and delete actions. Creation is a guided flow over curated
+recipes, not a free-form prompt: the owner picks behaviour and cadence, sees
+the exact operations the agent may request, signs one grant, and the identity,
+relay definition, and schedule are created together. This screen is where the
+bounded-agency model becomes legible; it must never describe an agent as
+"autonomous" or as holding authority the grant does not contain.
+
 ### Implementation order
 
 Layout and the task view come first, consistent with the design-system
@@ -2976,7 +3057,10 @@ revocation mid-task, and daemon restart covered; and a task-level screenshot in
   the schema is frozen.
 - **Identity granularity.** One interactive identity plus one per routine is
   the current lean. Per-capability identities would make grants more legible
-  and approvals more frequent.
+  and approvals more frequent. User-created automated agents are the explicit
+  exception: each agent gets its own `agent-<slug>` identity, grant, and relay
+  definition (M11.7-M11.10), because a standing worker's authority has to stay
+  revocable and legible in the audit trail.
 
 ### Risks
 

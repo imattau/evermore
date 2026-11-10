@@ -44,6 +44,28 @@ pub fn propose_operation(prompt: &str) -> Result<evermore_common::agent::Proposa
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
+pub fn fetch_agents() -> Result<Vec<evermore_common::agent::AgentView>, String> {
+    match request(&Request::ListAgents) {
+        Ok(value) => {
+            serde_json::from_value(value).map_err(|error| format!("invalid agent list: {error}"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn reload_agents() -> Result<evermore_common::agent::AgentReload, String> {
+    let value = request(&Request::ReloadAgents)?;
+    serde_json::from_value(value).map_err(|error| format!("invalid agent reload: {error}"))
+}
+
+pub fn run_agent_job(agent_id: &str, job_id: &str) -> Result<Task, String> {
+    let value = request(&Request::RunAgentJob {
+        agent_id: agent_id.to_string(),
+        job_id: job_id.to_string(),
+    })?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 fn request(request: &Request) -> Result<Value, String> {
     let socket_path = agent::runtime_socket_path();
     let mut stream = UnixStream::connect(&socket_path)

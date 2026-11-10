@@ -1,5 +1,6 @@
 mod backing;
 mod device_identity;
+mod identity_store;
 mod keyring_store;
 mod profile;
 mod server;
@@ -21,6 +22,7 @@ fn main() {
         Some("serve") => serve(&args[2..]),
         Some("keygen") => keygen(args.get(2)),
         Some("import") => import(args.get(2)),
+        Some("ensure-service-identities") => ensure_service_identities(args.get(2)),
         Some("load-home-identity") => load_home_identity(args.get(2), &args[3..]),
         Some("unload-home-identity") => unload_home_identity(args.get(2)),
         Some("list") => list(),
@@ -37,6 +39,9 @@ fn main() {
                               human identities, on its own socket.\n\
                  keygen NAME  generate a new identity, store it, print its npub\n\
                  import NAME  read an nsec (bech32 or hex) from stdin, store it\n\
+                 ensure-service-identities OWNER\n\
+                              create the built-in OWNER-operations and\n\
+                              OWNER-assistant identities if missing; idempotent\n\
                  load-home-identity NAME [--path PATH] [--if-present]\n\
                               read the mode-0600 encrypted-home key file into\n\
                               this session's keyring before starting the daemon\n\
@@ -100,6 +105,16 @@ fn serve(args: &[String]) -> Result<(), String> {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEVICE_SOCKET_PATH));
         server::run(socket_path).map_err(|e| e.to_string())
     } else {
+        match identity_store::load_all_into_keyring() {
+            Ok(names) if !names.is_empty() => eprintln!(
+                "evermore-signer: loaded {} persisted agent identity(ies)",
+                names.len()
+            ),
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("evermore-signer: couldn't load persisted agent identities: {error}")
+            }
+        }
         server::run(evermore_common::runtime_socket_path()).map_err(|e| e.to_string())
     }
 }
@@ -191,6 +206,42 @@ fn set_profile(name: Option<&String>, args: &[String]) -> Result<(), String> {
 
     profile::set_profile(&keys, &display_name, avatar.as_deref())?;
     println!("profile set for '{name}' ({})", keys.public_key().to_hex());
+    Ok(())
+}
+
+/// Idempotently provisions the two built-in identities the control plane
+/// needs: `<owner>-operations` for `evermore-operationsd` and
+/// `<owner>-assistant` for `evermore-agentd`. Called from the signer unit's
+/// `ExecStartPre` so fresh and existing homes converge without hand-run
+/// `keygen` commands. A key already present in the session keyring is
+/// persisted rather than replaced.
+fn ensure_service_identities(owner: Option<&String>) -> Result<(), String> {
+    let owner = owner
+        .map(String::as_str)
+        .ok_or_else(|| "missing owner identity name".to_string())?;
+    let (operations, assistant) = identity_store::service_identity_names(owner)?;
+    for name in [operations, assistant] {
+        let secret = match identity_store::load(&name)? {
+            Some(existing) => existing,
+            None => {
+                let hex = match keyring_store::load(&name).map_err(|e| e.to_string())? {
+                    Some(bytes) => {
+                        let key = SecretKey::from_slice(&bytes).map_err(|e| e.to_string())?;
+                        Zeroizing::new(key.to_secret_hex())
+                    }
+                    None => {
+                        let keys = Keys::generate();
+                        Zeroizing::new(keys.secret_key().to_secret_hex())
+                    }
+                };
+                identity_store::persist(&name, hex.as_str())?;
+                hex
+            }
+        };
+        let key = SecretKey::parse(secret.as_str()).map_err(|e| e.to_string())?;
+        keyring_store::store(&name, key.as_secret_bytes()).map_err(|e| e.to_string())?;
+        println!("{name}: {}", Keys::new(key).public_key());
+    }
     Ok(())
 }
 

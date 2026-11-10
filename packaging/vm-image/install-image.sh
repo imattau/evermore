@@ -8,7 +8,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 bins=(evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-relay-supervisor \
   evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd \
-  evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge npack npack-gui)
+  evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge evermore-agentd npack npack-gui)
 for bin in "${bins[@]}"; do
   [[ -x "$STAGE/bin/$bin" ]] || { echo "missing staged executable: $STAGE/bin/$bin" >&2; exit 1; }
 done
@@ -62,7 +62,7 @@ install -m 0644 "$ROOT/packaging/systemd/evermore-indexd.service" /usr/lib/syste
 install -m 0644 "$ROOT/packaging/systemd/evermore-inferd.service" /usr/lib/systemd/user/
 install -m 0644 "$ROOT/packaging/systemd/evermore-sway-ai-bridge.service" /usr/lib/systemd/user/
 for unit in evermore-blossom-fs@.service evermore-notifyd@.service evermore-operationsd@.service \
-  evermore-settingsd@.service; do install -m 0644 "$ROOT/packaging/systemd/$unit" /usr/lib/systemd/user/; done
+  evermore-settingsd@.service evermore-agentd@.service; do install -m 0644 "$ROOT/packaging/systemd/$unit" /usr/lib/systemd/user/; done
 install -m 0644 "$ROOT/packaging/systemd/evermore-profiles.conf" /usr/lib/tmpfiles.d/evermore-profiles.conf
 
 install -m 0644 "$ROOT/packaging/sway/evermore-desktop.conf" /etc/skel/.config/sway/

@@ -9,6 +9,7 @@ mod launcher_ai;
 mod nostr_feed;
 mod nostr_feed_client;
 mod operations_client;
+mod relay_client;
 mod settings_client;
 mod signer_client;
 mod sway_windows;
@@ -25,6 +26,7 @@ const ICON_KEY_ROUND: &[u8] = include_bytes!("../assets/icons/key-round.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("../assets/icons/settings.svg");
 const ICON_BELL: &[u8] = include_bytes!("../assets/icons/bell.svg");
 const ICON_SPARKLES: &[u8] = include_bytes!("../assets/icons/sparkles.svg");
+const ICON_AGENTS: &[u8] = include_bytes!("../assets/icons/agents.svg");
 const ICON_PACKAGE: &[u8] = include_bytes!("../assets/icons/package.svg");
 const ICON_COPY: &[u8] = include_bytes!("../assets/icons/copy.svg");
 
@@ -352,6 +354,7 @@ enum Tab {
     Settings,
     Notifications,
     Ai,
+    Agents,
 }
 
 #[derive(Default)]
@@ -387,6 +390,17 @@ struct PanelApp {
     agent_status: Option<String>,
     agent_error: Option<String>,
     agent_next_poll: Option<std::time::Instant>,
+    agents: Vec<evermore_common::agent::AgentView>,
+    agents_loaded: bool,
+    agents_error: Option<String>,
+    agents_next_poll: Option<std::time::Instant>,
+    agent_wizard_open: bool,
+    agent_wizard_step: u8,
+    agent_title: String,
+    agent_slug: String,
+    agent_recipe: String,
+    agent_interval_seconds: u64,
+    agent_expiry_days: u64,
     approval_identity: String,
     approval_review_id: Option<String>,
     approval_error: Option<String>,
@@ -1061,6 +1075,631 @@ impl PanelApp {
         }
     }
 
+    fn refresh_agents(&mut self) {
+        self.agents_loaded = true;
+        match agent_client::fetch_agents() {
+            Ok(agents) => {
+                self.agents = agents;
+                self.agents_error = None;
+            }
+            Err(error) => {
+                self.agents.clear();
+                self.agents_error = Some(error);
+            }
+        }
+        if let Ok(grants) = operations_client::fetch_grants() {
+            self.operation_grants = grants;
+            self.operation_grants_error = None;
+        }
+        self.agents_next_poll = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    }
+
+    fn reload_agents(&mut self) {
+        self.agent_status = None;
+        self.agent_error = None;
+        match agent_client::reload_agents() {
+            Ok(reload) => {
+                self.agents = reload.agents;
+                self.agents_loaded = true;
+                self.agents_error = None;
+                self.agent_status = Some(format!(
+                    "Loaded {} agent(s){}",
+                    self.agents.len(),
+                    if reload.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {} warning(s)", reload.warnings.len())
+                    }
+                ));
+                if !reload.warnings.is_empty() {
+                    self.agent_error = Some(reload.warnings.join(" · "));
+                }
+            }
+            Err(error) => self.agent_error = Some(error),
+        }
+    }
+
+    fn run_agent_job(&mut self, agent_id: &str, job_id: &str) {
+        self.agent_status = None;
+        self.agent_error = None;
+        match agent_client::run_agent_job(agent_id, job_id) {
+            Ok(task) => {
+                self.agent_status = Some(format!(
+                    "Started {agent_id} · {job_id} ({})",
+                    task_status_name(task.status)
+                ));
+                self.refresh_agents();
+                self.refresh_agent_tasks();
+            }
+            Err(error) => self.agent_error = Some(error),
+        }
+    }
+
+    fn open_agent_wizard(&mut self) {
+        self.agent_wizard_open = true;
+        self.agent_wizard_step = 0;
+        self.agent_status = None;
+        self.agent_error = None;
+        self.agent_title.clear();
+        self.agent_slug.clear();
+        self.agent_recipe = self
+            .agent_recipes
+            .first()
+            .map(|recipe| recipe.id.clone())
+            .unwrap_or_default();
+        self.agent_interval_seconds = 86_400;
+        self.agent_expiry_days = 90;
+    }
+
+    fn owner_identity(&self) -> Option<signer_client::Identity> {
+        let owner = self.configured_owner_pubkey.as_deref()?;
+        self.identities
+            .iter()
+            .find(|identity| identity.pubkey_hex == owner)
+            .cloned()
+    }
+
+    fn create_agent(&mut self) {
+        self.agent_status = None;
+        self.agent_error = None;
+        let Some(owner) = self.owner_identity() else {
+            self.agent_error =
+                Some("The configured owner identity is not loaded in this session.".to_string());
+            return;
+        };
+        let slug = self.agent_slug.trim().to_string();
+        if let Err(error) = evermore_common::agent::validate_agent_slug(&slug) {
+            self.agent_error = Some(error);
+            return;
+        }
+        let Some(recipe) = self
+            .agent_recipes
+            .iter()
+            .find(|recipe| recipe.id == self.agent_recipe)
+            .cloned()
+        else {
+            self.agent_error = Some("Choose a recipe for this agent.".to_string());
+            return;
+        };
+        let operations = recipe.operations.clone();
+        if operations.is_empty() {
+            self.agent_error = Some("That recipe declares no operations.".to_string());
+            return;
+        }
+        let title = self.agent_title.trim().to_string();
+        if title.is_empty() {
+            self.agent_error = Some("Give the agent a name.".to_string());
+            return;
+        }
+        let identity_name = format!("agent-{slug}");
+
+        // Retrying a failed create must reuse the identity the first attempt
+        // already persisted rather than generating a second key.
+        let created = match signer_client::create_agent_identity(&slug) {
+            Ok(created) => created,
+            Err(error) => {
+                self.refresh_identities();
+                match self
+                    .identities
+                    .iter()
+                    .find(|identity| identity.name == identity_name)
+                {
+                    Some(existing) => signer_client::CreatedAgentIdentity {
+                        identity: existing.name.clone(),
+                        pubkey_hex: existing.pubkey_hex.clone(),
+                    },
+                    None => {
+                        self.agent_error =
+                            Some(format!("Could not create the agent identity: {error}"));
+                        return;
+                    }
+                }
+            }
+        };
+        self.refresh_identities();
+
+        let expires_in = self.agent_expiry_days.saturating_mul(24 * 60 * 60);
+        if let Err(error) = operations_client::submit_grant(
+            &owner.name,
+            &created.pubkey_hex,
+            &operations,
+            expires_in,
+        ) {
+            self.agent_error = Some(format!("Could not publish the agent grant: {error}"));
+            return;
+        }
+        self.refresh_operations();
+
+        let now = now_unix();
+        let definition = evermore_common::agent::AgentDefinition {
+            version: evermore_common::agent::AGENT_DEFINITION_VERSION,
+            id: slug.clone(),
+            title,
+            description: recipe.description.clone(),
+            identity: created.identity.clone(),
+            agent_pubkey: created.pubkey_hex.clone(),
+            enabled: true,
+            jobs: vec![evermore_common::agent::AgentJob {
+                id: "main".to_string(),
+                recipe_id: recipe.id.clone(),
+                inputs: serde_json::json!({}),
+                interval_seconds: self.agent_interval_seconds,
+                enabled: true,
+            }],
+            created_at: now,
+            updated_at: now,
+        };
+
+        let plaintext = match serde_json::to_string(&definition) {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                self.agent_error = Some(format!("Could not encode the agent definition: {error}"));
+                return;
+            }
+        };
+        let ciphertext =
+            match signer_client::nip44_encrypt(&owner.name, &owner.pubkey_hex, plaintext) {
+                Ok(ciphertext) => ciphertext,
+                Err(error) => {
+                    self.agent_error =
+                        Some(format!("Could not encrypt the agent definition: {error}"));
+                    return;
+                }
+            };
+        let d_tag = match evermore_common::agent::agent_d_tag(&slug) {
+            Ok(tag) => tag,
+            Err(error) => {
+                self.agent_error = Some(error);
+                return;
+            }
+        };
+        let event: nostr::event::Event = match signer_client::sign_event(
+            &owner.name,
+            evermore_common::agent::KIND_AGENT_DEFINITION,
+            ciphertext,
+            vec![vec!["d".to_string(), d_tag]],
+        )
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("invalid signed definition: {error}"))
+        }) {
+            Ok(event) => event,
+            Err(error) => {
+                self.agent_error = Some(format!("Could not sign the agent definition: {error}"));
+                return;
+            }
+        };
+        if let Err(error) = relay_client::publish(relay_client::DEFAULT_RELAY_URL, &event) {
+            self.agent_error = Some(format!("Could not publish the agent definition: {error}"));
+            return;
+        }
+
+        if let Err(error) = self.publish_agents_membership(&owner, &created.pubkey_hex) {
+            self.agent_error = Some(error);
+            return;
+        }
+
+        match agent_client::reload_agents() {
+            Ok(reload) => {
+                self.agents = reload.agents;
+                self.agents_loaded = true;
+                self.agents_error = None;
+                self.agent_wizard_open = false;
+                self.agent_status = Some(format!("Created agent '{slug}'."));
+            }
+            Err(error) => {
+                self.agent_error = Some(format!(
+                    "The agent was published, but the runner did not reload it: {error}"
+                ));
+            }
+        }
+    }
+
+    fn publish_agents_membership(
+        &self,
+        owner: &signer_client::Identity,
+        agent_pubkey: &str,
+    ) -> Result<(), String> {
+        let filter = serde_json::json!({
+            "kinds": [evermore_common::agent::KIND_AGENTS_LIST],
+            "authors": [owner.pubkey_hex],
+            "#d": [evermore_common::agent::AGENTS_LIST_D_TAG],
+        });
+        let events = relay_client::query(relay_client::DEFAULT_RELAY_URL, filter)?;
+        let mut pubkeys: std::collections::BTreeSet<String> = events
+            .into_iter()
+            .filter(|event| event.pubkey.to_hex() == owner.pubkey_hex && event.verify().is_ok())
+            .max_by_key(|event| event.created_at.as_secs())
+            .map(|event| {
+                event
+                    .tags
+                    .iter()
+                    .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+                    .filter_map(|tag| tag.as_slice().get(1).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        pubkeys.insert(agent_pubkey.to_string());
+        let mut tags = vec![vec![
+            "d".to_string(),
+            evermore_common::agent::AGENTS_LIST_D_TAG.to_string(),
+        ]];
+        for pubkey in pubkeys {
+            tags.push(vec!["p".to_string(), pubkey]);
+        }
+        let event: nostr::event::Event = signer_client::sign_event(
+            &owner.name,
+            evermore_common::agent::KIND_AGENTS_LIST,
+            String::new(),
+            tags,
+        )
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("invalid signed agent list: {error}"))
+        })?;
+        relay_client::publish(relay_client::DEFAULT_RELAY_URL, &event)
+    }
+
+    fn agents_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Agents");
+        ui.weak(
+            "Automated workers with their own identity and an expiring grant. \
+             Writes still stop at your approval.",
+        );
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("New agent").clicked() {
+                self.open_agent_wizard();
+            }
+            if ui.button("Reload from relay").clicked() {
+                self.reload_agents();
+            }
+            if self.owner_identity().is_none() {
+                ui.weak("Waiting for the configured owner identity…");
+            }
+        });
+        if let Some(status) = &self.agent_status {
+            ui.weak(status);
+        }
+        if let Some(error) = &self.agent_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.add_space(8.0);
+
+        if let Some(error) = self.agents_error.clone() {
+            let mut retry = false;
+            open_section(ui, |ui| {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "Couldn't reach the agent runner.",
+                );
+                ui.weak(&error);
+                retry = ui.button("Try again").clicked();
+            });
+            if retry {
+                self.refresh_agents();
+            }
+        }
+
+        if self.agents.is_empty() {
+            open_section(ui, |ui| {
+                ui.label(egui::RichText::new("No agents yet").strong());
+                ui.weak("Create one to run a recipe on a schedule under its own identity.");
+                if ui.button("Create your first agent").clicked() {
+                    self.open_agent_wizard();
+                }
+            });
+            return;
+        }
+
+        for agent in self.agents.clone() {
+            open_section(ui, |ui| self.agent_card_ui(ui, &agent));
+            ui.add_space(8.0);
+        }
+    }
+
+    fn agent_card_ui(&mut self, ui: &mut egui::Ui, agent: &evermore_common::agent::AgentView) {
+        let definition = &agent.definition;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&definition.title).strong().size(16.0));
+            if !agent.available {
+                ui.colored_label(egui::Color32::LIGHT_RED, "unavailable");
+            } else if !definition.enabled {
+                ui.weak("paused");
+            } else {
+                ui.colored_label(egui::Color32::from_rgb(139, 183, 255), "active");
+            }
+        });
+        if !definition.description.is_empty() {
+            ui.weak(&definition.description);
+        }
+        ui.weak(format!(
+            "Identity {} · {}",
+            definition.identity,
+            short_pubkey(&definition.agent_pubkey)
+        ));
+        if let Some(reason) = &agent.unavailable_reason {
+            ui.colored_label(ui.visuals().error_fg_color, reason);
+        }
+
+        let grant = self
+            .operation_grants
+            .iter()
+            .find(|grant| grant.agent_pubkey == definition.agent_pubkey && !grant.revoked)
+            .cloned();
+        match &grant {
+            Some(grant) if grant.grant_published => {
+                ui.weak(format!(
+                    "Grant covers {} operation(s), expires {}",
+                    grant.allowed_operations.len(),
+                    relative_future(grant.expires_at)
+                ));
+            }
+            Some(_) => {
+                ui.weak("Grant is publishing to the relay…");
+            }
+            None => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(229, 181, 103),
+                    "No active grant — this agent cannot run.",
+                );
+            }
+        }
+
+        ui.add_space(6.0);
+        let can_run = agent.available && definition.enabled;
+        for job in &definition.jobs {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&job.recipe_id).monospace());
+                ui.weak(format_interval(job.interval_seconds));
+                if !job.enabled {
+                    ui.weak("schedule off");
+                }
+                if ui
+                    .add_enabled(can_run, egui::Button::new("Run now"))
+                    .clicked()
+                {
+                    self.run_agent_job(&definition.id, &job.id);
+                }
+            });
+            if let Some(runtime) = agent.runtime.get(&job.id) {
+                if let Some(last) = runtime.last_run_at {
+                    ui.weak(format!("Last run {}", relative_age(last)));
+                }
+                if let Some(task_id) = &runtime.last_task_id {
+                    ui.weak(format!("Task {task_id}"));
+                }
+                if let Some(error) = &runtime.last_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            }
+        }
+
+        ui.add_space(4.0);
+        if let Some(grant) = &grant
+            && grant.grant_published
+            && !grant.grant_id.is_empty()
+        {
+            if ui.button("Revoke grant").clicked() {
+                if let Some(owner) = self.owner_identity() {
+                    match operations_client::revoke_grant(&owner.name, &grant.grant_id) {
+                        Ok(_) => {
+                            self.agent_status =
+                                Some("Grant revoked. The agent will stop at its next run.".into());
+                            self.agent_error = None;
+                            self.refresh_operations();
+                            self.refresh_agents();
+                        }
+                        Err(error) => self.agent_error = Some(error),
+                    }
+                } else {
+                    self.agent_error = Some("The configured owner identity is not loaded.".into());
+                }
+            }
+        }
+    }
+
+    fn agent_wizard_ui(&mut self, ctx: &egui::Context) {
+        if !self.agent_wizard_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("New agent")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if self.agent_wizard_step == 0 {
+                    self.agent_wizard_step_one(ui);
+                } else {
+                    self.agent_wizard_step_two(ui);
+                }
+            });
+        if !open {
+            self.agent_wizard_open = false;
+        }
+    }
+
+    fn agent_wizard_step_one(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("1. Choose the work and cadence").strong());
+        ui.add_space(6.0);
+        ui.label("Name");
+        let before = self.agent_title.clone();
+        ui.add(egui::TextEdit::singleline(&mut self.agent_title).hint_text("Morning digest"));
+        if self.agent_title != before && self.agent_slug.trim().is_empty() {
+            self.agent_slug = slugify(&self.agent_title);
+        }
+        ui.label("Agent id");
+        ui.add(egui::TextEdit::singleline(&mut self.agent_slug).hint_text("morning-digest"));
+        if !self.agent_slug.trim().is_empty()
+            && let Err(error) = evermore_common::agent::validate_agent_slug(self.agent_slug.trim())
+        {
+            ui.weak(error);
+        }
+        ui.weak(format!("Identity: agent-{}", self.agent_slug.trim()));
+
+        ui.add_space(6.0);
+        ui.label("Recipe");
+        let recipes = self.agent_recipes.clone();
+        egui::ComboBox::from_id_salt("agent-wizard-recipe")
+            .selected_text(if self.agent_recipe.is_empty() {
+                "Choose a recipe"
+            } else {
+                &self.agent_recipe
+            })
+            .show_ui(ui, |ui| {
+                for recipe in &recipes {
+                    ui.selectable_value(
+                        &mut self.agent_recipe,
+                        recipe.id.clone(),
+                        format!("{} · {}", recipe.id, recipe.source),
+                    );
+                }
+            });
+        if let Some(recipe) = recipes.iter().find(|recipe| recipe.id == self.agent_recipe) {
+            ui.weak(&recipe.description);
+            let reads = recipe
+                .operations
+                .iter()
+                .filter(|name| {
+                    evermore_common::operations::find(name)
+                        .is_some_and(|def| def.access == evermore_common::operations::Access::Read)
+                })
+                .count();
+            let writes = recipe.operations.len().saturating_sub(reads);
+            ui.weak(format!(
+                "{} read operation(s), {writes} write operation(s)",
+                reads
+            ));
+        } else if recipes.is_empty() {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                "No recipes available — is the agent runner running?",
+            );
+        }
+
+        ui.add_space(6.0);
+        ui.label("Cadence");
+        egui::ComboBox::from_id_salt("agent-wizard-cadence")
+            .selected_text(format_interval(self.agent_interval_seconds))
+            .show_ui(ui, |ui| {
+                for (seconds, label) in [
+                    (3_600, "Every hour"),
+                    (86_400, "Every day"),
+                    (604_800, "Every week"),
+                ] {
+                    ui.selectable_value(&mut self.agent_interval_seconds, seconds, label);
+                }
+            });
+        ui.label("Grant expires after");
+        egui::ComboBox::from_id_salt("agent-wizard-expiry")
+            .selected_text(format!("{} days", self.agent_expiry_days))
+            .show_ui(ui, |ui| {
+                for days in [30, 90, 365] {
+                    ui.selectable_value(&mut self.agent_expiry_days, days, format!("{days} days"));
+                }
+            });
+
+        ui.add_space(8.0);
+        if let Some(error) = &self.agent_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if ui.button("Review").clicked() {
+            self.agent_error = None;
+            if self.agent_title.trim().is_empty() {
+                self.agent_error = Some("Give the agent a name.".into());
+            } else if let Err(error) =
+                evermore_common::agent::validate_agent_slug(self.agent_slug.trim())
+            {
+                self.agent_error = Some(error);
+            } else if self.agent_recipe.is_empty() {
+                self.agent_error = Some("Choose a recipe.".into());
+            } else {
+                self.agent_wizard_step = 1;
+            }
+        }
+    }
+
+    fn agent_wizard_step_two(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("2. Review the authority").strong());
+        ui.add_space(6.0);
+        ui.strong(format!(
+            "{} (agent-{})",
+            self.agent_title.trim(),
+            self.agent_slug.trim()
+        ));
+        ui.weak(format!(
+            "{} · {}",
+            self.agent_recipe,
+            format_interval(self.agent_interval_seconds)
+        ));
+        ui.weak(format!(
+            "Grant expires after {} days.",
+            self.agent_expiry_days
+        ));
+        ui.add_space(6.0);
+        ui.label("It may request:");
+        if let Some(recipe) = self
+            .agent_recipes
+            .iter()
+            .find(|recipe| recipe.id == self.agent_recipe)
+        {
+            for name in &recipe.operations {
+                let access = evermore_common::operations::find(name)
+                    .map(|definition| match definition.access {
+                        evermore_common::operations::Access::Read => "read",
+                        evermore_common::operations::Access::Write => "write · approval",
+                    })
+                    .unwrap_or("unknown");
+                ui.horizontal(|ui| {
+                    ui.monospace(name);
+                    ui.weak(access);
+                });
+            }
+        }
+        ui.add_space(6.0);
+        ui.weak(
+            "Writes still need your exact approval in the approval window. \
+             The agent cannot approve its own request.",
+        );
+        if let Some(error) = &self.agent_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if let Some(status) = &self.agent_status {
+            ui.weak(status);
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Back").clicked() {
+                self.agent_wizard_step = 0;
+            }
+            if ui.button("Create agent").clicked() {
+                self.create_agent();
+            }
+        });
+    }
+
     fn run_agent_recipe(&mut self) {
         self.agent_status = None;
         self.agent_error = None;
@@ -1274,6 +1913,12 @@ impl PanelApp {
                     if let Some(routine_id) = &task.routine_id {
                         ui.weak(format!(
                             "Standing routine {routine_id} · dedicated agent identity"
+                        ));
+                    }
+                    if let Some(agent_id) = &task.agent_id {
+                        ui.weak(format!(
+                            "Agent {agent_id} · job {} · dedicated agent identity",
+                            task.job_id.as_deref().unwrap_or("?")
                         ));
                     }
                     for step in &task.steps {
@@ -1914,6 +2559,7 @@ impl eframe::App for PanelApp {
                         (Tab::Settings, "settings", ICON_SETTINGS, "Settings"),
                         (Tab::Notifications, "bell", ICON_BELL, "Notifications"),
                         (Tab::Ai, "sparkles", ICON_SPARKLES, "AI"),
+                        (Tab::Agents, "agents", ICON_AGENTS, "Agents"),
                     ] {
                         if nav_item(ui, self.tab == tab, icon_id, icon, label, labelled) {
                             self.tab = tab;
@@ -1945,6 +2591,16 @@ impl eframe::App for PanelApp {
                 ui.weak("Who you are on this device, and the key everything else trusts.");
                 ui.add_space(12.0);
 
+                // The signer also holds the built-in service/assistant keys
+                // and any agent keys. Those belong to the Agents screen (or
+                // are internal plumbing), not to the owner's identity card.
+                let visible: Vec<_> = self
+                    .identities
+                    .iter()
+                    .filter(|identity| !is_system_identity(&identity.name))
+                    .cloned()
+                    .collect();
+
                 if let Some(err) = self.identity_error.clone() {
                     let mut retry = false;
                     open_section(ui, |ui| {
@@ -1958,7 +2614,7 @@ impl eframe::App for PanelApp {
                     if retry {
                         self.refresh_identities();
                     }
-                } else if self.identities.is_empty() {
+                } else if visible.is_empty() {
                     open_section(ui, |ui| {
                         ui.label(egui::RichText::new("No identity on this device yet").strong());
                         ui.weak("Add one from the command line to get started, then refresh.");
@@ -1970,7 +2626,7 @@ impl eframe::App for PanelApp {
                         }
                     });
                 } else {
-                    for identity in &self.identities {
+                    for identity in &visible {
                         open_section(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(&identity.name).strong().size(16.0));
@@ -2115,6 +2771,28 @@ impl eframe::App for PanelApp {
                          the inbox. Approval decisions still require an explicit owner action.",
                     );
                 });
+            }
+            Tab::Agents => {
+                if !self.operations_loaded {
+                    self.refresh_operations();
+                }
+                if !self.agent_recipes_loaded {
+                    self.refresh_agent();
+                }
+                if !self.identities_loaded {
+                    self.refresh_identities();
+                }
+                if !self.agents_loaded {
+                    self.refresh_agents();
+                }
+                if self
+                    .agents_next_poll
+                    .map_or(true, |deadline| std::time::Instant::now() >= deadline)
+                {
+                    self.refresh_agents();
+                }
+                self.agents_ui(ui);
+                self.agent_wizard_ui(ui.ctx());
             }
             Tab::Ai => {
                 if !self.operations_loaded {
@@ -2319,6 +2997,7 @@ impl eframe::App for PanelApp {
                             self.save_ai_session();
                         }
                     });
+                    ui.weak("Context is never silently truncated; over-budget requests are refused.");
                 }
                 if let Some(error) = &self.ai_chat_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -2333,24 +3012,7 @@ impl eframe::App for PanelApp {
 
                 open_section(ui, |ui| {
                 section_heading(ui, "Propose an operation");
-                ui.label("Choose the signing identity. The request is encrypted to the configured owner and must pass its grant and approval checks.");
-                egui::ComboBox::from_label("Request as")
-                    .selected_text(if self.proposal_identity.is_empty() {
-                        "Select an identity"
-                    } else {
-                        &self.proposal_identity
-                    })
-                    .show_ui(ui, |ui| {
-                        for identity in &self.identities {
-                            ui.selectable_value(
-                                &mut self.proposal_identity,
-                                identity.name.clone(),
-                                &identity.name,
-                            );
-                        }
-                    });
-                self.proposal_prompt_ui(ui);
-                ui.add_space(6.0);
+                ui.label("Choose a signing identity and a write operation. Submit the request for the identity owner's approval.");
                 let writable: Vec<_> = self
                     .operations
                     .iter()
@@ -2364,17 +3026,37 @@ impl eframe::App for PanelApp {
                 if !writable.is_empty() && !writable.contains(&self.proposal_operation) {
                     self.proposal_operation = writable[0].clone();
                 }
-                egui::ComboBox::from_label("Operation")
-                    .selected_text(if self.proposal_operation.is_empty() {
-                        "No write operations available"
-                    } else {
-                        &self.proposal_operation
-                    })
-                    .show_ui(ui, |ui| {
-                        for name in &writable {
-                            ui.selectable_value(&mut self.proposal_operation, name.clone(), name);
-                        }
-                    });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label("Request as")
+                        .selected_text(if self.proposal_identity.is_empty() {
+                            "Select an identity"
+                        } else {
+                            &self.proposal_identity
+                        })
+                        .show_ui(ui, |ui| {
+                            for identity in &self.identities {
+                                ui.selectable_value(
+                                    &mut self.proposal_identity,
+                                    identity.name.clone(),
+                                    &identity.name,
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_label("Operation")
+                        .selected_text(if self.proposal_operation.is_empty() {
+                            "No write operations available"
+                        } else {
+                            &self.proposal_operation
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in &writable {
+                                ui.selectable_value(&mut self.proposal_operation, name.clone(), name);
+                            }
+                        });
+                });
+                ui.add_space(6.0);
+                self.proposal_prompt_ui(ui);
+                ui.add_space(6.0);
                 ui.label("Arguments (JSON)");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.proposal_arguments)
@@ -2408,6 +3090,7 @@ impl eframe::App for PanelApp {
                 ui.add_space(12.0);
                 open_section(ui, |ui| {
                 section_heading(ui, "Pending operation requests");
+                ui.weak("Requests waiting for the identity owner's decision appear here.");
                 egui::ComboBox::from_label("Approve as")
                     .selected_text(if self.approval_identity.is_empty() {
                         "Select an identity"
@@ -2535,7 +3218,13 @@ impl eframe::App for PanelApp {
                         });
                     });
                 }
-                ui.collapsing("Recent activity", |ui| {
+                });
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                section_heading(ui, "Recent activity");
+                ui.weak("Tasks and operation history");
+                ui.collapsing("Show details", |ui| {
                     ui.strong("Tasks");
                     self.agent_tasks_ui(ui);
                     ui.add_space(8.0);
@@ -2621,6 +3310,8 @@ impl eframe::App for PanelApp {
                 ui.add_space(12.0);
                 open_section(ui, |ui| {
                 section_heading(ui, "Local file search");
+                ui.weak("Markdown, text, reStructuredText, and Org files up to 2 MiB");
+                ui.collapsing("Show details", |ui| {
                 ui.label("Selected files stay on this device. Supported: .md, .txt, .rst, .org (up to 2 MiB). DMs are not indexed.");
                 if ui.button("Find text files in ~/Nostr").clicked() {
                     match ai_index_client::discover_nostr_files() {
@@ -2718,10 +3409,13 @@ impl eframe::App for PanelApp {
                     });
                 }
                 });
+                });
 
                 ui.add_space(12.0);
                 open_section(ui, |ui| {
                 section_heading(ui, "Context sources");
+                ui.weak("Allowed sources can be used for one turn or pinned, with snapshot or per-turn refresh");
+                ui.collapsing("Show details", |ui| {
                 ui.label("The Allow checkbox changes ai-contextd's local source allowlist. Use adds an allowed source to this session only.");
                 if ui.button("Refresh context sources").clicked() {
                     self.refresh_ai_context();
@@ -2868,6 +3562,7 @@ impl eframe::App for PanelApp {
                         ui.monospace(serde_json::to_string_pretty(data).unwrap_or_default());
                     });
                 }
+                });
 
                 if let Some(error) = &self.operations_error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -2927,9 +3622,15 @@ fn open_section(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     // note's ~720px content measure) instead of shrinking to fit its own
     // content, so sibling cards line up rather than varying narrow-to-wide.
     let width = ui.available_width().min(640.0);
+    // Per the "Evermore Desktop — UI improvements" Figma file: section
+    // boxes sit flush on the page background with a hairline border
+    // (bg == `panel_fill`, 1px `#303743`), not raised a tone lighter --
+    // that raised/`faint_bg_color` treatment is reserved for inner
+    // surfaces like selectors and inputs.
     egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .corner_radius(10)
+        .fill(ui.visuals().panel_fill)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 55, 67)))
+        .corner_radius(12)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(width - 28.0);
@@ -3288,6 +3989,75 @@ fn resolve_context_grant(
     } else {
         Ok(grant.snapshot.clone().unwrap_or(serde_json::Value::Null))
     }
+}
+
+fn is_system_identity(name: &str) -> bool {
+    name.starts_with("agent-") || name.ends_with("-operations") || name.ends_with("-assistant")
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn slugify(text: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = true;
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn format_interval(seconds: u64) -> String {
+    match seconds {
+        3_600 => "Every hour".to_string(),
+        86_400 => "Every day".to_string(),
+        604_800 => "Every week".to_string(),
+        _ if seconds % 86_400 == 0 => format!("Every {} days", seconds / 86_400),
+        _ if seconds % 3_600 == 0 => format!("Every {} hours", seconds / 3_600),
+        _ => format!("Every {seconds} s"),
+    }
+}
+
+fn relative_age(timestamp: u64) -> String {
+    let delta = now_unix().saturating_sub(timestamp);
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3_600 {
+        format!("{} min ago", delta / 60)
+    } else if delta < 86_400 {
+        format!("{} h ago", delta / 3_600)
+    } else {
+        format!("{} d ago", delta / 86_400)
+    }
+}
+
+fn relative_future(timestamp: u64) -> String {
+    let now = now_unix();
+    if timestamp <= now {
+        return "already expired".to_string();
+    }
+    let delta = timestamp - now;
+    if delta < 3_600 {
+        format!("in {} min", delta / 60)
+    } else if delta < 86_400 {
+        format!("in {} h", delta / 3_600)
+    } else {
+        format!("in {} d", delta / 86_400)
+    }
+}
+
+fn short_pubkey(pubkey: &str) -> String {
+    pubkey.chars().take(12).collect()
 }
 
 fn task_status_name(status: evermore_common::agent::TaskStatus) -> &'static str {

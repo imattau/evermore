@@ -33,6 +33,7 @@ build if the one on `PATH` predates it.
 | `indexd` | — | `evermore-indexd.service` |
 | `inferd` | — | `evermore-inferd.service` |
 | `operationsd` | `settingsd` | `evermore-operationsd@.service` (per-identity) |
+| `agentd` | `operationsd` | `evermore-agentd@.service` (per-identity) |
 | `sway-ai-bridge` | `contextd` | `evermore-sway-ai-bridge.service` |
 | `mcp` | `operationsd` | *(none -- spawned per-session over stdio by an MCP client, not run as a daemon)* |
 | `panel` | — | *(none -- a GUI app, launched manually/via a `.desktop` entry)* |

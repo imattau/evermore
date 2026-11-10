@@ -215,6 +215,8 @@ mod tests {
         Task {
             task_id: task_id.into(),
             routine_id: None,
+            agent_id: None,
+            job_id: None,
             recipe_id: "test.demo".into(),
             recipe_version: 1,
             recipe_source: "builtin".into(),

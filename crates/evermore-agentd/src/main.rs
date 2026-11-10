@@ -4,11 +4,17 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
 use evermore_agentd::{
-    clients, mcp_agent, propose, recipe, render, routine::RoutineStore, runner::Runner,
-    store::TaskStore,
+    agent_runtime::AgentRuntimeStore, agents::AgentStore, clients, mcp_agent, propose, recipe,
+    relay_client, render, routine::RoutineStore, runner::Runner, scheduler, store::TaskStore,
 };
 use evermore_common::agent::{self, AgentHealth, Request, Response, Routine, Task};
 use serde_json::{Value, json};
+
+#[derive(Clone)]
+struct AgentReloadConfig {
+    owner_identity: Option<String>,
+    relay_url: String,
+}
 
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
@@ -25,11 +31,15 @@ fn main() {
         Some("routine-enable") => routine_toggle_cli(true),
         Some("routine-disable") => routine_toggle_cli(false),
         Some("routine-remove") => routine_remove_cli(),
+        Some("agents") => agents_cli(),
+        Some("agents-reload") => agents_reload_cli(),
         _ => {
             eprintln!(
-                "usage: evermore-agentd <serve|recipes|run|propose|ask|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove>"
+                "usage: evermore-agentd <serve|recipes|run|propose|ask|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove|agents|agents-reload>"
             );
-            eprintln!("  serve --agent-identity NAME [--owner-pubkey HEX]");
+            eprintln!(
+                "  serve --agent-identity NAME [--owner-identity NAME] [--owner-pubkey HEX] [--relay-url URL]"
+            );
             eprintln!("  serve    run the deterministic recipe task runner");
             eprintln!("  recipes  list built-in and local recipes");
             eprintln!("  run      run a recipe: run RECIPE [JSON_INPUTS]");
@@ -43,6 +53,8 @@ fn main() {
                 "  routine-add ID RECIPE --interval SECONDS --agent-identity NAME [--inputs JSON] [--disabled]"
             );
             eprintln!("  routine-enable ID | routine-disable ID | routine-remove ID");
+            eprintln!("  agents   list cached relay-backed agent definitions");
+            eprintln!("  agents-reload  re-read agent definitions from the relay");
             std::process::exit(2);
         }
     };
@@ -66,6 +78,15 @@ fn serve() -> std::io::Result<()> {
         Some(pubkey) => pubkey,
         None => clients::configured_owner().map_err(std::io::Error::other)?,
     };
+    let owner_identity = arg_value("--owner-identity")
+        .or_else(|| std::env::var("EVERMORE_OWNER_IDENTITY").ok())
+        .filter(|value| !value.is_empty());
+    let relay_url = arg_value("--relay-url")
+        .or_else(|| std::env::var("EVERMORE_RELAY_URL").ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| relay_client::DEFAULT_RELAY_URL.to_string());
+    let agents = Arc::new(AgentStore::open().map_err(std::io::Error::other)?);
+    let runtime = Arc::new(AgentRuntimeStore::open().map_err(std::io::Error::other)?);
     let store = Arc::new(TaskStore::open().map_err(std::io::Error::other)?);
     let routines = Arc::new(RoutineStore::open().map_err(std::io::Error::other)?);
     let runner = Arc::new(Runner {
@@ -74,6 +95,40 @@ fn serve() -> std::io::Result<()> {
         agent_pubkey: agent_pubkey.clone(),
         owner_pubkey: owner_pubkey.clone(),
     });
+    if let Some(owner_identity) = owner_identity.clone() {
+        let agents = Arc::clone(&agents);
+        let runtime = Arc::clone(&runtime);
+        let owner_pubkey = owner_pubkey.clone();
+        let assistant_pubkey = agent_pubkey.clone();
+        let relay_url = relay_url.clone();
+        std::thread::spawn(move || {
+            match agents.reload(
+                &relay_url,
+                &owner_pubkey,
+                &owner_identity,
+                &assistant_pubkey,
+                &runtime,
+            ) {
+                Ok(reload) => {
+                    for warning in reload.warnings {
+                        eprintln!("evermore-agentd: agent reload: {warning}");
+                    }
+                    eprintln!(
+                        "evermore-agentd: projected {} agent definition(s)",
+                        reload.agents.len()
+                    );
+                }
+                Err(error) => eprintln!(
+                    "evermore-agentd: couldn't reload agent definitions (using the local cache): {error}"
+                ),
+            }
+        });
+    } else {
+        eprintln!(
+            "evermore-agentd: no --owner-identity given; agent definitions load from the local cache only"
+        );
+    }
+
     {
         let runner = Arc::clone(&runner);
         std::thread::spawn(move || {
@@ -86,6 +141,16 @@ fn serve() -> std::io::Result<()> {
         });
     }
     spawn_routine_scheduler(Arc::clone(&runner), Arc::clone(&routines));
+    scheduler::spawn(
+        Arc::clone(&agents),
+        Arc::clone(&runtime),
+        Arc::clone(&runner),
+    );
+
+    let reload_config = AgentReloadConfig {
+        owner_identity,
+        relay_url,
+    };
 
     let socket_path = agent::runtime_socket_path();
     if let Some(parent) = socket_path.parent() {
@@ -99,7 +164,14 @@ fn serve() -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &runner, &routines) {
+                if let Err(error) = handle_connection(
+                    stream,
+                    &runner,
+                    &routines,
+                    &agents,
+                    &runtime,
+                    &reload_config,
+                ) {
                     eprintln!("evermore-agentd: request failed: {error}");
                 }
             }
@@ -113,6 +185,9 @@ fn handle_connection(
     mut stream: UnixStream,
     runner: &Arc<Runner>,
     routines: &Arc<RoutineStore>,
+    agents: &Arc<AgentStore>,
+    runtime: &Arc<AgentRuntimeStore>,
+    reload_config: &AgentReloadConfig,
 ) -> std::io::Result<()> {
     let mut line = String::new();
     BufReader::new(stream.try_clone()?).read_line(&mut line)?;
@@ -120,7 +195,7 @@ fn handle_connection(
         return Ok(());
     }
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => handle_request(request, runner, routines),
+        Ok(request) => handle_request(request, runner, routines, agents, runtime, reload_config),
         Err(error) => Response::err(format!("invalid request: {error}")),
     };
     let mut output = serde_json::to_string(&response)
@@ -134,6 +209,9 @@ fn handle_request(
     request: Request,
     runner: &Arc<Runner>,
     routines: &Arc<RoutineStore>,
+    agents: &Arc<AgentStore>,
+    runtime: &Arc<AgentRuntimeStore>,
+    reload_config: &AgentReloadConfig,
 ) -> Response {
     match request {
         Request::Health => Response::ok(AgentHealth {
@@ -145,6 +223,50 @@ fn handle_request(
             "agent_pubkey": runner.agent_pubkey,
             "owner_pubkey": runner.owner_pubkey,
         })),
+        Request::ListAgents => {
+            Response::ok(agents.views(&runner.owner_pubkey, &runner.agent_pubkey, runtime))
+        }
+        Request::ReloadAgents => match reload_config.owner_identity.as_deref() {
+            Some(owner_identity) => match agents.reload(
+                &reload_config.relay_url,
+                &runner.owner_pubkey,
+                owner_identity,
+                &runner.agent_pubkey,
+                runtime,
+            ) {
+                Ok(reload) => Response::ok(reload),
+                Err(error) => Response::err(error),
+            },
+            None => {
+                Response::err("agent reload requires --owner-identity NAME on the running daemon")
+            }
+        },
+        Request::RunAgentJob { agent_id, job_id } => match agents.get(&agent_id) {
+            None => Response::err(format!("unknown agent '{agent_id}'")),
+            Some(agent) => match agent.jobs.iter().find(|job| job.id == job_id).cloned() {
+                None => Response::err(format!("agent '{}' has no job '{job_id}'", agent.id)),
+                Some(job) => match scheduler::run_job(&agent, &job, runner) {
+                    Ok(task) => {
+                        if let Err(error) =
+                            runtime.mark_run(&agent.id, &job.id, Some(&task.task_id), None)
+                        {
+                            eprintln!("evermore-agentd: could not record agent run: {error}");
+                        }
+                        Response::ok(task)
+                    }
+                    Err(error) => {
+                        if let Err(record_error) =
+                            runtime.mark_run(&agent.id, &job.id, None, Some(error.clone()))
+                        {
+                            eprintln!(
+                                "evermore-agentd: could not record agent error: {record_error}"
+                            );
+                        }
+                        Response::err(error)
+                    }
+                },
+            },
+        },
         Request::ListRecipes => {
             let summaries: Vec<_> = recipe::load_all()
                 .into_iter()
@@ -441,6 +563,24 @@ fn cancel_cli() -> Result<(), String> {
 
 fn routines_cli() -> Result<(), String> {
     let value = request(&Request::ListRoutines)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn agents_cli() -> Result<(), String> {
+    let store = AgentStore::open()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&store.list()).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn agents_reload_cli() -> Result<(), String> {
+    let value = request(&Request::ReloadAgents)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?

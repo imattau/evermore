@@ -53,12 +53,61 @@ pub struct OperationHistoryEntry {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentGrant {
+    #[serde(default)]
+    pub grant_id: String,
     pub agent_pubkey: String,
     pub allowed_operations: Vec<String>,
     pub expires_at: u64,
     #[serde(default)]
     pub grant_published: bool,
     pub revoked: bool,
+}
+
+pub fn submit_grant(
+    owner_identity: &str,
+    agent_pubkey: &str,
+    allowed_operations: &[String],
+    expires_in_secs: u64,
+) -> Result<AgentGrant, String> {
+    if allowed_operations.is_empty() {
+        return Err("an agent grant must allow at least one operation".into());
+    }
+    if expires_in_secs == 0 || expires_in_secs > 365 * 24 * 60 * 60 {
+        return Err("grant expiry must be between 1 second and 365 days".into());
+    }
+    let expires_at = unix_time().saturating_add(expires_in_secs);
+    let content = json!({
+        "agent_pubkey": agent_pubkey,
+        "allowed_operations": allowed_operations,
+        "expires_at": expires_at,
+    })
+    .to_string();
+    let event = crate::signer_client::sign_event(
+        owner_identity,
+        1,
+        content,
+        vec![
+            vec!["t".into(), "evermore-agent-grant".into()],
+            vec!["p".into(), agent_pubkey.into()],
+        ],
+    )?;
+    let value = request(&Request::SubmitGrant { event })?;
+    serde_json::from_value(value).map_err(|error| format!("invalid grant response: {error}"))
+}
+
+pub fn revoke_grant(owner_identity: &str, grant_id: &str) -> Result<AgentGrant, String> {
+    let content = json!({ "grant_id": grant_id }).to_string();
+    let event = crate::signer_client::sign_event(
+        owner_identity,
+        1,
+        content,
+        vec![
+            vec!["t".into(), "evermore-agent-grant-revoke".into()],
+            vec!["e".into(), grant_id.into()],
+        ],
+    )?;
+    let value = request(&Request::RevokeGrant { event })?;
+    serde_json::from_value(value).map_err(|error| format!("invalid grant response: {error}"))
 }
 
 pub fn configured_owner_pubkey() -> Result<String, String> {
@@ -203,4 +252,11 @@ fn request(request: &Request) -> Result<Value, String> {
         Response::Ok { data } => Ok(data),
         Response::Err { message } => Err(message),
     }
+}
+
+fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

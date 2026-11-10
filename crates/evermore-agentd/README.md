@@ -72,6 +72,7 @@ Step kinds in v1:
 evermore-agentd recipes
 evermore-agentd run audit.digest
 evermore-agentd propose "switch the theme to dark"
+evermore-agentd ask "what is my current workspace?"
 evermore-agentd tasks
 evermore-agentd status TASK_ID
 evermore-agentd cancel TASK_ID
@@ -107,6 +108,18 @@ canonical arguments without submitting anything. The panel's "Describe the
 change" field uses the same request and fills the existing owner-approval form.
 The proposal path enforces a 4096-token context budget; task recipes carry the
 same field as `budget.context_tokens` for future model steps.
+
+`ask` runs a local MCP tool conversation as the identity configured for
+the running `evermore-agentd serve` process. The service must be running for
+the CLI request to reach it. It starts `evermore-mcp` over stdio, gets the live
+catalogue, selects the installed MCP adapter, and rejects unlisted tool names
+before dispatch. MCP still enforces the exact operation grant and validates
+arguments. Read results can guide up to two further calls; after a write is
+submitted, the conversation stops and reports the owner-approval-pending
+result. Set `EVERMORE_MCP_COMMAND` in the daemon's service environment only
+when the MCP executable is installed outside the standard PATH, and
+`EVERMORE_MCP_MODEL` there to override the installed MCP model name. Panel
+proposal routing can be overridden with `EVERMORE_PANEL_MODEL`.
 
 Built-in recipes include `audit.digest`, `packages.doctor`,
 `packages.updates`, `settings.concierge`, `workspace.compose`, and

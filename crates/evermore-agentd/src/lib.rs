@@ -4,6 +4,7 @@
 
 pub mod clients;
 pub mod infer;
+pub mod mcp_agent;
 pub mod nscript_recipe;
 pub mod propose;
 pub mod recipe;

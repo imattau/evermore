@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 const SYSTEM_PROMPT: &str = "You are Evermore's local operation planner. When a listed operation clearly applies, finish with exactly one line in this format: EVERMORE_PROPOSAL: {\"operation\":\"<catalogue name>\",\"arguments\":{...}}. Use only schema-defined argument keys, include all required fields, and never guess extra properties. If no listed operation applies, do not invent a name; reply with a short refusal and do not emit a proposal marker. Write operations still require owner approval; propose their exact arguments without claiming the change is done. Prefer the narrowest operation that satisfies the request.";
 const MCP_SYSTEM_PROMPT: &str = "You are choosing an Evermore MCP tool call. Reply with exactly one JSON object and no prose: {\"name\":\"exact_tool_name\",\"arguments\":{...}}. Use only a listed tool. Include every required argument and only keys allowed by that tool's input schema; never add guessed properties. If no listed tool applies, return {\"refusal\":\"short reason\"}. A write tool only submits an owner-approval-gated request; never claim the change was executed.";
 
-const DATASET_VERSION: u32 = 4;
+const DATASET_VERSION: u32 = 10;
 
 const REFUSALS: &[(&str, &str)] = &[
     (
@@ -207,7 +207,14 @@ fn generate(config: &Config) -> Result<Summary, String> {
                 let request = request_with_arguments(phrase, &arguments)?;
                 records.push(Record {
                     id: format!("positive.{}.{}", definition.name, index),
-                    split: prompt_split(index).into(),
+                    // Supplemental update-event wording only augments train;
+                    // dev and locked-test prompt families remain held out.
+                    split: if index >= 30 {
+                        "train"
+                    } else {
+                        prompt_split(index)
+                    }
+                    .into(),
                     source: "catalogue".into(),
                     expected_kind: "proposal".into(),
                     expected_operation: Some(definition.name.clone()),
@@ -229,7 +236,12 @@ fn generate(config: &Config) -> Result<Summary, String> {
                     request_with_arguments(&phrasings[index % phrasings.len()], &canonical)?;
                 records.push(Record {
                 id: format!("repair.{}.{}", definition.name, index),
-                split: repair_split(index).into(),
+                split: if definition.name == "calendar.update_event" && index >= 3 {
+                    "train"
+                } else {
+                    repair_split(index)
+                }
+                .into(),
                 source: "catalogue".into(),
                 expected_kind: "proposal".into(),
                 expected_operation: Some(definition.name.clone()),
@@ -259,7 +271,14 @@ fn generate(config: &Config) -> Result<Summary, String> {
                 let candidates = mcp_candidates(&request, &definition.name, &tools);
                 records.push(Record {
                     id: format!("mcp.{}.{}", definition.name, index),
-                    split: prompt_split(index).into(),
+                    // Supplemental capability phrasings are training-only.
+                    // Keep the existing dev/test prompt families held out.
+                    split: if index >= 30 {
+                        "train"
+                    } else {
+                        prompt_split(index)
+                    }
+                    .into(),
                     source: "mcp-tools".into(),
                     expected_kind: "mcp_tool".into(),
                     expected_operation: Some(definition.name.clone()),
@@ -305,6 +324,47 @@ fn generate(config: &Config) -> Result<Summary, String> {
                 catalogue_examples += 1;
             }
         }
+
+        for (index, phrase, arguments) in supplemental_schema_scenarios(definition)? {
+            let request = request_with_arguments(&phrase, &arguments)?;
+            if definition.access == operations::Access::Write
+                && definition.approval == operations::Approval::Required
+            {
+                records.push(Record {
+                    id: format!("panel-schema.{}.{}", definition.name, index),
+                    split: "train".into(),
+                    source: "catalogue".into(),
+                    expected_kind: "proposal".into(),
+                    expected_operation: Some(definition.name.clone()),
+                    input_schema: definition.input_schema.clone(),
+                    messages: panel_conversation(
+                        &request,
+                        &proposal(&definition.name, &arguments)?,
+                        &catalogue,
+                    )?,
+                });
+                catalogue_examples += 1;
+            }
+            if operations::is_mcp_exposed(definition) {
+                let tools = training_mcp_tools(&catalogue);
+                let candidates = mcp_candidates(&request, &definition.name, &tools);
+                records.push(Record {
+                    id: format!("mcp-schema.{}.{}", definition.name, index),
+                    split: "train".into(),
+                    source: "mcp-tools".into(),
+                    expected_kind: "mcp_tool".into(),
+                    expected_operation: Some(definition.name.clone()),
+                    input_schema: definition.input_schema.clone(),
+                    messages: mcp_conversation(
+                        &request,
+                        &definition.name,
+                        &arguments,
+                        &candidates,
+                    )?,
+                });
+                catalogue_examples += 1;
+            }
+        }
     }
 
     let mcp_tools = training_mcp_tools(&catalogue);
@@ -331,7 +391,12 @@ fn generate(config: &Config) -> Result<Summary, String> {
             )?;
             records.push(Record {
                 id: format!("mcp-special.{tool_name}.{index}"),
-                split: prompt_split(index).into(),
+                split: match index {
+                    0..=4 => "train",
+                    5..=9 => "dev",
+                    _ => "test",
+                }
+                .into(),
                 source: "mcp-tools".into(),
                 expected_kind: "mcp_tool".into(),
                 expected_operation: Some(tool_name.into()),
@@ -547,7 +612,7 @@ fn generate(config: &Config) -> Result<Summary, String> {
 fn phrasings(definition: &operations::Definition) -> Vec<String> {
     let description = trim_period(&definition.description);
     let lower = lower_first(&description);
-    vec![
+    let mut phrases = vec![
         description.clone(),
         format!("Can you {lower}?"),
         format!("Please {lower}."),
@@ -563,13 +628,157 @@ fn phrasings(definition: &operations::Definition) -> Vec<String> {
         format!("When you can, {lower}."),
         format!("Make this change for me: {lower}."),
         format!("Use {} for this request: {lower}.", definition.name),
-    ]
+        format!("I need help with this: {lower}."),
+        format!("Please take care of this when you can: {lower}."),
+        format!("Would you please {lower}?"),
+        format!("Could you do this for me: {lower}?"),
+        format!("I'd appreciate it if you could {lower}."),
+        format!("Can you take care of the following? {lower}."),
+        format!("Please help me to {lower}."),
+        format!("I would like you to {lower}, please."),
+        format!("Handle this for me: {lower}."),
+        format!("Could you assist me with this? {lower}."),
+        format!("Please go ahead and {lower}."),
+        format!("Here's the action I need: {lower}."),
+        format!("When you have a moment, please {lower}."),
+        format!("If possible, please {lower}."),
+        format!("Would you be able to {lower}?"),
+    ];
+    if definition.name == "calendar.update_event" {
+        phrases.extend([
+            "Revise this event while preserving its existing audience and privacy settings".into(),
+            "Update this event without changing its current visibility or recipient rules".into(),
+            "Edit the existing event in place and keep its current privacy unchanged".into(),
+            "Change the event details but leave its visibility and recipients as they are".into(),
+        ]);
+    }
+    phrases
+}
+
+/// Add independent train-only wording for failures seen on the complete dev
+/// split. Targets are generated from the current operation schema so these
+/// examples cannot silently invent or omit fields.
+fn supplemental_schema_scenarios(
+    definition: &operations::Definition,
+) -> Result<Vec<(usize, String, Value)>, String> {
+    let (count, phrases): (usize, Vec<&str>) = match definition.name.as_str() {
+        "ai.model.install_signed_npack" => (
+            16,
+            vec![
+                "Import the model from this already installed package identified by its publisher and package name",
+                "Add the declared model from this signed npack package to the local model store",
+                "Import the model artifact from this installed package using its package metadata",
+                "Use this installed package's publisher and name to import its model",
+            ],
+        ),
+        "packages.explain_dependencies" => (
+            12,
+            vec![
+                "Explain the dependencies for this installed package",
+                "Show the direct dependencies declared by this package",
+                "Check which dependencies are declared by this installed package",
+            ],
+        ),
+        "packages.remove" => (
+            16,
+            vec![
+                "Remove this installed package and its package-managed command",
+                "Uninstall the package identified by this publisher and package name",
+                "Propose removing this exact installed npack package",
+                "Remove only this package from the installed package list",
+            ],
+        ),
+        "notifications.set_dnd" => (
+            16,
+            vec![
+                "Turn Do Not Disturb off",
+                "Enable Do Not Disturb for desktop notifications",
+                "Disable SwayNotificationCenter Do Not Disturb",
+                "Switch Do Not Disturb on",
+            ],
+        ),
+        "notifications.clear_recent" => (
+            12,
+            vec![
+                "Clear the recent notifications from my local notification view",
+                "Remove the recent notifications from the desktop notification list",
+                "Clear recent notifications from the in-memory notification view",
+            ],
+        ),
+        "ai.context.list_sources" => (
+            12,
+            vec![
+                "Which AI context sources are enabled for this user session?",
+                "List the context sources I have enabled for AI",
+                "Show my currently enabled AI context sources",
+            ],
+        ),
+        "ai.index.status" => (
+            16,
+            vec![
+                "Tell me whether my local file index is ready",
+                "How many selected files are currently indexed?",
+                "Check the status of Evermore's local file index",
+                "Is the local file index available, and how many files are selected?",
+            ],
+        ),
+        "notifications.list_recent" => (
+            16,
+            vec![
+                "Show the recent desktop notification metadata",
+                "List my recent local and mention notifications",
+                "What recent notifications are in the local notification view?",
+                "Read the recent notification list",
+            ],
+        ),
+        "calendar.update_event" => (
+            48,
+            vec![
+                "Edit this existing event's title and description while keeping its current visibility and recipients unchanged",
+                "Change the details of this existing event without modifying its privacy or participant list",
+                "Update the event in place and preserve its current audience settings",
+                "Revise this event but leave the existing visibility and recipients as they are",
+                "Update this timed event using its Unix start and end values and preserve its existing privacy",
+                "Change the title and description of this all-day event using its exclusive end date",
+            ],
+        ),
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut scenarios = Vec::with_capacity(count);
+    for index in 0..count {
+        let arguments = if definition.name == "notifications.set_dnd" {
+            json!({"enabled": index % 2 == 1})
+        } else {
+            sample_arguments(definition, 300 + index)?
+        };
+        let phrase = if definition.name == "calendar.update_event" {
+            // sample_arguments alternates mutually exclusive Unix and
+            // YYYY-MM-DD field families; keep the wording aligned to them.
+            if (300 + index) % 2 == 0 {
+                phrases[4 + index % 2]
+            } else {
+                phrases[index % 4]
+            }
+        } else if definition.name == "notifications.set_dnd" {
+            phrases[if arguments["enabled"] == true {
+                [1, 3][(index / 2) % 2]
+            } else {
+                [0, 2][(index / 2) % 2]
+            }]
+        } else {
+            phrases[index % phrases.len()]
+        };
+        operations::canonicalize_input(&definition.name, &arguments)?;
+        scenarios.push((index, phrase.to_string(), arguments));
+    }
+    Ok(scenarios)
 }
 
 fn mcp_phrasings(definition: &operations::Definition) -> Vec<String> {
     let description = trim_period(&definition.description);
     let lower = lower_first(&description);
-    vec![
+    let mut phrases = vec![
         description.clone(),
         format!("Can you {lower}?"),
         format!("I want to {lower}."),
@@ -585,13 +794,41 @@ fn mcp_phrasings(definition: &operations::Definition) -> Vec<String> {
         format!("When you can, {lower}."),
         format!("Would you handle this? {lower}."),
         format!("Use {} for this request: {lower}.", definition.name),
-    ]
+        format!("I need help with this: {lower}."),
+        format!("Please take care of this when you can: {lower}."),
+        format!("Would you please {lower}?"),
+        format!("Could you do this for me: {lower}?"),
+        format!("I'd appreciate it if you could {lower}."),
+        format!("Can you take care of the following? {lower}."),
+        format!("Please help me to {lower}."),
+        format!("I would like you to {lower}, please."),
+        format!("Handle this for me: {lower}."),
+        format!("Could you assist me with this? {lower}."),
+        format!("Please go ahead and {lower}."),
+        format!("Here's what I'd like: {lower}."),
+        format!("When you have a moment, please {lower}."),
+        format!("Could you handle this for me? {lower}."),
+        format!("If possible, please {lower}."),
+    ];
+    let targeted = match definition.name.as_str() {
+        "ai.index.search" => Some("Search my locally indexed files for the requested text"),
+        "ai.index.status" => Some("Check the current status of my local file index"),
+        "settings.get" => Some("Read the current value of the requested setting"),
+        "settings.get_domain" => Some("Show all current settings in the requested domain"),
+        "calendar.list" => Some("List my calendar events for the requested time range"),
+        "notifications.clear_recent" => Some("Clear my recent notifications"),
+        _ => None,
+    };
+    if let Some(phrase) = targeted {
+        phrases.push(phrase.to_string());
+    }
+    phrases
 }
 
 fn prompt_split(index: usize) -> &'static str {
-    match index % 15 {
-        0..=4 => "train",
-        5..=9 => "dev",
+    match index % 30 {
+        0..=9 => "train",
+        10..=19 => "dev",
         _ => "test",
     }
 }
@@ -613,10 +850,64 @@ fn refusal_split(index: usize) -> &'static str {
 }
 
 fn request_with_arguments(prompt: &str, arguments: &Value) -> Result<String, String> {
-    let encoded = serde_json::to_string(arguments).map_err(|error| error.to_string())?;
-    Ok(format!(
-        "{prompt} Use exactly these requested argument values: {encoded}"
-    ))
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| "request arguments must be a JSON object".to_string())?;
+    if object.is_empty() {
+        return Ok(prompt.to_string());
+    }
+    let values = object
+        .iter()
+        .map(|(field, value)| format!("{} {}", humanize_field(field), humanize_value(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let style = arguments
+        .to_string()
+        .bytes()
+        .fold(0_usize, |sum, byte| sum.wrapping_add(byte as usize))
+        % 4;
+    let suffix = match style {
+        0 => format!("The requested values are {values}."),
+        1 => format!("Please use these values: {values}."),
+        2 => format!("For this request, use {values}."),
+        _ => format!("Here are the values I want: {values}."),
+    };
+    Ok(format!("{prompt} {suffix}"))
+}
+
+fn humanize_field(field: &str) -> String {
+    match field {
+        "sha256" => "SHA-256".into(),
+        "hex_pubkey" => "publisher public key".into(),
+        "operation_id" => "operation ID".into(),
+        "expected_title" => "current title".into(),
+        _ => field.replace('_', " "),
+    }
+}
+
+fn humanize_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("'{}'", text.replace('\'', "\\'")),
+        Value::Array(items) => {
+            let rendered = items.iter().map(humanize_value).collect::<Vec<_>>();
+            match rendered.as_slice() {
+                [] => "no items".into(),
+                [one] => one.clone(),
+                [one, two] => format!("{one} and {two}"),
+                _ => format!(
+                    "{} and {}",
+                    rendered[..rendered.len() - 1].join(", "),
+                    rendered.last().unwrap()
+                ),
+            }
+        }
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, nested)| format!("{} {}", humanize_field(key), humanize_value(nested)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
 }
 
 fn special_tool_request(tool_name: &str, base: &str, index: usize) -> String {
@@ -1238,6 +1529,17 @@ fn invalid_variants(definition: &operations::Definition, canonical: &Value) -> V
         variants.push(Value::Object(extra));
     }
 
+    // This realistic hallucinated field appeared in panel inference for event
+    // updates. Teach the repair path to drop it while keeping all valid values.
+    if definition.name == "calendar.update_event"
+        && schema.get("additionalProperties").and_then(Value::as_bool) == Some(false)
+        && let Some(object) = canonical.as_object()
+    {
+        let mut extra = object.clone();
+        extra.insert("visibility".into(), json!("public"));
+        variants.push(Value::Object(extra));
+    }
+
     variants
 }
 
@@ -1356,13 +1658,16 @@ mod tests {
             } else {
                 serde_json::from_str(assistant.trim_start_matches("EVERMORE_PROPOSAL: ")).unwrap()
             };
-            if target["arguments"] != json!({}) {
-                let encoded_arguments = serde_json::to_string(&target["arguments"]).unwrap();
-                assert!(
-                    user.contains(&encoded_arguments),
-                    "positive request {} does not state its target arguments",
-                    record["id"]
-                );
+            if let Some(arguments) = target["arguments"].as_object() {
+                for (field, value) in arguments {
+                    let requested_field = humanize_field(field);
+                    let requested_value = humanize_value(value);
+                    assert!(
+                        user.contains(&requested_field) && user.contains(&requested_value),
+                        "positive request {} does not state target argument {field}={value}",
+                        record["id"]
+                    );
+                }
             }
         }
         for operation in manifest["mcp_tools"].as_array().unwrap() {

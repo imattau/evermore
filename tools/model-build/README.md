@@ -95,3 +95,32 @@ python3 tools/model-build/assemble-default-store.py \
   --eval-report out/qwen-eval.json \
   --output-dir .image-build/model-store
 ```
+
+When MCP and panel quality requires separate adapters, make two development
+model-store entries instead of merging them into the default Qwen model. The
+caller selects `evermore/p8.model.qwen2.5-1.5b.mcp:1.0.0-dev.1` for MCP tool
+calls and `evermore/p8.model.qwen2.5-1.5b.panel:1.0.0-dev.1` for panel
+proposals. Both entries share the same base GGUF (hard-linked when possible)
+but carry independent adapter and training provenance:
+
+```sh
+python3 tools/model-build/assemble-task-adapters.py \
+  --base .image-build/model-store/p8.test.qwen2.5-1.5b-1.0.0/base.gguf \
+  --training-base-weights .image-build/hf-qwen2.5-1.5b/model.safetensors \
+  --mcp-adapter .image-build/qwen-v9-mcp-epoch208.gguf \
+  --mcp-dataset-manifest .image-build/qwen-v9-eval/mcp-manifest.json \
+  --mcp-config .image-build/qwen-v9-mcp-peft/training-config.json \
+  --mcp-eval-report .image-build/qwen-v9-eval/v9-mcp-eval-epoch208.json \
+  --panel-adapter .image-build/qwen-v10-panel-epoch41.gguf \
+  --panel-dataset-manifest .image-build/qwen-v10-eval/panel-manifest.json \
+  --panel-config .image-build/qwen-v10-panel-peft/training-config.json \
+  --panel-eval-report .image-build/qwen-v10-eval/v10-panel-eval-epoch41.json \
+  --output-dir .image-build/task-adapter-candidates
+```
+
+The assembler accepts only task-specific dev diagnostics that pass the
+selection, schema, refusal, and grammar checks. It labels both outputs as
+development candidates; it does not sign or install them, and they are not
+eligible for the default image until full production-path and locked-test
+evaluation passes. Runtime callers must select the model for their task; there
+is no learned router.

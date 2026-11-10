@@ -2420,6 +2420,10 @@ pub mod agent {
         ProposeOperation {
             prompt: String,
         },
+        /// Run one bounded local MCP tool conversation as the configured agent.
+        McpRequest {
+            prompt: String,
+        },
         TaskStatus {
             task_id: String,
         },

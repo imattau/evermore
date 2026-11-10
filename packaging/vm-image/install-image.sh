@@ -13,10 +13,14 @@ for bin in "${bins[@]}"; do
   [[ -x "$STAGE/bin/$bin" ]] || { echo "missing staged executable: $STAGE/bin/$bin" >&2; exit 1; }
 done
 [[ -s "$STAGE/lib/evermore-pkcs11.so" ]] || { echo 'missing staged PKCS#11 module' >&2; exit 1; }
-[[ -s "$MODEL_STORE/p8.model.qwen2.5-1.5b/base.gguf" ]] || { echo 'missing Qwen base model' >&2; exit 1; }
-[[ -s "$MODEL_STORE/p8.model.qwen2.5-1.5b/adapter.gguf" ]] || { echo 'missing Qwen Evermore adapter' >&2; exit 1; }
-[[ -s "$MODEL_STORE/p8.model.qwen2.5-1.5b/manifest.json" ]] || { echo 'missing Qwen manifest' >&2; exit 1; }
-[[ -s "$MODEL_STORE/p7.model.bge/manifest.json" ]] || { echo 'missing BGE manifest' >&2; exit 1; }
+for task in mcp panel; do
+  model="$MODEL_STORE/p8.model.qwen2.5-1.5b.$task-1.0.0-dev.1"
+  [[ -s "$model/base.gguf" && -s "$model/adapter.gguf" && -s "$model/manifest.json" ]] || {
+    echo "missing Qwen $task model package: $model" >&2
+    exit 1
+  }
+done
+[[ -s "$MODEL_STORE/p7.model.bge-1.0.0/manifest.json" ]] || { echo 'missing BGE manifest' >&2; exit 1; }
 
 install -d /usr/bin /usr/lib/pkcs11 /usr/share/p11-kit/modules /usr/lib/systemd/user \
   /etc/greetd /etc/sudoers.d /etc/skel/.config/sway /etc/skel/.config/waybar \
@@ -30,7 +34,7 @@ cp -a "$MODEL_STORE/." /var/lib/evermore/models/
 chown -R root:root /var/lib/evermore/models
 find /var/lib/evermore/models -type d -exec chmod 0755 {} +
 find /var/lib/evermore/models -type f -exec chmod 0644 {} +
-printf '{\n  "model": "evermore/p8.model.qwen2.5-1.5b:1.0.0"\n}\n' \
+printf '{\n  "model": "evermore/p8.model.qwen2.5-1.5b.panel:1.0.0-dev.1"\n}\n' \
   > /etc/skel/.config/evermore/panel-ai.json
 chmod 0644 /etc/skel/.config/evermore/panel-ai.json
 install -m 0644 "$ROOT/packaging/pkcs11/evermore-pkcs11.module" /usr/share/p11-kit/modules/

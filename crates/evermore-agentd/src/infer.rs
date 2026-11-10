@@ -10,38 +10,57 @@ pub struct ChatResult {
     pub completion_tokens: Option<u64>,
 }
 
-/// Pick a local chat model. Prefer an already-warm model with an adapter, then
-/// any warm chat model, then any installed chat model.
+/// Pick the panel proposal adapter.
 pub fn select_chat_model() -> Result<String, String> {
+    select_task_model("panel")
+}
+
+/// Select the adapter trained for a specific runtime task. Task-specific
+/// models are never silently substituted with another adapter: doing so can
+/// turn a valid MCP call into a panel proposal (or vice versa).
+pub fn select_task_model(task: &str) -> Result<String, String> {
+    let (env, package_hint) = match task {
+        "panel" => ("EVERMORE_PANEL_MODEL", ".panel"),
+        "mcp" => ("EVERMORE_MCP_MODEL", ".mcp"),
+        _ => return Err(format!("unknown model task '{task}'")),
+    };
     let models = list_models()?;
-    let mut candidates: Vec<&Model> = models
+    if let Ok(configured) = std::env::var(env) {
+        let configured = configured.trim();
+        if configured.is_empty() {
+            return Err(format!("{env} must name an installed model"));
+        }
+        return models
+            .iter()
+            .find(|model| model.name == configured && supports_chat(model))
+            .map(|model| model.name.clone())
+            .ok_or_else(|| {
+                format!("configured {task} model '{configured}' is not an installed chat model")
+            });
+    }
+    if let Some(model) = models
         .iter()
-        .filter(|model| {
-            model.capabilities.is_empty()
-                || model
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == "chat")
-        })
-        .collect();
-    candidates.sort_by_key(|model| {
-        let explicit_chat = model
+        .find(|model| model.name.contains(package_hint) && supports_chat(model))
+    {
+        return Ok(model.name.clone());
+    }
+    if task == "mcp" {
+        return Err(
+            "no MCP adapter is installed; set EVERMORE_MCP_MODEL to an installed MCP chat model"
+                .into(),
+        );
+    }
+    Err(format!(
+        "no {task} adapter is installed; install the Evermore {task} model or set {env} to its installed model name"
+    ))
+}
+
+fn supports_chat(model: &Model) -> bool {
+    model.capabilities.is_empty()
+        || model
             .capabilities
             .iter()
-            .any(|capability| capability == "chat");
-        (
-            !explicit_chat,
-            !model.loaded,
-            model.adapter.is_none(),
-            model.name.clone(),
-        )
-    });
-    candidates
-        .first()
-        .map(|model| model.name.clone())
-        .ok_or_else(|| {
-            "no local chat model is installed; install a signed model package first".to_string()
-        })
+            .any(|capability| capability == "chat")
 }
 
 fn list_models() -> Result<Vec<Model>, String> {

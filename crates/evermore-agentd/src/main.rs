@@ -4,7 +4,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
 use evermore_agentd::{
-    clients, propose, recipe, render, routine::RoutineStore, runner::Runner, store::TaskStore,
+    clients, mcp_agent, propose, recipe, render, routine::RoutineStore, runner::Runner,
+    store::TaskStore,
 };
 use evermore_common::agent::{self, AgentHealth, Request, Response, Routine, Task};
 use serde_json::{Value, json};
@@ -15,6 +16,7 @@ fn main() {
         Some("recipes") => recipes_cli(),
         Some("run") => run_cli(),
         Some("propose") => propose_cli(),
+        Some("ask") => ask_cli(),
         Some("tasks") => tasks_cli(),
         Some("status") => status_cli(),
         Some("cancel") => cancel_cli(),
@@ -25,13 +27,14 @@ fn main() {
         Some("routine-remove") => routine_remove_cli(),
         _ => {
             eprintln!(
-                "usage: evermore-agentd <serve|recipes|run|propose|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove>"
+                "usage: evermore-agentd <serve|recipes|run|propose|ask|tasks|status|cancel|routines|routine-add|routine-enable|routine-disable|routine-remove>"
             );
             eprintln!("  serve --agent-identity NAME [--owner-pubkey HEX]");
             eprintln!("  serve    run the deterministic recipe task runner");
             eprintln!("  recipes  list built-in and local recipes");
             eprintln!("  run      run a recipe: run RECIPE [JSON_INPUTS]");
             eprintln!("  propose  generate one validated write proposal: propose REQUEST");
+            eprintln!("  ask      use the configured MCP agent and local tools: ask REQUEST");
             eprintln!("  tasks    list recent tasks");
             eprintln!("  status   show a task: status TASK_ID");
             eprintln!("  cancel   request task cancellation: cancel TASK_ID");
@@ -176,6 +179,12 @@ fn handle_request(
             Ok(proposal) => Response::ok(proposal),
             Err(error) => Response::err(error),
         },
+        Request::McpRequest { prompt } => {
+            match mcp_agent::run(&prompt, &runner.agent_identity, &runner.owner_pubkey) {
+                Ok(result) => Response::ok(result),
+                Err(error) => Response::err(error),
+            }
+        }
         Request::CancelTask { task_id } => match runner.store.request_cancel(&task_id) {
             Ok(task) => Response::ok(task),
             Err(error) => Response::err(error),
@@ -361,6 +370,21 @@ fn propose_cli() -> Result<(), String> {
         return Err("propose requires a request, for example: propose darken the theme".into());
     }
     let value = request(&Request::ProposeOperation { prompt })?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn ask_cli() -> Result<(), String> {
+    let prompt = std::env::args().skip(2).collect::<Vec<_>>().join(" ");
+    if prompt.trim().is_empty() {
+        return Err(
+            "ask requires a request, for example: ask what is my current workspace?".into(),
+        );
+    }
+    let value = request(&Request::McpRequest { prompt })?;
     println!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?

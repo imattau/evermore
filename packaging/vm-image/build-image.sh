@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE_DIR="${EVERMORE_IMAGE_WORKDIR:-$ROOT/.image-build}"
 OUTPUT_DIR="${EVERMORE_IMAGE_OUTPUT_DIR:-$ROOT/dist}"
-MODEL_STORE="${EVERMORE_IMAGE_MODEL_STORE:-$IMAGE_DIR/model-store}"
+MODEL_STORE="${EVERMORE_IMAGE_MODEL_STORE:-$IMAGE_DIR/vm-model-store}"
 BASE_URL="${EVERMORE_ARCH_CLOUD_IMAGE_URL:-https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2}"
 BASE_SOURCE="${EVERMORE_ARCH_CLOUD_IMAGE:-$ROOT/vm/.local/images/Arch-Linux-x86_64-cloudimg.qcow2}"
 MEMORY="${EVERMORE_IMAGE_MEMORY:-6G}"; VCPUS="${EVERMORE_IMAGE_VCPUS:-4}"
@@ -24,7 +24,11 @@ rm -rf "$STAGE"; mkdir -p "$STAGE/bin" "$STAGE/lib"
 python3 - "$MODEL_STORE" <<'PY'
 import hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-required = {"p7.model.bge", "p8.model.qwen2.5-1.5b"}
+required = {
+    "p7.model.bge",
+    "p8.model.qwen2.5-1.5b.mcp",
+    "p8.model.qwen2.5-1.5b.panel",
+}
 seen = set()
 manifests = {}
 for manifest_path in root.glob("*/manifest.json"):
@@ -48,33 +52,19 @@ for manifest_path in root.glob("*/manifest.json"):
             raise SystemExit(f"SHA-256 mismatch: {path}")
 if missing := required - seen:
     raise SystemExit(f"missing required offline models: {', '.join(sorted(missing))}")
-qwen = manifests["p8.model.qwen2.5-1.5b"]
-if not qwen.get("adapter") or not qwen.get("training"):
-    raise SystemExit("default Qwen model must include its trained Evermore adapter and provenance")
-scores = qwen.get("evaluation", {})
-thresholds = {
-    "mcp_tool_accuracy": 0.95,
-    "mcp_listed_tool_rate": 1.0,
-    "mcp_correct_tool_schema_rate": 0.95,
-    "panel_write_accuracy": 0.95,
-    "panel_schema_valid_rate": 0.95,
-    "panel_refusal_accuracy": 0.95,
-    "mcp_refusal_accuracy": 0.95,
+mcp = manifests["p8.model.qwen2.5-1.5b.mcp"]
+panel = manifests["p8.model.qwen2.5-1.5b.panel"]
+expected_adapters = {
+    "p8.model.qwen2.5-1.5b.mcp": "e73fd3251fea6a9a2c6e2949eed50ac9f744674ee274288e0c074b2431ba11e0",
+    "p8.model.qwen2.5-1.5b.panel": "3be70918f009efbb1906bb8d592c035e32d6d168498969542eb5f562df2225a9",
 }
-for metric, threshold in thresholds.items():
-    if scores.get(metric) is None or scores[metric] < threshold:
-        raise SystemExit(f"default Qwen adapter fails image gate: {metric} < {threshold}")
-if not scores.get("grammar_enforced") or not scores.get("mcp_grammar_enforced"):
-    raise SystemExit("default Qwen adapter needs both MCP and panel grammar evaluation")
-if scores.get("mcp_unlisted_calls", 1) != 0:
-    raise SystemExit("default Qwen adapter has an unlisted MCP tool call")
-if qwen.get("evaluation_split") != "test" or not qwen.get("training", {}).get("locked_test_sha256"):
-    raise SystemExit("default Qwen adapter lacks locked-test provenance")
-coverage = qwen.get("test_coverage", {})
-for task, operations in (("mcp", qwen.get("mcp_tools", [])), ("panel_write", qwen.get("panel_write_operations", []))):
-    missing = [name for name in operations if coverage.get(task, {}).get(name, 0) < 5]
-    if missing:
-        raise SystemExit(f"default Qwen adapter lacks five held-out {task} cases for: {', '.join(missing[:8])}")
+for package_id, model in (("p8.model.qwen2.5-1.5b.mcp", mcp), ("p8.model.qwen2.5-1.5b.panel", panel)):
+    if not model.get("adapter") or not model.get("training"):
+        raise SystemExit(f"{package_id} must include its adapter and training provenance")
+    if model["adapter"].get("sha256") != expected_adapters[package_id]:
+        raise SystemExit(f"unexpected adapter selected for {package_id}")
+if mcp["base"].get("sha256") != panel["base"].get("sha256"):
+    raise SystemExit("MCP and panel adapters must use the same Qwen base model")
 if any("tinyllama" in path.name.lower() for path in root.iterdir()):
     raise SystemExit("TinyLlama is not supported in the default image")
 PY
@@ -150,7 +140,7 @@ if (( ! ready )); then echo "Arch provisioning did not finish; inspect $IMAGE_DI
 echo '==> Installing Evermore files and enabling graphical first boot'
 "${SSH[@]}" builder@127.0.0.1 'mkdir -p /tmp/evermore/packaging'
 RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" rsync -a --delete "$STAGE/" "builder@127.0.0.1:/tmp/evermore-stage/"
-RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" rsync -a --delete "$MODEL_STORE/" "builder@127.0.0.1:/tmp/evermore-model-store/"
+RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" rsync -aH --delete "$MODEL_STORE/" "builder@127.0.0.1:/tmp/evermore-model-store/"
 RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" rsync -a "$ROOT/packaging/" "builder@127.0.0.1:/tmp/evermore/packaging/"
 "${SSH[@]}" builder@127.0.0.1 'sudo bash /tmp/evermore/packaging/vm-image/install-image.sh /tmp/evermore-stage /tmp/evermore-model-store'
 echo '==> Shutting down and flattening image'

@@ -433,6 +433,31 @@ fn make_qr_texture(ctx: &egui::Context, uri: &str) -> Option<TextureHandle> {
     ))
 }
 
+/// Left padding that centers a row of buttons inside a `horizontal`
+/// nested in `vertical_centered` -- that combination doesn't center on
+/// its own in this egui version (see the avatar row below, which hit
+/// the same thing with fixed-size tiles). Button widths aren't fixed
+/// here, so they're estimated from each label's laid-out text size
+/// plus the theme's button padding, which is exactly what egui uses
+/// internally to size a `Button`.
+fn centered_row_padding(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().item_spacing.x;
+    let button_padding = ui.spacing().button_padding;
+    let total_width: f32 = labels
+        .iter()
+        .map(|label| {
+            let galley = ui.painter().layout_no_wrap(
+                label.to_string(),
+                egui::FontId::default(),
+                Color32::WHITE,
+            );
+            galley.size().x + button_padding.x * 2.0
+        })
+        .sum::<f32>()
+        + spacing * labels.len().saturating_sub(1) as f32;
+    ((ui.available_width() - total_width) / 2.0).max(0.0)
+}
+
 fn initial_avatar(ui: &mut egui::Ui, name: &str, size: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let painter = ui.painter();
@@ -579,8 +604,15 @@ impl GreeterApp {
                         }
                     }
                     ui.add_space(10.0);
+                    let show_pair = !setup.pairing_ready && setup.pair_rx.is_none();
+                    let mut labels = Vec::new();
+                    if show_pair { labels.push("Pair phone"); }
+                    if setup.pairing_ready { labels.push("Continue with phone pairing"); }
+                    labels.push("Skip for now");
+                    let pad = centered_row_padding(ui, &labels);
                     ui.horizontal(|ui| {
-                        if !setup.pairing_ready && setup.pair_rx.is_none() && ui.button("Pair phone").clicked() {
+                        ui.add_space(pad);
+                        if show_pair && ui.button("Pair phone").clicked() {
                             if let Err(e) = setup.start_pairing(ui.ctx().clone()) { setup.error = Some(e); }
                         }
                         if setup.pairing_ready && ui.button("Continue with phone pairing").clicked() { next = Some(SetupStep::Passphrase); }
@@ -815,7 +847,9 @@ impl GreeterApp {
                 submit = true;
             }
             ui.add_space(10.0);
+            let pad = centered_row_padding(ui, &["Log in", "Cancel"]);
             ui.horizontal(|ui| {
+                ui.add_space(pad);
                 if ui.button("Log in").clicked() {
                     submit = true;
                 }

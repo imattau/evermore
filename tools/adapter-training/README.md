@@ -29,12 +29,26 @@ locked evaluation.
 
 Panel examples are generated only for approval-gated writes, matching
 `evermore-agentd propose`; read operations belong to deterministic recipes.
-Generated records pair each request with explicit argument values, vary those
-values across examples, and include invalid-argument repair and refusal cases.
-The generator makes five positive examples per tool in each split. They are
-catalogue-derived templates, not independently authored release scenarios, so
-the image packaging gate rejects this dataset until its test cases are reviewed.
-MCP examples
+Generated records pair each request with naturally worded argument values,
+vary those values across examples, and include invalid-argument repair and
+refusal cases. The generator makes ten positive examples per tool in each
+split, plus targeted training-only phrasings for MCP capabilities that need
+clearer natural-language coverage and privacy-preserving calendar updates.
+Its initial test split is template-derived and marked unreviewed. Replace that
+split with the independently authored, catalogue-validated locked scenarios
+before using it for release evaluation:
+
+```sh
+python3 tools/adapter-training/build-reviewed-test.py
+```
+
+The builder replaces `test.jsonl`, writes the human-readable scenario source,
+and refreshes the manifest hashes; train and dev remain byte-identical. The
+reviewed case source is
+[`scenarios/locked-test-v1.jsonl`](scenarios/locked-test-v1.jsonl), with its
+authoring and validation logic in `build-reviewed-test.py`. Run the builder
+after every dataset regeneration, then use the locked test only for the final
+release decision. MCP examples
 include schema-rich, semantically related candidate tools so training tests
 selection among Evermore tools, not just output formatting. The panel target
 format includes the exact marker consumed by Evermore's proposal parser:
@@ -95,8 +109,15 @@ tools/adapter-training/train_lora.py \
   --output-dir out/adapter-peft
 ```
 
+`--task mcp` and `--task panel` train the two paths independently when
+shared-task training interferes with tool selection or proposal validity;
+the default `--task all` trains both together.
+
 The config pins base model, LoRA rank/alpha/dropout, learning rate, epochs, and
-seed. Keep the file in the repository so the run is reproducible.
+seed. Keep the file in the repository so the run is reproducible. Training
+uses prompt/completion records with `completion_only_loss=True`: only assistant
+responses contribute to the loss. This avoids spending most of the objective
+on repeated MCP catalogues and system instructions embedded in each prompt.
 
 ## 3. Evaluate
 

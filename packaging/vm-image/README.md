@@ -5,16 +5,24 @@ bootable Evermore desktop milestone. It builds the workspace in release mode,
 builds the embedded relay supervisor, boots a temporary Arch cloud image,
 installs `packages.x86_64`, stages Evermore's binaries, system setup, and
 offline model store, then flattens the disk to
-`dist/evermore-arch-x86_64.qcow2`. The default store must include BGE small
-embeddings and Qwen2.5-1.5B-Instruct with the Evermore Qwen LoRA. TinyLlama is
-rejected. The Qwen model is selected by default for new users.
+`dist/evermore-arch-x86_64.qcow2`. The model store includes BGE small
+embeddings and two Qwen2.5-1.5B-Instruct task adapters: MCP v9 epoch 208 and
+panel v10 epoch 41. The MCP runtime selects the `.mcp` model; the first-user
+desktop profile selects the `.panel` model. TinyLlama is rejected.
+
+This is a usable engineering image with the best currently selected separate
+adapters. The MCP adapter scored 410/418 tool selections and 396/418
+schema-valid calls on the full development set; the panel adapter scored
+151/154 operation selections and 136/154 schema-valid proposals. The locked
+end-to-end release evaluation has not passed, so this image is for VM use and
+continued evaluation rather than a certified release.
 
 This workflow does not touch `vm/.local` or the developer VM. The output has
 no human account, no SSH access, and no cloud-init provisioning state. On its
 first graphical boot it starts Evermore's greeter; the guided first-user
 screen can create a local identity or pair a NIP-46 signer when networking is
 available. `qrencode` is included for pairing QR codes. The host store defaults
-to `.image-build/model-store` and can be overridden with
+to `.image-build/vm-model-store` and can be overridden with
 `EVERMORE_IMAGE_MODEL_STORE`. Artifacts are SHA-256 checked before the build
 starts and installed as read-only files under `/var/lib/evermore/models`.
 The qcow2 was booted in a disposable QEMU snapshot: the serial log reached

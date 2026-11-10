@@ -28,6 +28,12 @@ def parse_args():
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
+        "--task",
+        choices=("all", "mcp", "panel"),
+        default="all",
+        help="train both paths or isolate one path to test shared-adapter interference",
+    )
+    parser.add_argument(
         "--model-path",
         help="optional local snapshot path; config still records the repository and revision",
     )
@@ -70,10 +76,25 @@ def main():
                 if not line.strip():
                     continue
                 record = json.loads(line)
-                text = tokenizer.apply_chat_template(
-                    record["messages"], tokenize=False, add_generation_prompt=False
+                if args.task == "mcp" and record["source"] != "mcp-tools":
+                    continue
+                if args.task == "panel" and not (
+                    record["source"] == "catalogue"
+                    and record["expected_kind"] in ("proposal", "refusal")
+                ):
+                    continue
+                messages = record["messages"]
+                if not messages or messages[-1]["role"] != "assistant":
+                    raise ValueError(f"{record['id']}: expected a final assistant answer")
+                # The MCP system message can contain a large serialized tool
+                # catalogue. Train on the short desired answer, not next-token
+                # prediction over that repeated prompt. TRL's prompt/completion
+                # format masks prompt tokens from the loss.
+                prompt = tokenizer.apply_chat_template(
+                    messages[:-1], tokenize=False, add_generation_prompt=True
                 )
-                rows.append({"text": text})
+                completion = messages[-1]["content"] + tokenizer.eos_token
+                rows.append({"prompt": prompt, "completion": completion})
         return Dataset.from_list(rows)
 
     train = load("train")
@@ -126,6 +147,7 @@ def main():
         # evaluate.py; token loss is not a tool-use quality metric.
         load_best_model_at_end=False,
         report_to=[],
+        completion_only_loss=True,
     )
     trainer = SFTTrainer(
         model=model,
@@ -139,7 +161,7 @@ def main():
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     with open(os.path.join(args.output_dir, "training-config.json"), "w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2)
+        json.dump({**config, "training_task": args.task}, handle, indent=2)
     print(f"adapter written to {args.output_dir}")
     return 0
 

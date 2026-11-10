@@ -1211,10 +1211,22 @@ impl PanelApp {
     fn open_agent_template(&mut self, template: &evermore_common::agent::AgentTemplate) {
         self.agent_wizard_open = true;
         // The template supplies the name, recipe, cadence, and expiry, so
-        // open directly on the review/inputs step.
+        // open directly on the review/inputs step. If that template is
+        // already in use, pick the next free id instead of replacing it.
+        let base = template.id.clone();
+        let mut slug = base.clone();
+        let mut suffix = 2;
+        while self.agents.iter().any(|agent| agent.definition.id == slug) {
+            slug = format!("{base}-{suffix}");
+            suffix += 1;
+        }
         self.agent_wizard_step = 1;
-        self.agent_title = template.name.clone();
-        self.agent_slug = template.id.clone();
+        self.agent_title = if slug == base {
+            template.name.clone()
+        } else {
+            format!("{} ({})", template.name, suffix - 1)
+        };
+        self.agent_slug = slug;
         self.agent_recipe = template.recipe_id.clone();
         self.agent_interval_seconds = template.cadence_seconds;
         self.agent_expiry_days = template.expiry_days;
@@ -1264,6 +1276,12 @@ impl PanelApp {
         let slug = self.agent_slug.trim().to_string();
         if let Err(error) = evermore_common::agent::validate_agent_slug(&slug) {
             self.agent_error = Some(error);
+            return;
+        }
+        if self.agents.iter().any(|agent| agent.definition.id == slug) {
+            self.agent_error = Some(format!(
+                "An agent with id '{slug}' already exists. Choose a different id under Advanced."
+            ));
             return;
         }
         let Some(recipe) = self

@@ -1095,6 +1095,40 @@ impl PanelApp {
         self.agents_next_poll = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
+    fn start_agent_runner(&mut self) {
+        self.agent_error = None;
+        self.agent_status = None;
+        let Some(owner) = self.owner_identity() else {
+            self.agent_error = Some(
+                "The configured owner identity is not loaded, so the user service name is unknown."
+                    .into(),
+            );
+            return;
+        };
+        let unit = format!("evermore-agentd@{}.service", owner.name);
+        match std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", &unit])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                self.agent_status = Some(format!("Starting {unit}…"));
+                self.agents_loaded = false;
+                self.agents_next_poll =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                self.agents_error = None;
+            }
+            Ok(output) => {
+                self.agent_error = Some(format!(
+                    "Could not start {unit}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            Err(error) => {
+                self.agent_error = Some(format!("Could not run systemctl: {error}"));
+            }
+        }
+    }
+
     fn reload_agents(&mut self) {
         self.agent_status = None;
         self.agent_error = None;
@@ -1449,6 +1483,7 @@ impl PanelApp {
 
         if let Some(error) = self.agents_error.clone() {
             let mut retry = false;
+            let mut start = false;
             open_section(ui, |ui| {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
@@ -1456,9 +1491,13 @@ impl PanelApp {
                 );
                 ui.weak(&error);
                 retry = ui.button("Try again").clicked();
+                start = ui.button("Start agent runner").clicked();
             });
             if retry {
                 self.refresh_agents();
+            }
+            if start {
+                self.start_agent_runner();
             }
         }
 

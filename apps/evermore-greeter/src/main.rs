@@ -35,6 +35,13 @@ const SESSION_CMD: &[&str] = &["/usr/bin/sway"];
 /// that needs it (phone-pairing confirmation) gets its own constant.
 const SUCCESS: Color32 = Color32::from_rgb(95, 191, 143);
 
+/// One consistent text-field width across the first-boot wizard's steps,
+/// instead of each step picking its own (320/340/380 previously) and
+/// making the centered column visibly shift width from screen to screen.
+/// The read-only recovery-key field is the one deliberate exception: it
+/// needs to fit a full bech32 `nsec1...` string without wrapping.
+const FORM_FIELD_WIDTH: f32 = 360.0;
+
 /// Evermore Graphite dark palette and type scale, kept in lockstep with
 /// `apps/evermore-panel`'s `build_visuals`/`build_style`/`load_fonts` (the
 /// design note's source-of-truth implementation) -- the greeter is a kiosk
@@ -50,9 +57,15 @@ fn build_visuals() -> egui::Visuals {
     let accent = Color32::from_rgb(110, 168, 254);
     let accent_strong = Color32::from_rgb(139, 183, 255);
 
-    visuals.panel_fill = chrome;
+    // Unlike `evermore-panel` (which has a separate chrome layer around its
+    // content), this whole screen *is* the lock screen the design note
+    // calls out `ink-950` for -- so the full-bleed `CentralPanel` fill is
+    // the canvas tone, not the one-step-up panel-chrome tone. Text inputs
+    // then need to sit a tier above that to read as a raised surface at
+    // all, so they take the chrome tone instead of reusing canvas.
+    visuals.panel_fill = canvas;
     visuals.window_fill = chrome;
-    visuals.extreme_bg_color = canvas;
+    visuals.extreme_bg_color = chrome;
     visuals.faint_bg_color = card;
     visuals.weak_text_color = Some(text_muted);
     visuals.override_text_color = Some(text);
@@ -687,23 +700,23 @@ impl GreeterApp {
         ui.vertical_centered(|ui| {
             ui.add_space(36.0);
             ui.heading("Set up Evermore");
-            ui.add_space(18.0);
+            ui.add_space(16.0);
             match setup.step {
                 SetupStep::Welcome => {
                     ui.label("Create your first account and encrypted home.");
                     ui.label("You can finish setup offline. A home passphrase will always unlock this account.");
-                    ui.add_space(18.0);
+                    ui.add_space(16.0);
                     ui.weak("Phone approval is optional; your home passphrase remains available for offline unlock.");
-                    ui.add_space(18.0);
+                    ui.add_space(16.0);
                     if ui.button("Begin setup").clicked() { next = Some(SetupStep::Details); }
                 }
                 SetupStep::Details => {
                     ui.label("Choose your account name and display name.");
                     ui.add_space(12.0);
                     ui.label("Account name (lowercase, numbers, _ or -)");
-                    ui.add(egui::TextEdit::singleline(&mut setup.username).desired_width(320.0));
+                    ui.add(egui::TextEdit::singleline(&mut setup.username).desired_width(FORM_FIELD_WIDTH));
                     ui.label("Display name");
-                    ui.add(egui::TextEdit::singleline(&mut setup.display_name).desired_width(320.0));
+                    ui.add(egui::TextEdit::singleline(&mut setup.display_name).desired_width(FORM_FIELD_WIDTH));
                     ui.add_space(12.0);
                     if ui.button("Continue").clicked() {
                         let name = setup.username.trim();
@@ -716,25 +729,40 @@ impl GreeterApp {
                 SetupStep::Identity => {
                     ui.label("Create a new Nostr identity, or import an existing nsec.");
                     ui.label("Leave the field empty to create a new identity.");
-                    ui.add(egui::TextEdit::singleline(&mut setup.imported_nsec).password(true).desired_width(380.0).hint_text("Existing nsec (optional)"));
+                    ui.add(egui::TextEdit::singleline(&mut setup.imported_nsec).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("Existing nsec (optional)"));
                     ui.add_space(12.0);
                     if ui.button("Continue").clicked() { if let Err(e) = setup.prepare_identity() { setup.error = Some(e); } }
                 }
                 SetupStep::Recovery => {
                     let recovery = setup.identity_secret.as_ref().and_then(|secret| SecretKey::parse(secret.as_str()).ok()).and_then(|key| key.to_bech32().ok()).unwrap_or_default();
                     ui.label("Save your recovery key somewhere private. It is shown once.");
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.add(egui::TextEdit::singleline(&mut recovery.clone()).desired_width(480.0).interactive(false));
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.label("Anyone with this key can control your Nostr identity.");
                     if ui.button("I have saved my recovery key").clicked() { next = Some(SetupStep::Pairing); }
                 }
                 SetupStep::Pairing => {
                     ui.label("Optional: connect your phone for NIP-46 approval when unlocking this encrypted home.");
                     ui.label("Both this computer and your phone need access to the same relay.");
+                    // Same nested-horizontal-in-vertical_centered gap as
+                    // `centered_row_padding` works around elsewhere, but for
+                    // a label + text field instead of a row of buttons.
+                    let relay_label_width = ui
+                        .painter()
+                        .layout_no_wrap("Relay".to_owned(), egui::FontId::default(), Color32::WHITE)
+                        .size()
+                        .x;
+                    let relay_pad = ((ui.available_width()
+                        - relay_label_width
+                        - ui.spacing().item_spacing.x
+                        - FORM_FIELD_WIDTH)
+                        / 2.0)
+                        .max(0.0);
                     ui.horizontal(|ui| {
+                        ui.add_space(relay_pad);
                         ui.label("Relay");
-                        ui.add(egui::TextEdit::singleline(&mut setup.relay).desired_width(340.0));
+                        ui.add(egui::TextEdit::singleline(&mut setup.relay).desired_width(FORM_FIELD_WIDTH));
                     });
                     if let Some(qr) = &setup.pair_qr {
                         ui.add(egui::Image::new(qr).fit_to_exact_size(egui::vec2(240.0, 240.0)));
@@ -755,7 +783,7 @@ impl GreeterApp {
                             ui.add(egui::Label::new(pubkey).selectable(true));
                         }
                     }
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     let show_pair = !setup.pairing_ready && setup.pair_rx.is_none();
                     let mut labels = Vec::new();
                     if show_pair { labels.push("Pair phone"); }
@@ -781,8 +809,8 @@ impl GreeterApp {
                 }
                 SetupStep::Passphrase => {
                     ui.label("Choose a passphrase for your encrypted home. Keep it available; it is the offline unlock method.");
-                    ui.add(egui::TextEdit::singleline(&mut setup.passphrase).password(true).desired_width(320.0).hint_text("At least 8 characters"));
-                    ui.add(egui::TextEdit::singleline(&mut setup.confirmation).password(true).desired_width(320.0).hint_text("Repeat passphrase"));
+                    ui.add(egui::TextEdit::singleline(&mut setup.passphrase).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("At least 8 characters"));
+                    ui.add(egui::TextEdit::singleline(&mut setup.confirmation).password(true).desired_width(FORM_FIELD_WIDTH).hint_text("Repeat passphrase"));
                     if ui.button("Create account").clicked() {
                         if setup.passphrase.len() < 8 { setup.error = Some("Use at least 8 characters.".into()); }
                         else if setup.passphrase != setup.confirmation { setup.error = Some("The passphrases do not match.".into()); }
@@ -791,7 +819,7 @@ impl GreeterApp {
                 }
                 SetupStep::Saving => { ui.label("Creating your encrypted home…"); }
             }
-            if let Some(error) = &setup.error { ui.add_space(10.0); ui.colored_label(ui.visuals().error_fg_color, error); }
+            if let Some(error) = &setup.error { ui.add_space(8.0); ui.colored_label(ui.visuals().error_fg_color, error); }
         });
         if create {
             setup.step = SetupStep::Saving;
@@ -909,7 +937,7 @@ impl GreeterApp {
                 ui.add_space(8.0);
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
-            ui.add_space(30.0);
+            ui.add_space(32.0);
             // `vertical_centered` doesn't actually center a nested
             // `horizontal` row in this egui version -- confirmed
             // visually on the VM, not a hypothetical -- so the row's
@@ -998,7 +1026,7 @@ impl GreeterApp {
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submit = true;
             }
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             let pad = centered_row_padding(ui, &["Log in", "Cancel"]);
             ui.horizontal(|ui| {
                 ui.add_space(pad);

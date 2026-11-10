@@ -29,6 +29,158 @@ use zeroize::{Zeroize, Zeroizing};
 /// one supported desktop, not a configurable session picker.
 const SESSION_CMD: &[&str] = &["/usr/bin/sway"];
 
+/// "Green is rare. Only signed, installed, or synced confirmation" per the
+/// Evermore Graphite design note -- there's no `egui::Visuals` slot for it
+/// (unlike warn/error, which `apply_theme` below sets), so the one place
+/// that needs it (phone-pairing confirmation) gets its own constant.
+const SUCCESS: Color32 = Color32::from_rgb(95, 191, 143);
+
+/// Evermore Graphite dark palette and type scale, kept in lockstep with
+/// `apps/evermore-panel`'s `build_visuals`/`build_style`/`load_fonts` (the
+/// design note's source-of-truth implementation) -- the greeter is a kiosk
+/// lock screen with no light/dark toggle, so only the dark branch is needed.
+fn build_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+
+    let canvas = Color32::from_rgb(14, 16, 20); // ink-950: "application canvas, lock screen"
+    let chrome = Color32::from_rgb(20, 23, 29); // ink-900
+    let card = Color32::from_rgb(26, 30, 37); // ink-850
+    let text = Color32::from_rgb(230, 233, 239);
+    let text_muted = Color32::from_rgb(167, 176, 191);
+    let accent = Color32::from_rgb(110, 168, 254);
+    let accent_strong = Color32::from_rgb(139, 183, 255);
+
+    visuals.panel_fill = chrome;
+    visuals.window_fill = chrome;
+    visuals.extreme_bg_color = canvas;
+    visuals.faint_bg_color = card;
+    visuals.weak_text_color = Some(text_muted);
+    visuals.override_text_color = Some(text);
+    visuals.hyperlink_color = accent;
+    visuals.warn_fg_color = Color32::from_rgb(229, 181, 103);
+    visuals.error_fg_color = Color32::from_rgb(224, 108, 117);
+    visuals.selection.bg_fill = accent;
+    visuals.selection.stroke = egui::Stroke::new(1.0, accent);
+
+    visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text);
+    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+    // "Blue means interactive": hover/press feedback shares the accent,
+    // same as every other Evermore egui surface.
+    visuals.widgets.hovered.bg_fill = accent_strong.gamma_multiply(0.55);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text);
+    visuals.widgets.active.bg_fill = accent;
+    visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, text);
+    visuals.window_corner_radius = egui::CornerRadius::same(12);
+    visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(12);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(12);
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(12);
+    visuals
+}
+
+fn build_style(base: &egui::Style) -> egui::Style {
+    let mut style = base.clone();
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.window_margin = egui::Margin::same(16);
+    let inter_medium = egui::FontFamily::Name("inter-medium".into());
+    let inter_semibold = egui::FontFamily::Name("inter-semibold".into());
+    style.text_styles = [
+        (
+            egui::TextStyle::Small,
+            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Body,
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
+        ),
+        (
+            egui::TextStyle::Button,
+            egui::FontId::new(13.0, inter_medium),
+        ),
+        (
+            egui::TextStyle::Heading,
+            egui::FontId::new(18.0, inter_semibold),
+        ),
+        (
+            egui::TextStyle::Monospace,
+            egui::FontId::new(13.0, egui::FontFamily::Monospace),
+        ),
+    ]
+    .into();
+    style
+}
+
+fn apply_theme(ctx: &egui::Context) {
+    // Kiosk lock screen, so only `Theme::Dark` is ever shown -- but egui's
+    // visuals/style are still namespaced per theme, so both calls are
+    // required even though `Theme::Light` is never selected.
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        ctx.set_visuals_of(theme, build_visuals());
+        let style = build_style(&ctx.style_of(theme));
+        ctx.set_style_of(theme, style);
+    }
+    ctx.set_theme(egui::ThemePreference::Dark);
+}
+
+/// Bundles the same Inter + JetBrains Mono files `evermore-panel` ships,
+/// rather than duplicating the font binaries in this crate too.
+fn load_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "inter-regular".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../evermore-panel/assets/fonts/Inter-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "inter-medium".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../evermore-panel/assets/fonts/Inter-Medium.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "inter-semibold".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../evermore-panel/assets/fonts/Inter-SemiBold.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "jetbrains-mono".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../evermore-panel/assets/fonts/JetBrainsMono-Regular.ttf"
+        ))),
+    );
+
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "inter-regular".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "jetbrains-mono".to_owned());
+    fonts.families.insert(
+        egui::FontFamily::Name("inter-medium".into()),
+        vec!["inter-medium".to_owned()],
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("inter-semibold".into()),
+        vec!["inter-semibold".to_owned()],
+    );
+
+    ctx.set_fonts(fonts);
+}
+
 struct UserEntry {
     user_name: String,
     display_name: String,
@@ -517,7 +669,7 @@ impl eframe::App for GreeterApp {
                 Screen::FatalError(error) => {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
-                        ui.colored_label(Color32::from_rgb(220, 80, 80), "evermore-greeter error");
+                        ui.colored_label(ui.visuals().error_fg_color, "evermore-greeter error");
                         ui.label(&error);
                     });
                     self.screen = Screen::FatalError(error);
@@ -596,7 +748,7 @@ impl GreeterApp {
                         ui.label("Connecting to the relay…");
                     }
                     if setup.pairing_ready {
-                        ui.colored_label(Color32::from_rgb(80, 190, 120), "Phone paired. The home passphrase remains available as fallback.");
+                        ui.colored_label(SUCCESS, "Phone paired. The home passphrase remains available as fallback.");
                         ui.weak("If homed asks for a token PIN during phone unlock, enter any non-empty value, then approve the request on your phone.");
                         if let Some(pubkey) = &setup.paired_user_pubkey {
                             ui.label("Phone signer identity:");
@@ -639,7 +791,7 @@ impl GreeterApp {
                 }
                 SetupStep::Saving => { ui.label("Creating your encrypted home…"); }
             }
-            if let Some(error) = &setup.error { ui.add_space(10.0); ui.colored_label(Color32::from_rgb(220, 80, 80), error); }
+            if let Some(error) = &setup.error { ui.add_space(10.0); ui.colored_label(ui.visuals().error_fg_color, error); }
         });
         if create {
             setup.step = SetupStep::Saving;
@@ -755,7 +907,7 @@ impl GreeterApp {
             }
             if let Some(error) = &error {
                 ui.add_space(8.0);
-                ui.colored_label(Color32::from_rgb(220, 80, 80), error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.add_space(30.0);
             // `vertical_centered` doesn't actually center a nested
@@ -889,6 +1041,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "evermore-greeter",
         eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(GreeterApp::new()))),
+        Box::new(|cc| {
+            load_fonts(&cc.egui_ctx);
+            apply_theme(&cc.egui_ctx);
+            Ok(Box::new(GreeterApp::new()))
+        }),
     )
 }

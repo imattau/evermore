@@ -42,11 +42,15 @@ install -m 0644 "$ROOT/packaging/npack/default-config.toml" /etc/skel/.config/np
 desktop-file-validate /usr/share/applications/io.npack.Gui.desktop
 update-desktop-database /usr/share/applications
 install -m 0755 "$STAGE/lib/evermore-pkcs11.so" /usr/lib/pkcs11/evermore-pkcs11.so
-install -d -m 0755 /var/lib/evermore/models
-cp -a "$MODEL_STORE/." /var/lib/evermore/models/
-chown -R root:root /var/lib/evermore/models
-find /var/lib/evermore/models -type d -exec chmod 0755 {} +
-find /var/lib/evermore/models -type f -exec chmod 0644 {} +
+# Not /var/lib/evermore/models: evermore-pkcs11 and evermore-signer's
+# device-identity bootstrap both reset /var/lib/evermore to 0700 on every
+# run, which would lock every non-root reader (evermore-inferd included)
+# out of a models/ subdirectory nested inside it.
+install -d -m 0755 /var/lib/evermore-models
+cp -a "$MODEL_STORE/." /var/lib/evermore-models/
+chown -R root:root /var/lib/evermore-models
+find /var/lib/evermore-models -type d -exec chmod 0755 {} +
+find /var/lib/evermore-models -type f -exec chmod 0644 {} +
 printf '{\n  "model": "evermore/p8.model.qwen2.5-1.5b.panel:1.0.0-dev.1"\n}\n' \
   > /etc/skel/.config/evermore/panel-ai.json
 chmod 0644 /etc/skel/.config/evermore/panel-ai.json

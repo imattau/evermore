@@ -29,7 +29,7 @@ screen can create a local identity or pair a NIP-46 signer when networking is
 available. `qrencode` is included for pairing QR codes. The host store defaults
 to `.image-build/vm-model-store` and can be overridden with
 `EVERMORE_IMAGE_MODEL_STORE`. Artifacts are SHA-256 checked before the build
-starts and installed as read-only files under `/var/lib/evermore/models`.
+starts and installed as read-only files under `/var/lib/evermore-models`.
 The qcow2 was booted in a disposable QEMU snapshot: the serial log reached
 the graphical greeter, and the screen showed **Begin setup** followed by the
 guided account-name step. The image itself was not modified by that check.

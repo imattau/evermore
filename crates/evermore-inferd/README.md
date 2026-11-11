@@ -15,7 +15,7 @@ model packages in the store, then start:
 evermore-inferd
 ```
 
-System models are read from `/var/lib/evermore/models`; user models from
+System models are read from `/var/lib/evermore-models`; user models from
 `$XDG_DATA_HOME/evermore/models` (normally
 `~/.local/share/evermore/models`). The user store shadows a system model with
 the same name. `EVERMORE_MODEL_DIRS` overrides the search path with a

@@ -1763,7 +1763,15 @@ pub mod ai {
             })
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         vec![
-            PathBuf::from("/var/lib/evermore/models"),
+            // Deliberately NOT /var/lib/evermore/models: that directory is
+            // already actively managed as a 0700, root-only secrets store by
+            // evermore-pkcs11 and evermore-signer's device-identity
+            // bootstrap, both of which reset it to 0700 unconditionally on
+            // every run. A world-readable subdirectory nested inside it
+            // would get silently re-locked the next time either of those
+            // happened to run, leaving every non-root reader (evermore-
+            // inferd included) permission-denied on the parent.
+            PathBuf::from("/var/lib/evermore-models"),
             data_home.join("evermore/models"),
         ]
     }

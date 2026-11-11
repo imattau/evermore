@@ -1141,7 +1141,7 @@ pre-install remain. `evermore-common` defines
 the versioned `ModelManifest` (an adapter requires the operation-registry
 version and training provenance it was built against), store discovery via
 `EVERMORE_MODEL_DIRS` with user-root precedence, and protocol version 2.
-`evermore-inferd` scans `/var/lib/evermore/models` and
+`evermore-inferd` scans `/var/lib/evermore-models` and
 `~/.local/share/evermore/models`, spawns one `llama-server` child per model on
 an ephemeral loopback port with a per-process API key, restarts after a crash,
 and serves `/v1/chat/completions` SSE and `/v1/embeddings` behind the unchanged
@@ -1232,7 +1232,7 @@ hardware.
 
 | Concern | Ollama's behaviour | What Evermore must build |
 | :--- | :--- | :--- |
-| **Model storage** | `~/.ollama/models`, content-addressed blobs | `/var/lib/evermore/models` for system models and `~/.local/share/evermore/models` for user models, merged by an `ai-inferd` scan |
+| **Model storage** | `~/.ollama/models`, content-addressed blobs | `/var/lib/evermore-models` for system models and `~/.local/share/evermore/models` for user models, merged by an `ai-inferd` scan |
 | **Model discovery** | `ollama pull` from a registry | Signed `npack` packages that place a GGUF plus a manifest in the model store |
 | **API surface** | `/api/chat`, `/api/generate` | `llama-server`'s OpenAI-compatible endpoints behind `ai-inferd`'s Unix socket |
 | **Versioning** | Tags and digests | `npack` package versions and signed manifests; the base + adapter pairing is a versioned artifact |
@@ -1250,7 +1250,7 @@ hardware.
   selection becomes launch flags (`--n-gpu-layers`). A bounded pool with idle
   eviction replaces Ollama's `/api/ps` unload; `UnloadModel` stops the
   corresponding child. Model switching is a restart, not an in-process swap.
-- **Store roots.** System artifacts live under `/var/lib/evermore/models/` and
+- **Store roots.** System artifacts live under `/var/lib/evermore-models/` and
   user artifacts under `~/.local/share/evermore/models/`. `ai-inferd` scans
   both and merges them, with the user root taking precedence on name conflict.
 - **Manifest.** Each `npack` model package carries a versioned manifest: base
@@ -1701,7 +1701,7 @@ are made; the rest of the phase is plan.
   (`systemd-stub`) are the boot artifact so TPM2/FIDO2 enrollment stays
   available later. Secure Boot remains optional and is never a requirement.
 - **The model pair ships on the ISO.** The Phase 7.5 `Q4_K_M` base and `F16`
-  adapter are pre-extracted into `/var/lib/evermore/models` with their signed
+  adapter are pre-extracted into `/var/lib/evermore-models` with their signed
   manifests and release events, rather than pulled on first boot. This is what
   makes an offline first boot meaningful, at the cost of the device-root
   at-rest problem recorded below.

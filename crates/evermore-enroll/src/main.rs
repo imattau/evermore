@@ -451,6 +451,14 @@ fn create_first_user_account(
         // but the record format accepts the JSON boolean directly.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "rebalanceWeight": false,
+        // The device owner administers their own machine. nss-systemd
+        // resolves this dynamically (verified: `id` on a fresh homed
+        // account already shows the wheel gid before the home is even
+        // activated) -- no /etc/group edit needed, unlike a traditional
+        // useradd flow. Pairs with the packaged %wheel sudoers rule
+        // (packaging/greetd/evermore-wheel.sudoers); password-gated, not
+        // NOPASSWD.
+        "memberOf": ["wheel"],
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": keys.public_key().to_bech32().map_err(|e| e.to_string())?,
@@ -654,6 +662,10 @@ fn first_user() -> Result<(), String> {
         // use available free space regardless.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "rebalanceWeight": false,
+        // See the sibling memberOf comment in create_first_user_account:
+        // the device owner administers their own machine via the packaged
+        // %wheel sudoers rule.
+        "memberOf": ["wheel"],
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": pubkey.to_bech32().map_err(|e| e.to_string())?,

@@ -85,6 +85,8 @@ install -m 0644 "$ROOT/packaging/pkcs11/evermore-pkcs11.module" /usr/share/p11-k
 install -m 0644 "$ROOT/packaging/greetd/config.toml" /etc/greetd/config.toml
 install -m 0440 "$ROOT/packaging/greetd/evermore-first-user.sudoers" /etc/sudoers.d/evermore-first-user
 visudo -cf /etc/sudoers.d/evermore-first-user
+install -m 0440 "$ROOT/packaging/greetd/evermore-wheel.sudoers" /etc/sudoers.d/evermore-wheel
+visudo -cf /etc/sudoers.d/evermore-wheel
 install -m 0644 "$ROOT/packaging/systemd/evermore-first-user.service" /usr/lib/systemd/system/
 install -m 0644 "$ROOT/packaging/systemd/evermore-signer.service" /usr/lib/systemd/user/
 install -m 0644 "$ROOT/packaging/systemd/evermore-relay.service" /usr/lib/systemd/user/

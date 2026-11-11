@@ -1,0 +1,9 @@
+# Lets the device owner (and anyone else evermore-enroll later adds to the
+# wheel group) administer their own machine -- install packages, manage
+# services, etc. Password-gated, not NOPASSWD: the owner already proved
+# their identity unlocking their LUKS home, but a second factor before
+# root-equivalent actions is still worth the one extra prompt. Arch's own
+# /etc/sudoers ships the equivalent %wheel line commented out; this is a
+# drop-in instead of uncommenting that line so it survives untouched if the
+# base image's sudoers file is ever regenerated.
+%wheel ALL=(ALL:ALL) ALL

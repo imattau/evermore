@@ -440,6 +440,10 @@ fn create_first_user_account(
         "homeDirectory": format!("/home/{username}"),
         "shell": "/bin/bash",
         "storage": "luks",
+        // Keep the home image bounded on the 32 GiB VM disk. Without this,
+        // homed's default can consume almost all free space, leaving too
+        // little room to activate the home after a reboot.
+        "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": keys.public_key().to_bech32().map_err(|e| e.to_string())?,
@@ -529,7 +533,10 @@ fn enable_identity_services(username: &str, uid: u32, gid: u32) -> Result<(), St
         "evermore-agentd",
     ] {
         let link = wants.join(format!("{unit}@{username}.service"));
-        let target = PathBuf::from(format!("../{unit}@.service"));
+        // These templates are installed system-wide, not alongside the
+        // per-user wants directory. Pointing one directory up makes a
+        // dangling symlink and silently leaves the service disabled.
+        let target = PathBuf::from(format!("/usr/lib/systemd/user/{unit}@.service"));
         match std::fs::read_link(&link) {
             Ok(existing) if existing == target => {}
             Ok(_) => {
@@ -628,6 +635,7 @@ fn first_user() -> Result<(), String> {
         "homeDirectory": format!("/home/{username}"),
         "shell": "/bin/bash",
         "storage": "luks",
+        "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": pubkey.to_bech32().map_err(|e| e.to_string())?,

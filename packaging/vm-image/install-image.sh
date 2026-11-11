@@ -85,8 +85,19 @@ install -m 0644 "$ROOT/packaging/pkcs11/evermore-pkcs11.module" /usr/share/p11-k
 install -m 0644 "$ROOT/packaging/greetd/config.toml" /etc/greetd/config.toml
 install -m 0440 "$ROOT/packaging/greetd/evermore-first-user.sudoers" /etc/sudoers.d/evermore-first-user
 visudo -cf /etc/sudoers.d/evermore-first-user
-install -m 0440 "$ROOT/packaging/greetd/evermore-wheel.sudoers" /etc/sudoers.d/evermore-wheel
-visudo -cf /etc/sudoers.d/evermore-wheel
+# Numbered low so it sorts (and is processed) before any later, more
+# specific drop-in -- sudo's rule is "last match wins" per @includedir's
+# alphabetical file order, not "most specific wins". On the provisioning
+# VM this matters concretely: cloud-init's own 90-cloud-init-users grants
+# `builder` NOPASSWD sudo, builder is *also* in group wheel (the base
+# cloud image's own default), and build-image.sh's final step depends on
+# that NOPASSWD surviving to remove the builder account non-interactively
+# and power off. A same-or-higher-sorting %wheel rule silently overrides
+# it (verified: that step failed with "sudo: a password is required"
+# until this was renumbered), leaving builder's account, home and SSH key
+# in the shipped image instead of a real first-boot setup.
+install -m 0440 "$ROOT/packaging/greetd/evermore-wheel.sudoers" /etc/sudoers.d/10-evermore-wheel
+visudo -cf /etc/sudoers.d/10-evermore-wheel
 install -m 0644 "$ROOT/packaging/systemd/evermore-first-user.service" /usr/lib/systemd/system/
 install -m 0644 "$ROOT/packaging/systemd/evermore-signer.service" /usr/lib/systemd/user/
 install -m 0644 "$ROOT/packaging/systemd/evermore-relay.service" /usr/lib/systemd/user/

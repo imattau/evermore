@@ -33,6 +33,33 @@ install -d /usr/bin /usr/lib/pkcs11 /usr/share/p11-kit/modules /usr/lib/systemd/
   /etc/skel/.local/share/applications /var/lib/evermore-profiles \
   /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/metainfo
 for bin in "${bins[@]}"; do install -m 0755 "$STAGE/bin/$bin" "/usr/bin/$bin"; done
+
+# Register Evermore's own daemons/apps as real npack packages in every new
+# user's skeleton home, so npack-gui has an honest record of them instead of
+# showing nothing installed while the binaries sit on disk only because the
+# loop above copied them there directly. Local installs need no signing or
+# network (see packaging/npack/pack-for-image.sh for why), so this is pure
+# bookkeeping: it doesn't touch the live /usr/bin copies or systemd units
+# those already-working binaries and evermore-enroll wire up.
+NPK_WORK="$(mktemp -d)"
+trap 'rm -rf "$NPK_WORK"' EXIT
+# Not mcp: unlike every other package build-and-publish.sh knows about,
+# evermore-mcp is never staged into this image at all (it's spawned
+# per-session over stdio by an external MCP client's own config, not run as
+# a daemon here) -- packaging a binary that was never copied to /usr/bin
+# would be registering something this image doesn't actually ship.
+for package in settingsd notifyd blossom-fs contextd indexd inferd operationsd agentd sway-ai-bridge panel; do
+  npk="$NPK_WORK/evermore-$package-0.1.0.npk"
+  NPACK_BIN=/usr/bin/npack "$ROOT/packaging/npack/pack-for-image.sh" "$package" 0.1.0 "$ROOT" "$STAGE/bin" "$npk"
+  HOME=/etc/skel XDG_DATA_HOME= /usr/bin/npack install "$npk" --user
+done
+rm -rf "$NPK_WORK"
+trap - EXIT
+chown -R root:root /etc/skel/.local
+find /etc/skel/.local -type d -exec chmod 0755 {} +
+find /etc/skel/.local -type f -exec chmod 0644 {} +
+find /etc/skel/.local/bin -type f -exec chmod 0755 {} +
+
 install -m 0644 "$STAGE/share/io.npack.Gui.desktop" /usr/share/applications/
 install -m 0644 "$STAGE/share/io.npack.Gui.svg" /usr/share/icons/hicolor/scalable/apps/
 sed -e 's/@VERSION@/0.9.4/' -e "s/@DATE@/$(date -u +%F)/" \

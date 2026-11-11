@@ -1,6 +1,13 @@
 [Unit]
 Description=Evermore local control-plane relay (khatru-based, loopback-only)
 Documentation=https://github.com/imattau/evermore
+# Enabled system-wide, so this also matches the greeter's own login (home
+# "/", no enrolled identity). Without this, ReadWritePaths=%h/.local/share/
+# evermore below resolves to /.local/share/evermore, which never exists for
+# that account, and the unit crash-loops (NAMESPACE failure) every
+# RestartSec forever. evermore-enroll creates this directory for every real
+# identity at account creation, so its absence means "not a real user yet".
+ConditionPathIsDirectory=%h/.local/share/evermore
 
 [Service]
 Type=simple

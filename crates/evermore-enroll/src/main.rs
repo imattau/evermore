@@ -512,7 +512,13 @@ fn enable_identity_services(username: &str, uid: u32, gid: u32) -> Result<(), St
     let home = list_homes()?
         .into_iter()
         .find(|entry| entry.0 == username)
-        .map(|entry| PathBuf::from(entry.4))
+        // ListHomes' signature is a(susussso): name, uid, state, gid,
+        // realName, homeDirectory, shell, objectPath -- index 5, not 4
+        // (which is realName, the display name). Using 4 silently built a
+        // relative path like "Ever Test/.config/..." under the daemon's
+        // cwd instead of under the real home, so the symlinks landed
+        // nowhere real and the per-identity services never started.
+        .map(|entry| PathBuf::from(entry.5))
         .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
     let wants = home.join(".config/systemd/user/default.target.wants");
     std::fs::create_dir_all(&wants)

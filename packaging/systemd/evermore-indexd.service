@@ -2,6 +2,13 @@
 Description=Evermore local semantic index
 Documentation=https://github.com/imattau/evermore
 After=default.target
+# Enabled system-wide, so this also matches the greeter's own login (home
+# "/", no enrolled identity). ProtectHome=read-only plus StateDirectory
+# means the ExecStartPre chmod on %h/.local/state/evermore-indexd fails
+# with Permission denied for that account, and the unit crash-loops every
+# RestartSec forever. Gate on the same marker evermore-enroll creates for
+# every real identity at account creation.
+ConditionPathIsDirectory=%h/.local/share/evermore
 
 [Service]
 Type=simple

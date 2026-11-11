@@ -170,7 +170,14 @@ RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFil
 RSYNC_RSH="ssh -i $KEY -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" rsync -a "$ROOT/packaging/" "builder@127.0.0.1:/tmp/evermore/packaging/"
 "${SSH[@]}" builder@127.0.0.1 'sudo bash /tmp/evermore/packaging/vm-image/install-image.sh /tmp/evermore-stage /tmp/evermore-model-store'
 echo '==> Shutting down and flattening image'
-"${SSH[@]}" builder@127.0.0.1 'sudo sh -c "userdel -r builder 2>/dev/null || true; rm -rf /home/builder; systemctl poweroff"' || true
+# -f: this command runs over builder's own SSH session, so plain `userdel`
+# always refuses with "user builder is currently used by process ..." --
+# silently, since stderr is thrown away below. That left /etc/passwd's
+# builder entry (and its wheel/sudo membership) in every past build of
+# this image even though /home/builder itself was gone, because `rm -rf`
+# isn't short-circuited by userdel's exit code. Verified live: dropping -f
+# reproduces the leftover entry; -f removes it cleanly in the same run.
+"${SSH[@]}" builder@127.0.0.1 'sudo sh -c "userdel -f -r builder 2>/dev/null || true; rm -rf /home/builder; systemctl poweroff"' || true
 for _ in $(seq 1 60); do kill -0 "$VM_PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$VM_PID" 2>/dev/null; then kill "$VM_PID"; wait "$VM_PID" 2>/dev/null || true; fi
 VM_PID=""; rm -f "$IMAGE_DIR/qemu.pid"

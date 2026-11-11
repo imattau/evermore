@@ -41,6 +41,8 @@ fn main() {
         Some("activate") => activate(&args[2..]),
         Some("deactivate") => deactivate(&args[2..]),
         Some("remove") => remove(&args[2..]),
+        Some("session-heal") => session_heal(),
+        Some("session-heal-worker") => session_heal_worker(&args[2..]),
         _ => {
             eprintln!(
                 "usage: evermore-enroll <first-user|create|activate|deactivate|remove>\n\n\
@@ -61,7 +63,11 @@ fn main() {
                  deactivate --username NAME\n\
                               lock and unmount an active home area\n\
                  remove --username NAME\n\
-                              permanently remove a home area"
+                              permanently remove a home area\n\
+                 session-heal\n\
+                              invoked by PAM (see packaging/greetd/pam-greetd)\n\
+                              on every session open; detaches and hands off\n\
+                              to session-heal-worker"
             );
             std::process::exit(2);
         }
@@ -71,6 +77,118 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Invoked by `pam_exec` on every `session open` for `greetd` (see
+/// `packaging/greetd/pam-greetd`). Detaches into a new session via `setsid
+/// --fork` and returns immediately, so a slow or stuck worker never adds to
+/// login latency or leaves PAM waiting; the actual check happens in
+/// `session_heal_worker`, running fully independently of this process and
+/// of whatever PAM session triggered it.
+fn session_heal() -> Result<(), String> {
+    if std::env::var("PAM_TYPE").as_deref() != Ok("open_session") {
+        return Ok(());
+    }
+    let username = match std::env::var("PAM_USER") {
+        Ok(username) => username,
+        Err(_) => return Ok(()),
+    };
+    let exe = std::env::current_exe().map_err(|e| format!("finding our own path: {e}"))?;
+    std::process::Command::new("setsid")
+        .arg("--fork")
+        .arg(exe)
+        .arg("session-heal-worker")
+        .arg(&username)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("spawning session-heal-worker: {e}"))?;
+    Ok(())
+}
+
+/// The actual self-heal check, running detached (see `session_heal`).
+///
+/// `systemd-homed`'s LUKS activation can take long enough (even with the
+/// tuned-down `luksPbkdf*` cost `create_first_user_account` now requests --
+/// see its comment) that a user's own `user@<uid>.service` starts before
+/// activation settles, landing with a permanently broken `%h`/`$HOME="/"`
+/// specifier for that manager's entire lifetime: verified live that neither
+/// waiting nor `daemon-reload` ever fixes an already-running manager in
+/// this state, only restarting it does. This polls for the home to actually
+/// become `active`, then asks that user's own manager what it believes
+/// `$HOME` is; a mismatch means it started during the race, so restart it
+/// once. A manager that already has the right `$HOME`, or isn't running
+/// yet at all (it'll simply start fresh once this process's `setsid --fork`
+/// detaches and the home finishes activating), is left alone.
+fn session_heal_worker(args: &[String]) -> Result<(), String> {
+    let username = args
+        .first()
+        .ok_or("usage: session-heal-worker USERNAME")?
+        .clone();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut real_home = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(homes) = list_homes()
+            && let Some(entry) = homes.into_iter().find(|home| home.0 == username)
+            && entry.2 == "active"
+        {
+            real_home = Some(entry.5);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let Some(real_home) = real_home else {
+        // Never became active within the deadline; nothing to heal --
+        // either the login itself failed, or activation is stuck for a
+        // reason a restart won't fix either.
+        return Ok(());
+    };
+
+    let uid = list_homes()?
+        .into_iter()
+        .find(|home| home.0 == username)
+        .map(|home| home.1)
+        .ok_or_else(|| format!("{username} vanished from homed's list"))?;
+
+    let unit = format!("user@{uid}.service");
+    let manager_running = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", &unit])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !manager_running {
+        // Not started yet -- it'll pick up the now-active home correctly
+        // when it does.
+        return Ok(());
+    }
+
+    // `su` resets the environment for the target user, so a plain `.env()`
+    // on this Command never reaches the child shell -- confirmed live, it
+    // failed instantly with "$XDG_RUNTIME_DIR not defined" until exported
+    // inside the command string itself instead.
+    let output = std::process::Command::new("su")
+        .args([
+            &username,
+            "-s",
+            "/bin/sh",
+            "-c",
+            &format!("XDG_RUNTIME_DIR=/run/user/{uid} systemctl --user show-environment"),
+        ])
+        .output()
+        .map_err(|e| format!("querying {username}'s user manager: {e}"))?;
+    let reported_home = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("HOME="))
+        .map(str::to_owned);
+
+    if reported_home.as_deref() != Some(real_home.as_str()) {
+        let _ = std::process::Command::new("systemctl")
+            .args(["restart", &unit])
+            .status();
+    }
+    Ok(())
 }
 
 /// Create the first account from a GUI request sent on stdin. The command
@@ -451,6 +569,22 @@ fn create_first_user_account(
         // but the record format accepts the JSON boolean directly.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "rebalanceWeight": false,
+        // homed's auto-calibrated LUKS argon2id cost took 15-20+ seconds to
+        // unlock on this project's own reference VM (measured via repeated
+        // `ActivateHome` cycles) -- long enough that the user's own
+        // `user@<uid>.service` starts, and gets a stuck, never-self-healing
+        // %h/$HOME="/" (confirmed live: `systemctl --user` inside that
+        // specific manager stayed broken indefinitely; only restarting the
+        // whole manager fixed it), before the first login's home-activation
+        // retries finish. These costs still clear OWASP's argon2id minimum
+        // (19 MiB/t=2/p=1) with real margin, and brought a full
+        // ActivateHome cycle on that same VM down to under a second,
+        // verified live. The remaining race window this doesn't close is
+        // handled separately by evermore-session-heal.service.
+        "luksPbkdfType": "argon2id",
+        "luksPbkdfTimeCostUSec": 500_000,
+        "luksPbkdfMemoryCost": 64 * 1024 * 1024,
+        "luksPbkdfParallelThreads": 1,
         // The device owner administers their own machine. nss-systemd
         // resolves this dynamically (verified: `id` on a fresh homed
         // account already shows the wheel gid before the home is even
@@ -662,6 +796,13 @@ fn first_user() -> Result<(), String> {
         // use available free space regardless.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
         "rebalanceWeight": false,
+        // See the sibling luksPbkdf* comment in create_first_user_account:
+        // shrinks the window where the user's own session manager can start
+        // with a broken %h/$HOME before home activation finishes.
+        "luksPbkdfType": "argon2id",
+        "luksPbkdfTimeCostUSec": 500_000,
+        "luksPbkdfMemoryCost": 64 * 1024 * 1024,
+        "luksPbkdfParallelThreads": 1,
         // See the sibling memberOf comment in create_first_user_account:
         // the device owner administers their own machine via the packaged
         // %wheel sudoers rule.

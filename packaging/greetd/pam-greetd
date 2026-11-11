@@ -1,0 +1,17 @@
+#%PAM-1.0
+#
+# Replaces the greetd package's own stock /etc/pam.d/greetd (which is
+# identical minus the last line). Adds a hook that detects and self-heals
+# the race where a user's own `user@<uid>.service` starts before
+# systemd-homed's LUKS activation settles, landing with a permanently
+# broken %h/$HOME="/" for that manager's whole lifetime -- see
+# evermore-enroll's `session_heal`/`session_heal_worker` for the full
+# story and why this has to run as a detached background process rather
+# than block the login.
+
+auth       required     pam_securetty.so
+auth       requisite    pam_nologin.so
+auth       include      system-local-login
+account    include      system-local-login
+session    include      system-local-login
+session    optional     pam_exec.so quiet /usr/bin/evermore-enroll session-heal

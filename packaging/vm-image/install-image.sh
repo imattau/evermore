@@ -83,6 +83,9 @@ printf '{\n  "model": "evermore/p8.model.qwen2.5-1.5b.panel:1.0.0-dev.1"\n}\n' \
 chmod 0644 /etc/skel/.config/evermore/panel-ai.json
 install -m 0644 "$ROOT/packaging/pkcs11/evermore-pkcs11.module" /usr/share/p11-kit/modules/
 install -m 0644 "$ROOT/packaging/greetd/config.toml" /etc/greetd/config.toml
+# Overwrites the greetd package's own /etc/pam.d/greetd -- same stack, plus
+# the session-heal hook (see packaging/greetd/pam-greetd's own comment).
+install -m 0644 "$ROOT/packaging/greetd/pam-greetd" /etc/pam.d/greetd
 install -m 0440 "$ROOT/packaging/greetd/evermore-first-user.sudoers" /etc/sudoers.d/evermore-first-user
 visudo -cf /etc/sudoers.d/evermore-first-user
 # Numbered low so it sorts (and is processed) before any later, more

@@ -440,10 +440,17 @@ fn create_first_user_account(
         "homeDirectory": format!("/home/{username}"),
         "shell": "/bin/bash",
         "storage": "luks",
-        // Keep the home image bounded on the 32 GiB VM disk. Without this,
-        // homed's default can consume almost all free space, leaving too
-        // little room to activate the home after a reboot.
+        // Keep the home image bounded on the 32 GiB VM disk. diskSize alone
+        // is not enough: homed's automatic rebalancing grows a LUKS home to
+        // use whatever free space is available regardless of the diskSize
+        // it was created with (verified live -- a home created with this
+        // same diskSize but no rebalanceWeight grew to fill a 32 GiB disk
+        // across a few logins; "rebalanceWeight": false opts the account
+        // out of rebalancing entirely and the size held exactly). homectl's
+        // own --rebalance-weight= flag refuses 0 (its range is 1..10000),
+        // but the record format accepts the JSON boolean directly.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
+        "rebalanceWeight": false,
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": keys.public_key().to_bech32().map_err(|e| e.to_string())?,
@@ -641,7 +648,12 @@ fn first_user() -> Result<(), String> {
         "homeDirectory": format!("/home/{username}"),
         "shell": "/bin/bash",
         "storage": "luks",
+        // See the sibling diskSize/rebalanceWeight comment in
+        // create_first_user_account: diskSize alone does not cap a LUKS
+        // home's real size, since homed's automatic rebalancing grows it to
+        // use available free space regardless.
         "diskSize": 8 * 1024 * 1024 * 1024_u64,
+        "rebalanceWeight": false,
         "privileged": { "hashedPassword": [password_hash] },
         "evermore": {
             "npub": pubkey.to_bech32().map_err(|e| e.to_string())?,

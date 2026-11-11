@@ -17,14 +17,18 @@ ExecStartPre=/usr/bin/chmod 0700 %h/.local/state/evermore-indexd
 Restart=on-failure
 RestartSec=3
 UMask=0077
-RuntimeDirectory=evermore
-RuntimeDirectoryMode=0700
 StateDirectory=evermore-indexd
 StateDirectoryMode=0700
 Environment=EVERMORE_INDEX_STATE_DIR=%h/.local/state/evermore-indexd
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# Where the control socket (ai-indexd.sock) lives -- NOT under
+# RuntimeDirectory=/$XDG_RUNTIME_DIR: that gives each sandboxed unit its
+# own private, invisible-to-everyone-else runtime directory, so no other
+# process (including the unsandboxed evermore-panel) could ever reach a
+# socket bound there. See user_data_home() in evermore-common.
+ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX
 

@@ -1,6 +1,12 @@
 [Unit]
 Description=Evermore AI context service
 After=default.target
+# Enabled system-wide, so this also matches the greeter's own login (home
+# "/", no enrolled identity). Without this, ReadWritePaths=%h/.local/share/
+# evermore below resolves to /.local/share/evermore, which never exists for
+# that account. evermore-enroll creates this directory for every real
+# identity at account creation, so its absence means "not a real user yet".
+ConditionPathIsDirectory=%h/.local/share/evermore
 
 [Service]
 Type=simple
@@ -8,11 +14,15 @@ ExecStart=/usr/bin/evermore-contextd
 Restart=on-failure
 RestartSec=3
 UMask=0077
-RuntimeDirectory=evermore
-RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# Where the control socket (ai-contextd.sock) lives -- NOT under
+# RuntimeDirectory=/$XDG_RUNTIME_DIR: that gives each sandboxed unit its
+# own private, invisible-to-everyone-else runtime directory, so no other
+# process (including the unsandboxed evermore-panel) could ever reach a
+# socket bound there. See user_data_home() in evermore-common.
+ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX
 

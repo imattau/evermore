@@ -7,14 +7,37 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Path (relative to `$XDG_RUNTIME_DIR`) of the signer's Unix socket.
+/// Base directory for every Evermore daemon's control socket.
+///
+/// Deliberately NOT `$XDG_RUNTIME_DIR`: each of these daemons runs as its
+/// own `systemd --user` unit with `ProtectHome=read-only`, and `RuntimeDirectory=evermore`
+/// (or no RuntimeDirectory= at all) under that sandboxing gives each UNIT
+/// its own private, unit-scoped view of `$XDG_RUNTIME_DIR/evermore` --
+/// invisible to every other unit, and to the unsandboxed session (sway,
+/// evermore-panel) that is these daemons' actual client. Verified live: a
+/// socket bound under `$XDG_RUNTIME_DIR/evermore/` from inside one unit's
+/// sandbox cannot be opened by any other process, sandboxed or not, even
+/// with `JoinsNamespaceOf=` declared; the same socket bound under
+/// `$HOME/.local/share/evermore/` -- already a real, shared bind mount
+/// every one of these units exposes via `ReadWritePaths=%h/.local/share/evermore`
+/// -- is reachable from anywhere. Falls back to `/tmp` if neither
+/// `XDG_DATA_HOME` nor `HOME` is set, mainly so this doesn't panic outside
+/// a real session.
+pub fn user_data_home() -> std::path::PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+}
+
+/// Path (relative to [`user_data_home`]) of the signer's Unix socket.
 pub const SOCKET_RELATIVE_PATH: &str = "evermore/signer.sock";
 
-/// Resolves the signer socket path under `$XDG_RUNTIME_DIR` (falling back to
-/// `/tmp` if unset, mainly so this doesn't panic outside a real session).
+/// Resolves the signer socket path under [`user_data_home`].
 pub fn runtime_socket_path() -> std::path::PathBuf {
-    let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+    user_data_home().join(SOCKET_RELATIVE_PATH)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,8 +99,7 @@ pub mod operations {
     pub const SOCKET_RELATIVE_PATH: &str = "evermore/operationsd.sock";
 
     pub fn runtime_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1318,8 +1340,7 @@ pub mod ai {
     pub const MODEL_MANIFEST_VERSION: u32 = 1;
 
     pub fn runtime_infer_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(INFER_SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(INFER_SOCKET_RELATIVE_PATH)
     }
 
     /// Redact common credential-shaped values before selected text is embedded
@@ -2090,8 +2111,7 @@ pub mod ai_index {
     pub const PROTOCOL_VERSION: u32 = 1;
 
     pub fn runtime_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     pub fn config_file_path() -> std::path::PathBuf {
@@ -2165,8 +2185,7 @@ pub mod ai_context {
     pub const PROTOCOL_VERSION: u32 = 1;
 
     pub fn runtime_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     pub fn config_file_path() -> std::path::PathBuf {
@@ -2245,8 +2264,7 @@ pub mod settings {
     pub const SOCKET_RELATIVE_PATH: &str = "evermore/settingsd.sock";
 
     pub fn runtime_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2299,8 +2317,7 @@ pub mod notifications {
     pub const SOCKET_RELATIVE_PATH: &str = "evermore/notifyd.sock";
 
     pub fn runtime_socket_path() -> std::path::PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     /// Where a notification came from -- shown in the panel so the merged
@@ -2458,8 +2475,7 @@ pub mod agent {
     }
 
     pub fn runtime_socket_path() -> PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::Path::new(&base).join(SOCKET_RELATIVE_PATH)
+        crate::user_data_home().join(SOCKET_RELATIVE_PATH)
     }
 
     pub fn tasks_file_path() -> Result<PathBuf, String> {

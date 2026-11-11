@@ -13,12 +13,14 @@ ExecStart=/usr/bin/evermore-agentd serve --agent-identity %i-assistant --owner-i
 Restart=on-failure
 RestartSec=2
 UMask=0077
-RuntimeDirectory=evermore
-RuntimeDirectoryMode=0700
 
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# Also where the control socket (agentd.sock) lives -- NOT under
+# RuntimeDirectory=/$XDG_RUNTIME_DIR: that gives each sandboxed unit its
+# own private, invisible-to-everyone-else runtime directory. See
+# user_data_home() in evermore-common.
 ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX

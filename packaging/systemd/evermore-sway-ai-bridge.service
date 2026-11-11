@@ -8,10 +8,11 @@ ExecStart=/usr/bin/evermore-sway-ai-bridge
 Restart=on-failure
 RestartSec=3
 UMask=0077
-RuntimeDirectory=evermore
-RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 ProtectSystem=strict
+# Only ever connects to evermore-contextd's socket under
+# %h/.local/share/evermore, never writes there, so the default read-only
+# home bind from ProtectHome is enough -- no ReadWritePaths override.
 ProtectHome=read-only
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX

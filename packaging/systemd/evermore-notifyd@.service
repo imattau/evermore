@@ -15,6 +15,11 @@ RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+# Where the control socket (notifyd.sock) lives -- NOT under
+# RuntimeDirectory=/$XDG_RUNTIME_DIR: that gives each sandboxed unit its
+# own private, invisible-to-everyone-else runtime directory. See
+# user_data_home() in evermore-common.
+ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
 
 [Install]

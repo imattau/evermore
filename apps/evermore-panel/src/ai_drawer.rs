@@ -6,6 +6,7 @@
 //! snippet of text is a lightweight add-on, not the main event.
 
 use eframe::egui;
+use egui::AdaptiveLayout;
 use evermore_common::ai::Role;
 
 use crate::{
@@ -395,6 +396,12 @@ impl PanelApp {
         } else {
             egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
         };
+        // The drawer is normally 400 points wide, but Sway can shrink it
+        // when the workspace is split. Keep a useful multiline composer
+        // without letting it crowd out the attach and send controls.
+        let desired_rows = AdaptiveLayout::breakpoint(340.0)
+            .show(ui, |_| 3, |_| 2)
+            .inner;
         egui::Frame::new()
             .stroke(border)
             .corner_radius(10)
@@ -407,7 +414,7 @@ impl PanelApp {
                         } else {
                             "Ask locally, or drop a file in to give it context"
                         })
-                        .desired_rows(3)
+                        .desired_rows(desired_rows)
                         .frame(egui::Frame::NONE),
                 );
             });

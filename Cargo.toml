@@ -4,3 +4,11 @@ members = ["apps/evermore-greeter", "apps/evermore-panel", "crates/evermore-agen
 
 [workspace.package]
 edition = "2024"
+
+[patch.crates-io]
+eframe = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+egui = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+egui-wgpu = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+egui-winit = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+egui_extras = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+egui_glow = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }

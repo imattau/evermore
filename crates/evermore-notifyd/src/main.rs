@@ -82,6 +82,7 @@ fn main() {
     }
 
     spawn_approval_monitor();
+    spawn_dnd_schedule();
 
     if let Err(e) = serve(store) {
         eprintln!("error: {e}");
@@ -101,6 +102,9 @@ fn notify(appname: &str, summary: &str, body: &str) {
 }
 
 fn handle_local_event(event: Event, store: &NotificationStore) {
+    if !settings_client::notification_source_enabled("local_enabled") {
+        return;
+    }
     let record = NotificationRecord {
         id: String::new(),
         source: Source::Local,
@@ -113,6 +117,9 @@ fn handle_local_event(event: Event, store: &NotificationStore) {
 }
 
 fn handle_mention(event: Event, store: &NotificationStore) {
+    if !settings_client::notification_source_enabled("mentions_enabled") {
+        return;
+    }
     let short_pubkey = short(&event.pubkey.to_hex());
     let record = NotificationRecord {
         id: String::new(),
@@ -130,6 +137,9 @@ fn handle_mention(event: Event, store: &NotificationStore) {
 }
 
 fn handle_gift_wrap(event: Event, signer: &SignerClient, store: &NotificationStore) {
+    if !settings_client::notification_source_enabled("messages_enabled") {
+        return;
+    }
     let rumor = match gift_wrap::unwrap(signer, &event) {
         Ok(r) => r,
         Err(e) => {
@@ -371,6 +381,83 @@ fn set_dnd(enabled: bool) -> Result<serde_json::Value, String> {
         ));
     }
     Ok(serde_json::json!({ "dnd": dnd }))
+}
+
+/// Applies the identity's quiet-hours schedule on this device. The system
+/// `date` command supplies local time so the schedule follows timezone and
+/// daylight-saving changes without a new timezone dependency.
+fn spawn_dnd_schedule() {
+    std::thread::spawn(|| {
+        let mut last_applied = None;
+        loop {
+            match settings_client::notification_schedule() {
+                Ok(Some((start, end))) => match current_local_minute() {
+                    Ok(now) => match quiet_hours_active(&start, &end, now) {
+                        Ok(active) if last_applied != Some(active) => {
+                            match set_dnd(active) {
+                                Ok(_) => last_applied = Some(active),
+                                Err(error) => eprintln!("evermore-notifyd: quiet-hours DND: {error}"),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => eprintln!("evermore-notifyd: quiet-hours schedule: {error}"),
+                    },
+                    Err(error) => eprintln!("evermore-notifyd: local clock: {error}"),
+                },
+                Ok(None) => {
+                    if last_applied.is_some() {
+                        if let Err(error) = set_dnd(false) {
+                            eprintln!("evermore-notifyd: clearing scheduled DND: {error}");
+                        }
+                        last_applied = None;
+                    }
+                }
+                Err(error) => eprintln!("evermore-notifyd: quiet-hours settings: {error}"),
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+}
+
+fn current_local_minute() -> Result<u16, String> {
+    let output = std::process::Command::new("date")
+        .arg("+%H:%M")
+        .output()
+        .map_err(|error| format!("running date: {error}"))?;
+    if !output.status.success() {
+        return Err("date could not read the local time".into());
+    }
+    let value = String::from_utf8_lossy(&output.stdout);
+    parse_clock_minute(value.trim())
+}
+
+fn parse_clock_minute(value: &str) -> Result<u16, String> {
+    let Some((hour, minute)) = value.split_once(':') else {
+        return Err(format!("expected HH:MM, got {value:?}"));
+    };
+    let hour = hour
+        .parse::<u16>()
+        .map_err(|_| format!("invalid hour in {value:?}"))?;
+    let minute = minute
+        .parse::<u16>()
+        .map_err(|_| format!("invalid minute in {value:?}"))?;
+    if hour > 23 || minute > 59 {
+        return Err(format!("time is outside 00:00–23:59: {value:?}"));
+    }
+    Ok(hour * 60 + minute)
+}
+
+fn quiet_hours_active(start: &str, end: &str, now: u16) -> Result<bool, String> {
+    let start = parse_clock_minute(start)?;
+    let end = parse_clock_minute(end)?;
+    if start == end {
+        return Ok(false);
+    }
+    Ok(if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    })
 }
 
 fn dnd_flag(enabled: bool) -> &'static str {

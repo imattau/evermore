@@ -345,6 +345,36 @@ fn focused_output_name(outputs_json: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn show_relay_test_result(
+    ui: &mut egui::Ui,
+    relay: &str,
+    results: &HashMap<String, Option<Result<(), String>>>,
+) {
+    match results.get(relay) {
+        Some(None) => {
+            ui.weak("Testing relay connection…");
+        }
+        Some(Some(Ok(()))) => {
+            ui.colored_label(egui::Color32::from_rgb(95, 190, 140), "Relay connection succeeded.");
+        }
+        Some(Some(Err(error))) => {
+            ui.colored_label(ui.visuals().error_fg_color, "Relay connection failed.");
+            ui.weak(error);
+        }
+        None => {}
+    }
+}
+
+fn is_clock_time(value: &str) -> bool {
+    let Some((hour, minute)) = value.split_once(':') else {
+        return false;
+    };
+    hour.len() == 2
+        && minute.len() == 2
+        && hour.parse::<u8>().is_ok_and(|value| value <= 23)
+        && minute.parse::<u8>().is_ok_and(|value| value <= 59)
+}
+
 /// Placeholder tabs for the daemons this panel will eventually talk to
 /// (signer, settings, notifications, packages). Phase 1 wires the first
 /// one up for real.
@@ -372,6 +402,17 @@ struct PanelApp {
     settings_error: Option<String>,
     settings_status: Option<String>,
     settings_loaded: bool,
+    external_relays: Vec<String>,
+    relays_loaded: bool,
+    relays_error: Option<String>,
+    relay_input: String,
+    relay_test_results: HashMap<String, Option<Result<(), String>>>,
+    relay_test_rx: Option<Receiver<(String, Result<(), String>)>>,
+    notification_preferences: serde_json::Map<String, Value>,
+    notification_preferences_loaded: bool,
+    notification_preferences_error: Option<String>,
+    quiet_start_input: String,
+    quiet_end_input: String,
     notifications_error: Option<String>,
     operations: Vec<Definition>,
     operations_error: Option<String>,
@@ -1022,6 +1063,163 @@ impl PanelApp {
                 self.settings_status = None;
                 self.settings_error = Some(error);
             }
+        }
+    }
+
+    fn refresh_external_relays(&mut self) {
+        self.relays_loaded = true;
+        match settings_client::get_domain("relays") {
+            Ok(map) => {
+                self.external_relays = map
+                    .get("external")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.relays_error = None;
+            }
+            Err(error) => {
+                self.external_relays.clear();
+                self.relays_error = Some(error);
+            }
+        }
+    }
+
+    fn save_external_relays(&mut self, relays: Vec<String>) {
+        match settings_client::set(
+            "relays",
+            "external",
+            serde_json::json!(relays),
+        ) {
+            Ok(()) => {
+                self.external_relays = relays;
+                self.relays_error = None;
+                self.settings_status = Some(
+                    "Relay list saved. Restart Notifications to apply subscription changes."
+                        .into(),
+                );
+            }
+            Err(error) => self.relays_error = Some(error),
+        }
+    }
+
+    fn start_relay_test(&mut self, relay: String) {
+        if self.relay_test_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.relay_test_rx = Some(rx);
+        self.relay_test_results.insert(relay.clone(), None);
+        std::thread::spawn(move || {
+            let result = relay_client::query(
+                &relay,
+                serde_json::json!({"kinds": [1], "limit": 1}),
+            )
+            .map(|_| ());
+            let _ = tx.send((relay, result));
+        });
+    }
+
+    fn poll_relay_tests(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.relay_test_rx else {
+            return;
+        };
+        while let Ok((relay, result)) = rx.try_recv() {
+            self.relay_test_results.insert(relay, Some(result));
+        }
+        if self.relay_test_results.values().all(Option::is_some) {
+            self.relay_test_rx = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn refresh_notification_preferences(&mut self) {
+        self.notification_preferences_loaded = true;
+        match settings_client::get_domain("notifications") {
+            Ok(preferences) => {
+                self.quiet_start_input = preferences
+                    .get("quiet_start")
+                    .and_then(Value::as_str)
+                    .unwrap_or("22:00")
+                    .to_owned();
+                self.quiet_end_input = preferences
+                    .get("quiet_end")
+                    .and_then(Value::as_str)
+                    .unwrap_or("07:00")
+                    .to_owned();
+                self.notification_preferences = preferences;
+                self.notification_preferences_error = None;
+            }
+            Err(error) => self.notification_preferences_error = Some(error),
+        }
+    }
+
+    fn set_notification_preference(&mut self, key: &str, enabled: bool) {
+        match settings_client::set("notifications", key, enabled.into()) {
+            Ok(()) => {
+                self.notification_preferences
+                    .insert(key.to_owned(), enabled.into());
+                self.notification_preferences_error = None;
+            }
+            Err(error) => self.notification_preferences_error = Some(error),
+        }
+    }
+
+    fn save_notification_schedule(&mut self, enabled: bool) {
+        if !is_clock_time(&self.quiet_start_input) || !is_clock_time(&self.quiet_end_input) {
+            self.notification_preferences_error =
+                Some("Use 24-hour times in HH:MM format, from 00:00 to 23:59.".into());
+            return;
+        }
+        if let Err(error) = settings_client::set(
+            "notifications",
+            "schedule_enabled",
+            Value::Bool(false),
+        ) {
+            self.notification_preferences_error = Some(error);
+            return;
+        }
+        self.notification_preferences
+            .insert("schedule_enabled".into(), Value::Bool(false));
+        for (key, value) in [
+            ("quiet_start", Value::String(self.quiet_start_input.clone())),
+            ("quiet_end", Value::String(self.quiet_end_input.clone())),
+        ] {
+            if let Err(error) = settings_client::set("notifications", key, value.clone()) {
+                self.notification_preferences_error = Some(error);
+                return;
+            }
+            self.notification_preferences.insert(key.to_owned(), value);
+        }
+        if let Err(error) = settings_client::set(
+            "notifications",
+            "schedule_enabled",
+            Value::Bool(enabled),
+        ) {
+            self.notification_preferences_error = Some(error);
+            return;
+        }
+        self.notification_preferences.insert(
+            "schedule_enabled".into(),
+            Value::Bool(enabled),
+        );
+        self.notification_preferences_error = None;
+    }
+
+    fn disable_notification_schedule(&mut self) {
+        match settings_client::set("notifications", "schedule_enabled", Value::Bool(false)) {
+            Ok(()) => {
+                self.notification_preferences
+                    .insert("schedule_enabled".into(), Value::Bool(false));
+                self.notification_preferences_error = None;
+            }
+            Err(error) => self.notification_preferences_error = Some(error),
         }
     }
 
@@ -3566,6 +3764,13 @@ impl eframe::App for PanelApp {
                     self.refresh_theme();
                     apply_theme_settings(ui.ctx(), &self.theme_domain);
                 }
+                if !self.relays_loaded {
+                    self.refresh_external_relays();
+                }
+                if !self.notification_preferences_loaded {
+                    self.refresh_notification_preferences();
+                }
+                self.poll_relay_tests(ui.ctx());
                 ui.heading("Settings");
                 ui.weak(
                     "Appearance follows your identity across devices. Desktop and hardware preferences stay on this device.",
@@ -3689,18 +3894,181 @@ impl eframe::App for PanelApp {
                             ("text_scale", serde_json::json!(1.0)),
                             ("reduced_motion", serde_json::json!(false)),
                         ];
+                        let mut reset_error = None;
                         for (key, value) in defaults {
                             if let Err(error) = settings_client::set("theme", key, value) {
-                                self.settings_error = Some(error);
-                                self.settings_status = None;
+                                reset_error = Some(error);
                                 break;
                             }
                         }
                         self.theme_mode_override = None;
                         self.refresh_theme();
                         apply_theme_settings(ui.ctx(), &self.theme_domain);
-                        if self.settings_error.is_none() {
+                        if let Some(error) = reset_error {
+                            self.settings_error = Some(error);
+                            self.settings_status = None;
+                        } else {
                             self.settings_status = Some("Appearance reset and synced.".into());
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    section_heading(ui, "Network and relays");
+                    ui.weak(
+                        "The local control-plane relay stays on this device. External relay choices sync with your identity.",
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Local relay");
+                        ui.monospace(relay_client::DEFAULT_RELAY_URL);
+                        if ui.small_button("Test").clicked() {
+                            self.start_relay_test(relay_client::DEFAULT_RELAY_URL.to_owned());
+                        }
+                    });
+                    show_relay_test_result(
+                        ui,
+                        relay_client::DEFAULT_RELAY_URL,
+                        &self.relay_test_results,
+                    );
+
+                    if let Some(error) = self.relays_error.clone() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Couldn't load relay settings.",
+                        );
+                        ui.weak(error);
+                        if ui.button("Retry").clicked() {
+                            self.refresh_external_relays();
+                        }
+                    }
+
+                    for (index, relay) in self.external_relays.clone().iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.monospace(relay);
+                            if ui.small_button("Test").clicked() {
+                                self.start_relay_test(relay.clone());
+                            }
+                            if ui
+                                .small_button("↑")
+                                .on_hover_text("Move relay earlier")
+                                .clicked()
+                                && index > 0
+                            {
+                                let mut updated = self.external_relays.clone();
+                                updated.swap(index, index - 1);
+                                self.save_external_relays(updated);
+                            }
+                            if ui
+                                .small_button("↓")
+                                .on_hover_text("Move relay later")
+                                .clicked()
+                                && index + 1 < self.external_relays.len()
+                            {
+                                let mut updated = self.external_relays.clone();
+                                updated.swap(index, index + 1);
+                                self.save_external_relays(updated);
+                            }
+                            if ui.small_button("Remove").clicked() {
+                                let updated = self
+                                    .external_relays
+                                    .iter()
+                                    .filter(|url| *url != relay)
+                                    .cloned()
+                                    .collect();
+                                self.save_external_relays(updated);
+                            }
+                        });
+                        show_relay_test_result(ui, relay, &self.relay_test_results);
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.relay_input)
+                                .hint_text("wss://relay.example"),
+                        );
+                        if ui.button("Add relay").clicked() {
+                            let candidate = self.relay_input.trim().to_owned();
+                            if !(candidate.starts_with("ws://") || candidate.starts_with("wss://")) {
+                                self.relays_error = Some(
+                                    "Enter a relay address beginning with ws:// or wss://.".into(),
+                                );
+                            } else if self.external_relays.iter().any(|url| url == &candidate) {
+                                self.relays_error = Some("That relay is already listed.".into());
+                            } else {
+                                let mut updated = self.external_relays.clone();
+                                updated.push(candidate);
+                                self.save_external_relays(updated);
+                                self.relay_input.clear();
+                            }
+                        }
+                    });
+                    ui.weak(
+                        "Relay subscription changes take effect after the Notifications service restarts. Testing checks relay connectivity without publishing.",
+                    );
+                });
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    section_heading(ui, "Notification sources");
+                    ui.weak(
+                        "Choose which Evermore sources appear in the inbox. Other desktop apps are unaffected.",
+                    );
+                    let mut schedule_enabled = self
+                        .notification_preferences
+                        .get("schedule_enabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if ui.checkbox(&mut schedule_enabled, "Schedule quiet hours").changed() {
+                        if schedule_enabled {
+                            self.save_notification_schedule(true);
+                        } else {
+                            self.disable_notification_schedule();
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("From");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quiet_start_input)
+                                .desired_width(72.0)
+                                .hint_text("22:00"),
+                        );
+                        ui.label("until");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quiet_end_input)
+                                .desired_width(72.0)
+                                .hint_text("07:00"),
+                        );
+                        if ui.button("Save hours").clicked() {
+                            self.save_notification_schedule(schedule_enabled);
+                        }
+                    });
+                    ui.weak(
+                        "Uses this device's local time. Quiet hours control SwayNC DND; scheduled changes are checked every 30 seconds.",
+                    );
+                    for (key, label) in [
+                        ("local_enabled", "Local system notices"),
+                        ("mentions_enabled", "Mentions"),
+                        ("messages_enabled", "Direct messages"),
+                    ] {
+                        let mut enabled = self
+                            .notification_preferences
+                            .get(key)
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        if ui.checkbox(&mut enabled, label).changed() {
+                            self.set_notification_preference(key, enabled);
+                        }
+                    }
+                    if let Some(error) = self.notification_preferences_error.clone() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Couldn't load or save notification preferences.",
+                        );
+                        ui.weak(error);
+                        if ui.button("Retry preferences").clicked() {
+                            self.refresh_notification_preferences();
                         }
                     }
                 });

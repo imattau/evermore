@@ -4,6 +4,15 @@ This roadmap turns the basics checklist into readiness-gated work for the
 Arch-based Sway/Waybar prototype. Existing features remain experimental until
 their phase gate has evidence in `application-readiness.md`.
 
+## Current implementation progress
+
+- **Phase 1:** appearance controls, synced save feedback, and reset are
+  implemented in the panel. The full readiness gate has not been verified.
+- **Phase 2:** external relay management/testing, notification source controls,
+  and local-time quiet-hours DND are implemented. Identity/device management,
+  live relay subscription refresh, and the phase acceptance gate remain open.
+- **Phases 3–6:** planned; implementation and acceptance evidence remain open.
+
 ## Phase 1 — Settings foundation and appearance
 
 **Deliver:** organized Settings sections; saved-state, retry, reset, and

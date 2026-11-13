@@ -22,6 +22,37 @@ pub fn external_relay_urls() -> Vec<String> {
     }
 }
 
+/// Returns whether a notification source is enabled. Missing settings or an
+/// unavailable settings service preserve the previous default-on behavior.
+pub fn notification_source_enabled(key: &str) -> bool {
+    get_domain("notifications")
+        .ok()
+        .and_then(|map| map.get(key).cloned())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+/// Returns the identity's quiet-hours schedule when one is enabled.
+pub fn notification_schedule() -> Result<Option<(String, String)>, String> {
+    let map = get_domain("notifications")?;
+    if !map
+        .get("schedule_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let start = map
+        .get("quiet_start")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "quiet-hours start time is missing".to_string())?;
+    let end = map
+        .get("quiet_end")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "quiet-hours end time is missing".to_string())?;
+    Ok(Some((start.to_owned(), end.to_owned())))
+}
+
 fn get_domain(domain: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let path = evermore_common::settings::runtime_socket_path();
     let mut stream = UnixStream::connect(&path).map_err(|e| e.to_string())?;

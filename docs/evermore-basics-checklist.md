@@ -82,6 +82,10 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
 - Appearance is stored through `evermore-settingsd` and syncs by identity.
   The panel now exposes theme, accent, density, text scale, reduced motion,
   save feedback, and reset controls, alongside its technical debug disclosure.
+- Settings now includes external relay add/remove/reorder and connection
+  checks, source-level notification controls, and scheduled quiet hours using
+  local device time. External relay subscription changes require restarting
+  `evermore-notifyd`; source toggles and the DND schedule take effect live.
 - The project readiness notes identify interruption, unavailable-service,
   keyboard/focus, accessible error recovery, and settings persistence as areas
   that still need end-to-end acceptance.

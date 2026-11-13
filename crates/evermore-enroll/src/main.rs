@@ -714,17 +714,67 @@ fn create_first_user_account(
         }
     }
     create_result?;
-    activate_with_password(username, password)?;
 
-    let (uid, gid) = list_homes()?
-        .into_iter()
-        .find(|home| home.0 == username)
-        .map(|home| (home.1, home.3))
-        .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
-    install_identity_secret(username, uid, gid, &keys)?;
-    enable_identity_services(username, uid, gid)?;
-    write_greeter_profile(&keys.public_key().to_hex(), display_name)?;
-    write_first_user_marker()
+    // Once CreateHome succeeds, every later operation belongs to this
+    // enrollment attempt. Roll back only this newly-created account if any
+    // step fails, so greetd never strands the machine with an account that
+    // looks enrolled but cannot sign in to Evermore. A power loss cannot run
+    // this cleanup; startup recovery for that case remains a separate gate.
+    let pubkey_hex = keys.public_key().to_hex();
+    let setup_result = (|| {
+        activate_with_password(username, password)?;
+
+        let (uid, gid) = list_homes()?
+            .into_iter()
+            .find(|home| home.0 == username)
+            .map(|home| (home.1, home.3))
+            .ok_or_else(|| "created home is missing from homed's user list".to_string())?;
+        install_identity_secret(username, uid, gid, &keys)?;
+        enable_identity_services(username, uid, gid)?;
+        write_greeter_profile(&pubkey_hex, display_name)?;
+        write_first_user_marker()
+    })();
+
+    if let Err(error) = setup_result {
+        return match rollback_first_user(username, &pubkey_hex) {
+            Ok(()) => Err(format!(
+                "{error}; the incomplete account was removed, so setup can be retried"
+            )),
+            Err(cleanup_error) => Err(format!(
+                "{error}; automatic cleanup also failed ({cleanup_error}). Do not remove other homed accounts; inspect {username} before retrying."
+            )),
+        };
+    }
+    Ok(())
+}
+
+/// Remove only the account just created by this first-user transaction.
+/// Failure cleanup is best-effort for activation, but account removal must
+/// succeed before we tell the greeter that retry is safe.
+fn rollback_first_user(username: &str, pubkey_hex: &str) -> Result<(), String> {
+    let connection = system_connection()?;
+    let _ = connection.call_method(
+        Some(DESTINATION),
+        PATH,
+        Some(INTERFACE),
+        "DeactivateHome",
+        &(username,),
+    );
+    connection
+        .call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(INTERFACE),
+            "RemoveHome",
+            &(username,),
+        )
+        .map_err(|e| format!("removing incomplete homed account {username}: {e}"))?;
+    let profile = PathBuf::from("/var/lib/evermore-profiles").join(pubkey_hex);
+    if profile.exists() {
+        std::fs::remove_dir_all(&profile)
+            .map_err(|e| format!("removing incomplete greeter profile: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Enable the per-identity user services needed by the desktop control plane.

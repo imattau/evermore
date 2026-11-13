@@ -6,7 +6,7 @@ STAGE="${1:?usage: install-image.sh STAGE_DIR}"
 MODEL_STORE="${2:?usage: install-image.sh STAGE_DIR MODEL_STORE_DIR}"
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-bins=(evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-relay-supervisor \
+bins=(evermore-greeter evermore-enroll evermore-signer evermore-panel evermore-launcher evermore-relay-supervisor \
   evermore-contextd evermore-indexd evermore-inferd evermore-npack evermore-operationsd \
   evermore-notifyd evermore-settingsd evermore-blossom-fs evermore-sway-ai-bridge evermore-agentd npack npack-gui)
 for bin in "${bins[@]}"; do
@@ -29,7 +29,7 @@ done
 
 install -d /usr/bin /usr/lib/pkcs11 /usr/lib/security /usr/share/p11-kit/modules /usr/lib/systemd/user \
   /etc/greetd /etc/sudoers.d /etc/skel/.config/sway /etc/skel/.config/waybar \
-  /etc/skel/.config/wofi /etc/skel/.config/fuzzel /etc/skel/.config/swaync \
+  /etc/skel/.config/fuzzel /etc/skel/.config/swaync \
   /etc/skel/.config/evermore /etc/skel/.config/npack \
   /etc/skel/.local/share/applications /var/lib/evermore-profiles \
   /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/metainfo
@@ -49,7 +49,7 @@ trap 'rm -rf "$NPK_WORK"' EXIT
 # per-session over stdio by an external MCP client's own config, not run as
 # a daemon here) -- packaging a binary that was never copied to /usr/bin
 # would be registering something this image doesn't actually ship.
-for package in settingsd notifyd blossom-fs contextd indexd inferd operationsd agentd sway-ai-bridge panel; do
+for package in settingsd notifyd blossom-fs contextd indexd inferd operationsd agentd sway-ai-bridge panel launcher; do
   npk="$NPK_WORK/evermore-$package-0.1.0.npk"
   NPACK_BIN=/usr/bin/npack "$ROOT/packaging/npack/pack-for-image.sh" "$package" 0.1.0 "$ROOT" "$STAGE/bin" "$npk"
   HOME=/etc/skel XDG_DATA_HOME= /usr/bin/npack install "$npk" --user
@@ -68,7 +68,13 @@ sed -e 's/@VERSION@/0.9.4/' -e "s/@DATE@/$(date -u +%F)/" \
 install -m 0644 "$STAGE/systemd/user/npackd.service" /usr/lib/systemd/user/
 install -m 0644 "$ROOT/packaging/npack/default-config.toml" /etc/skel/.config/npack/config.toml
 install -D -m 0644 "$ROOT/packaging/xdg/mimeapps.list" /etc/xdg/mimeapps.list
+# Ship one generated fallback locale so the first-boot System settings page
+# can offer a valid choice on a clean Arch image.
+sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+printf 'LANG=en_US.UTF-8\n' > /etc/locale.conf
 desktop-file-validate /usr/share/applications/io.npack.Gui.desktop
+desktop-file-validate "$ROOT/packaging/applications/org.evermore.Launcher.desktop"
 update-desktop-database /usr/share/applications
 install -m 0755 "$STAGE/lib/evermore-pkcs11.so" /usr/lib/pkcs11/evermore-pkcs11.so
 install -m 0755 "$STAGE/lib/pam_evermore_phone.so" /usr/lib/security/pam_evermore_phone.so
@@ -120,8 +126,6 @@ install -m 0644 "$ROOT/packaging/sway/evermore-waybar.conf" /etc/skel/.config/sw
 install -m 0644 /etc/sway/config /etc/skel/.config/sway/config
 install -m 0644 "$ROOT/packaging/waybar/config" /etc/skel/.config/waybar/
 install -m 0644 "$ROOT/packaging/waybar/style.css" /etc/skel/.config/waybar/
-install -m 0644 "$ROOT/packaging/wofi/config" /etc/skel/.config/wofi/
-install -m 0644 "$ROOT/packaging/wofi/style.css" /etc/skel/.config/wofi/
 install -m 0644 "$ROOT/packaging/fuzzel/fuzzel.ini" /etc/skel/.config/fuzzel/
 install -m 0644 "$ROOT/packaging/swaync/config.json" /etc/skel/.config/swaync/
 install -m 0644 "$ROOT/packaging/swaync/style.css" /etc/skel/.config/swaync/
@@ -139,7 +143,7 @@ for unit in evermore-signer.service evermore-relay.service evermore-contextd.ser
   ln -sfn "../$unit" "/usr/lib/systemd/user/default.target.wants/$unit"
 done
 chmod 1777 /var/lib/evermore-profiles
-systemctl enable systemd-homed.service greetd.service NetworkManager.service seatd.service
+systemctl enable systemd-homed.service greetd.service NetworkManager.service seatd.service bluetooth.service
 systemctl enable evermore-first-user.service
 systemctl set-default graphical.target
 

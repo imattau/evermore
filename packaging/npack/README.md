@@ -37,6 +37,7 @@ build if the one on `PATH` predates it.
 | `sway-ai-bridge` | `contextd` | `evermore-sway-ai-bridge.service` |
 | `mcp` | `operationsd` | *(none -- spawned per-session over stdio by an MCP client, not run as a daemon)* |
 | `panel` | — | *(none -- a GUI app, launched manually/via a `.desktop` entry)* |
+| `launcher` | — | *(none -- a GUI app, launched by Sway or its `.desktop` entry)* |
 
 Not packaged: `evermore-signer`, the local relay, `evermore-enroll`, and
 `evermore-pkcs11` stay baked into the ISO -- npack's own `install`/
@@ -97,8 +98,8 @@ packaging/npack/build-and-publish.sh settingsd \
 ```
 
 This builds the release binary, runs `npack init`/`pack` to produce a
-real `.npk` (with `dependencies` and a `register-service` post-install
-action filled in from the table above), uploads it as a `v0.1.0` asset
+real `.npk` (with dependencies and a `register-service` action where the
+table above specifies one), uploads it as a `v0.1.0` asset
 on this repo's GitHub Releases (`gh release upload --clobber`, so
 re-running after a fix replaces it), and runs `npack publish
 --artifact-url` against that asset -- no `--server` needed at all.

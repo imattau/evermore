@@ -5,14 +5,18 @@ mod ai_handoff;
 mod ai_index_client;
 mod ai_infer_client;
 mod ai_session_client;
+mod blossom_status;
 mod launcher_ai;
 mod nostr_feed;
 mod nostr_feed_client;
+mod npack_client;
 mod operations_client;
+mod profile_settings;
 mod relay_client;
 mod settings_client;
 mod signer_client;
 mod sway_windows;
+mod system_settings;
 
 use ai_session_client::{ContextGrant, ContextScope, RefreshPolicy, Session};
 use eframe::egui;
@@ -20,6 +24,8 @@ use evermore_common::ai::{Backend, Message, Role};
 use evermore_common::operations::Definition;
 use serde_json::Value;
 use signer_client::Identity;
+use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
 
 // Lucide icons (ISC license, see assets/icons/LICENSE), 24px / 2px-stroke
 // per the Evermore Graphite design note.
@@ -30,6 +36,7 @@ const ICON_SPARKLES: &[u8] = include_bytes!("../assets/icons/sparkles.svg");
 const ICON_AGENTS: &[u8] = include_bytes!("../assets/icons/agents.svg");
 const ICON_PACKAGE: &[u8] = include_bytes!("../assets/icons/package.svg");
 const ICON_COPY: &[u8] = include_bytes!("../assets/icons/copy.svg");
+const ICON_HELP: &[u8] = include_bytes!("../assets/icons/help.svg");
 
 pub(crate) use evermore_common::agent::ProposalDraft as AiOperationProposal;
 
@@ -355,7 +362,10 @@ fn show_relay_test_result(
             ui.weak("Testing relay connection…");
         }
         Some(Some(Ok(()))) => {
-            ui.colored_label(egui::Color32::from_rgb(95, 190, 140), "Relay connection succeeded.");
+            ui.colored_label(
+                egui::Color32::from_rgb(95, 190, 140),
+                "Relay connection succeeded.",
+            );
         }
         Some(Some(Err(error))) => {
             ui.colored_label(ui.visuals().error_fg_color, "Relay connection failed.");
@@ -375,6 +385,77 @@ fn is_clock_time(value: &str) -> bool {
         && minute.parse::<u8>().is_ok_and(|value| value <= 59)
 }
 
+fn is_valid_pubkey_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn export_diagnostics() -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let directory = evermore_common::user_data_home().join("evermore/diagnostics");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    let path = directory.join(format!("diagnostics-{timestamp}.txt"));
+    let mut report = String::from("Evermore diagnostic summary\n");
+
+    let kernel = std::process::Command::new("uname")
+        .args(["-s", "-r", "-m"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|_| "unavailable".into());
+    report.push_str(&format!("Kernel: {kernel}\n"));
+
+    let units = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "--no-pager",
+            "--plain",
+            "--no-legend",
+            "list-units",
+            "--all",
+            "--type=service",
+        ])
+        .output();
+    report.push_str("Evermore user services:\n");
+    if let Ok(output) = units {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let Some(unit) = fields.next() else { continue };
+            if !unit.starts_with("evermore-") && unit != "npackd.service" {
+                continue;
+            }
+            let load = fields.next().unwrap_or("unknown");
+            let active = fields.next().unwrap_or("unknown");
+            let sub = fields.next().unwrap_or("unknown");
+            let normalized_unit = unit
+                .split_once('@')
+                .map(|(base, _)| format!("{base}@*"))
+                .unwrap_or_else(|| unit.to_owned());
+            report.push_str(&format!("  {normalized_unit}: {load}/{active}/{sub}\n"));
+        }
+    } else {
+        report.push_str("  unavailable\n");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    use std::io::Write;
+    file.write_all(report.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
 /// Placeholder tabs for the daemons this panel will eventually talk to
 /// (signer, settings, notifications, packages). Phase 1 wires the first
 /// one up for real.
@@ -386,6 +467,7 @@ enum Tab {
     Notifications,
     Ai,
     Agents,
+    Help,
 }
 
 #[derive(Default)]
@@ -405,6 +487,7 @@ struct PanelApp {
     external_relays: Vec<String>,
     relays_loaded: bool,
     relays_error: Option<String>,
+    relay_restart_needed: bool,
     relay_input: String,
     relay_test_results: HashMap<String, Option<Result<(), String>>>,
     relay_test_rx: Option<Receiver<(String, Result<(), String>)>>,
@@ -413,6 +496,22 @@ struct PanelApp {
     notification_preferences_error: Option<String>,
     quiet_start_input: String,
     quiet_end_input: String,
+    trusted_publishers: Vec<String>,
+    trusted_publishers_loaded: bool,
+    trusted_publishers_error: Option<String>,
+    trusted_publishers_rx: Option<Receiver<Result<Vec<String>, String>>>,
+    trusted_publishers_action: bool,
+    trusted_publisher_input: String,
+    pending_trust_change: Option<(String, bool)>,
+    publisher_action_error: Option<String>,
+    package_update_plan: Option<Value>,
+    package_update_error: Option<String>,
+    package_update_rx: Option<Receiver<Result<Value, String>>>,
+    profile_settings: profile_settings::State,
+    blossom_status: blossom_status::State,
+    system_settings: system_settings::SystemSettingsState,
+    help_query: String,
+    diagnostics_status: Option<String>,
     notifications_error: Option<String>,
     operations: Vec<Definition>,
     operations_error: Option<String>,
@@ -495,6 +594,11 @@ struct PanelApp {
     ai_sessions_loaded: bool,
     ai_session_id: String,
     ai_session_name: String,
+    ai_retention_days: u64,
+    ai_retention_loaded: bool,
+    ai_retention_error: Option<String>,
+    ai_retention_status: Option<String>,
+    pending_ai_retention: Option<u64>,
     ai_models: Vec<evermore_common::ai::Model>,
     ai_models_loaded: bool,
     ai_preferences_loaded: bool,
@@ -739,9 +843,13 @@ impl PanelApp {
 
     fn load_ai_sessions(&mut self) {
         self.ai_sessions_loaded = true;
+        self.load_ai_retention();
         match ai_session_client::load() {
             Ok(sessions) => {
                 self.ai_sessions = sessions;
+                if self.ai_retention_error.is_none() {
+                    self.prune_expired_ai_sessions();
+                }
                 if let Some(session) = self.ai_sessions.last().cloned() {
                     self.select_ai_session(&session.id);
                 } else {
@@ -750,6 +858,64 @@ impl PanelApp {
             }
             Err(error) => self.ai_chat_error = Some(error),
         }
+    }
+
+    fn load_ai_retention(&mut self) {
+        self.ai_retention_loaded = true;
+        match settings_client::get_domain("ai-privacy") {
+            Ok(settings) => {
+                self.ai_retention_days = settings
+                    .get("retention_days")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                self.ai_retention_error = None;
+                if self.ai_sessions_loaded {
+                    self.prune_expired_ai_sessions();
+                }
+            }
+            Err(error) => self.ai_retention_error = Some(error),
+        }
+    }
+
+    fn prune_expired_ai_sessions(&mut self) -> usize {
+        if self.ai_retention_days == 0 {
+            return 0;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = now.saturating_sub(self.ai_retention_days.saturating_mul(24 * 60 * 60));
+        let original = self.ai_sessions.clone();
+        let active_id = self.ai_session_id.clone();
+        let chat_loading = self.ai_chat_loading;
+        self.ai_sessions.retain(|session| {
+            session.updated_at >= cutoff || (chat_loading && session.id == active_id)
+        });
+        let original_len = original.len();
+        let removed = original_len - self.ai_sessions.len();
+        if removed > 0 {
+            if let Err(error) = ai_session_client::save(&self.ai_sessions) {
+                self.ai_sessions = original;
+                self.ai_retention_error = Some(format!(
+                    "Retention was saved, but expired sessions could not be removed: {error}"
+                ));
+                return 0;
+            }
+            if !active_id.is_empty()
+                && !self
+                    .ai_sessions
+                    .iter()
+                    .any(|session| session.id == active_id)
+            {
+                self.ai_session_id.clear();
+                self.ai_chat_messages.clear();
+                self.ai_context_grants.clear();
+                self.ai_context_preview.clear();
+                self.new_ai_session();
+            }
+        }
+        removed
     }
 
     fn save_ai_session(&mut self) {
@@ -969,6 +1135,68 @@ impl PanelApp {
         false
     }
 
+    fn help_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Help and diagnostics");
+        ui.weak("Search common setup and recovery questions. Export diagnostics only when you choose to share them.");
+        ui.add_space(12.0);
+        ui.text_edit_singleline(&mut self.help_query);
+
+        let topics = [
+            (
+                "Settings or relay status is unavailable",
+                "Retry from Settings. The local control-plane relay and settings service are separate from external relays; ordinary desktop apps continue to work when optional relays are offline.",
+            ),
+            (
+                "External relay changes have not appeared",
+                "External relay list changes are saved by identity. Restart the evermore-notifyd identity instance to replace its running subscriptions.",
+            ),
+            (
+                "Quiet hours are not suppressing notifications",
+                "Quiet hours use this device's local clock and control SwayNotificationCenter Do Not Disturb. Check that evermore-notifyd and swaync are running.",
+            ),
+            (
+                "A file or source is unavailable to local AI",
+                "Check the AI Context sources allowlist and session grants. Files must be in an indexed scope, use a supported text format, and not have a matching .no-ai sidecar. Secret-shaped text is redacted before local inference.",
+            ),
+            (
+                "A package or model is not offered",
+                "Evermore only discovers releases signed by a trusted publisher. Review the publisher key before trusting it. Revoking trust blocks future releases from that key but leaves already installed packages in place.",
+            ),
+        ];
+        let query = self.help_query.trim().to_lowercase();
+        for (title, body) in topics {
+            if query.is_empty()
+                || title.to_lowercase().contains(&query)
+                || body.to_lowercase().contains(&query)
+            {
+                ui.collapsing(title, |ui| {
+                    ui.label(body);
+                });
+            }
+        }
+
+        ui.add_space(12.0);
+        if ui.button("Export diagnostics").clicked() {
+            self.diagnostics_status = Some(match export_diagnostics() {
+                Ok(path) => {
+                    if let Err(error) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                        format!(
+                            "Saved {}. Couldn't open it automatically: {error}",
+                            path.display()
+                        )
+                    } else {
+                        format!("Saved sanitized diagnostics to {}.", path.display())
+                    }
+                }
+                Err(error) => format!("Couldn't export diagnostics: {error}"),
+            });
+        }
+        ui.weak("The export contains OS/kernel details and Evermore service names with active states. It does not include logs, relay addresses, public or secret keys, or message content.");
+        if let Some(status) = &self.diagnostics_status {
+            ui.label(status);
+        }
+    }
+
     fn refresh_identities(&mut self) {
         self.identities_loaded = true;
         match signer_client::fetch_identities() {
@@ -1046,12 +1274,7 @@ impl PanelApp {
         }
     }
 
-    fn set_appearance_value(
-        &mut self,
-        ctx: &egui::Context,
-        key: &str,
-        value: serde_json::Value,
-    ) {
+    fn set_appearance_value(&mut self, ctx: &egui::Context, key: &str, value: serde_json::Value) {
         match settings_client::set("theme", key, value) {
             Ok(()) => {
                 self.settings_error = None;
@@ -1091,20 +1314,45 @@ impl PanelApp {
     }
 
     fn save_external_relays(&mut self, relays: Vec<String>) {
-        match settings_client::set(
-            "relays",
-            "external",
-            serde_json::json!(relays),
-        ) {
+        match settings_client::set("relays", "external", serde_json::json!(relays)) {
             Ok(()) => {
                 self.external_relays = relays;
                 self.relays_error = None;
+                self.relay_restart_needed = true;
                 self.settings_status = Some(
-                    "Relay list saved. Restart Notifications to apply subscription changes."
-                        .into(),
+                    "Relay list saved. Restart Notifications to apply subscription changes.".into(),
                 );
             }
             Err(error) => self.relays_error = Some(error),
+        }
+    }
+
+    fn restart_notifications(&mut self) {
+        let Some(identity) = self.owner_identity_name() else {
+            self.relays_error =
+                Some("No active identity is available to restart Notifications.".into());
+            return;
+        };
+        let unit = format!("evermore-notifyd@{identity}.service");
+        match std::process::Command::new("systemctl")
+            .args(["--user", "restart", &unit])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                self.relay_restart_needed = false;
+                self.settings_status =
+                    Some("Notifications restarted with the updated relay list.".into());
+                self.relays_error = None;
+            }
+            Ok(output) => {
+                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                self.relays_error = Some(if error.is_empty() {
+                    format!("systemctl could not restart {unit}.")
+                } else {
+                    error
+                });
+            }
+            Err(error) => self.relays_error = Some(format!("couldn't start systemctl: {error}")),
         }
     }
 
@@ -1116,11 +1364,8 @@ impl PanelApp {
         self.relay_test_rx = Some(rx);
         self.relay_test_results.insert(relay.clone(), None);
         std::thread::spawn(move || {
-            let result = relay_client::query(
-                &relay,
-                serde_json::json!({"kinds": [1], "limit": 1}),
-            )
-            .map(|_| ());
+            let result = relay_client::query(&relay, serde_json::json!({"kinds": [1], "limit": 1}))
+                .map(|_| ());
             let _ = tx.send((relay, result));
         });
     }
@@ -1177,11 +1422,9 @@ impl PanelApp {
                 Some("Use 24-hour times in HH:MM format, from 00:00 to 23:59.".into());
             return;
         }
-        if let Err(error) = settings_client::set(
-            "notifications",
-            "schedule_enabled",
-            Value::Bool(false),
-        ) {
+        if let Err(error) =
+            settings_client::set("notifications", "schedule_enabled", Value::Bool(false))
+        {
             self.notification_preferences_error = Some(error);
             return;
         }
@@ -1197,18 +1440,14 @@ impl PanelApp {
             }
             self.notification_preferences.insert(key.to_owned(), value);
         }
-        if let Err(error) = settings_client::set(
-            "notifications",
-            "schedule_enabled",
-            Value::Bool(enabled),
-        ) {
+        if let Err(error) =
+            settings_client::set("notifications", "schedule_enabled", Value::Bool(enabled))
+        {
             self.notification_preferences_error = Some(error);
             return;
         }
-        self.notification_preferences.insert(
-            "schedule_enabled".into(),
-            Value::Bool(enabled),
-        );
+        self.notification_preferences
+            .insert("schedule_enabled".into(), Value::Bool(enabled));
         self.notification_preferences_error = None;
     }
 
@@ -1220,6 +1459,130 @@ impl PanelApp {
                 self.notification_preferences_error = None;
             }
             Err(error) => self.notification_preferences_error = Some(error),
+        }
+    }
+
+    fn load_trusted_publishers(&mut self) {
+        if self.trusted_publishers_rx.is_some() || self.trusted_publishers_loaded {
+            return;
+        }
+        if !self.identities_loaded {
+            self.refresh_identities();
+        }
+        let Some(identity) = self.owner_identity_name() else {
+            self.trusted_publishers_loaded = true;
+            self.trusted_publishers_error = Some("No owner identity is available.".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.trusted_publishers_rx = Some(rx);
+        self.trusted_publishers_action = false;
+        std::thread::spawn(move || {
+            let _ = tx.send(npack_client::trusted_publishers(&identity));
+        });
+    }
+
+    fn owner_identity_name(&self) -> Option<String> {
+        let owner_identity = self.approval_identity.clone();
+        self.identities
+            .iter()
+            .find(|identity| identity.name == owner_identity && !is_system_identity(&identity.name))
+            .or_else(|| {
+                self.identities
+                    .iter()
+                    .find(|identity| !is_system_identity(&identity.name))
+            })
+            .map(|identity| identity.name.clone())
+    }
+
+    fn start_trust_change(&mut self, pubkey: String, trusted: bool) {
+        if self.trusted_publishers_rx.is_some() {
+            return;
+        }
+        let Some(identity) = self.owner_identity_name() else {
+            self.trusted_publishers_error = Some("No owner identity is available.".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.trusted_publishers_rx = Some(rx);
+        self.trusted_publishers_action = true;
+        self.trusted_publishers_error = None;
+        std::thread::spawn(move || {
+            let result = npack_client::set_publisher_trust(&identity, &pubkey, trusted)
+                .and_then(|_| npack_client::trusted_publishers(&identity));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_trusted_publishers(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.trusted_publishers_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(publishers)) => {
+                self.trusted_publishers = publishers;
+                self.trusted_publishers_error = None;
+                self.trusted_publishers_loaded = true;
+                if self.trusted_publishers_action {
+                    self.settings_status = Some("Publisher trust list updated and synced.".into());
+                }
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+            Ok(Err(error)) => {
+                self.trusted_publishers_error = Some(error);
+                self.trusted_publishers_loaded = true;
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.trusted_publishers_error =
+                    Some("Publisher lookup stopped unexpectedly.".into());
+                self.trusted_publishers_loaded = true;
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+        }
+    }
+
+    fn refresh_package_update_plan(&mut self) {
+        if self.package_update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.package_update_rx = Some(rx);
+        self.package_update_error = None;
+        std::thread::spawn(move || {
+            let result = operations_client::invoke_read(
+                "packages.update_plan",
+                Value::Object(Default::default()),
+            );
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_package_update_plan(&mut self) {
+        let Some(rx) = &self.package_update_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(plan)) => {
+                self.package_update_plan = Some(plan);
+                self.package_update_error = None;
+                self.package_update_rx = None;
+            }
+            Ok(Err(error)) => {
+                self.package_update_error = Some(error);
+                self.package_update_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.package_update_error = Some("Update check stopped unexpectedly.".into());
+                self.package_update_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
 
@@ -3182,7 +3545,14 @@ impl PanelApp {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
-        ui.heading("Evermore command palette");
+        ui.horizontal(|ui| {
+            ui.heading("Evermore command palette");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close window (Esc)").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
         ui.label("Search a catalogued operation. Every write still needs its exact grant and owner approval.");
         ui.add_space(8.0);
         ui.add(
@@ -3369,7 +3739,14 @@ impl PanelApp {
         egui::Frame::new()
             .inner_margin(egui::Margin::symmetric(18, 16))
             .show(ui, |ui| {
-        ui.heading("Review operation request");
+        ui.horizontal(|ui| {
+            ui.heading("Review operation request");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").on_hover_text("Close review").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
         ui.label("This notification opens the request for review. It never approves the operation by itself.");
         let Some(request_id) = self.approval_review_id.clone() else {
             ui.colored_label(ui.visuals().error_fg_color, "Missing operation request ID.");
@@ -3529,8 +3906,17 @@ impl eframe::App for PanelApp {
             self.approval_review_ui(ui);
             return;
         }
+        // Drawer positions content inside the current viewport; Sway helpers
+        // above still position these separate native windows on the output.
         if self.nostr_feed_drawer {
-            self.nostr_feed_ui(ui);
+            egui::Drawer::new(egui::Id::unique("nostr-feed-drawer"))
+                .edge(egui::DrawerEdge::Right)
+                .extent(if self.nostr_feed_collapsed {
+                    40.0
+                } else {
+                    340.0
+                })
+                .show(ui.ctx(), |drawer_ui| self.nostr_feed_ui(drawer_ui));
             return;
         }
         if self.ai_drawer {
@@ -3543,7 +3929,11 @@ impl eframe::App for PanelApp {
             // resets to false whenever a resize is requested below, and the
             // deadline bounds how long it keeps retrying if this isn't Sway.
             if !self.ai_drawer_positioned {
-                let expected_width = if self.ai_drawer_collapsed { 40.0 } else { 400.0 };
+                let expected_width = if self.ai_drawer_collapsed {
+                    40.0
+                } else {
+                    400.0
+                };
                 // `anchor_to_left_edge` needs to know how much of the
                 // reported workspace rect is our own earlier gap
                 // reservation (see its doc comment) -- 0 before it has ever
@@ -3580,54 +3970,66 @@ impl eframe::App for PanelApp {
                 // fit a 40px-wide window -- same bug the Nostr drawer's
                 // collapsed state had, fixed there with the same vertical,
                 // single-control layout used here.
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(8, 10))
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            if ui
-                                .button("\u{203a}")
-                                .on_hover_text("Open the AI drawer")
-                                .clicked()
-                            {
-                                self.ai_drawer_collapsed = false;
-                                self.ai_drawer_positioned = false;
-                                self.ai_drawer_position_deadline = None;
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                                    egui::vec2(400.0, 680.0),
-                                ));
-                                // Re-assert focus after the resize so this
-                                // window stays on top of Sway's floating
-                                // stack instead of leaving that to chance --
-                                // the click that triggered this already had
-                                // it focused, so this isn't a focus steal.
-                                let _ = sway_windows::raise_window("Evermore AI");
-                            }
-                            ui.add_space(6.0);
-                            ui.weak("AI");
-                        });
+                egui::Drawer::new(egui::Id::unique("ai-drawer"))
+                    .edge(egui::DrawerEdge::Left)
+                    .extent(40.0)
+                    .show(ui.ctx(), |drawer_ui| {
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin::symmetric(8, 10))
+                            .show(drawer_ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    if ui
+                                        .button("\u{203a}")
+                                        .on_hover_text("Open the AI drawer")
+                                        .clicked()
+                                    {
+                                        self.ai_drawer_collapsed = false;
+                                        self.ai_drawer_positioned = false;
+                                        self.ai_drawer_position_deadline = None;
+                                        ui.ctx().send_viewport_cmd(
+                                            egui::ViewportCommand::InnerSize(egui::vec2(
+                                                400.0, 680.0,
+                                            )),
+                                        );
+                                        // Re-assert focus after the resize so this
+                                        // window stays on top of Sway's floating
+                                        // stack instead of leaving that to chance --
+                                        // the click that triggered this already had
+                                        // it focused, so this isn't a focus steal.
+                                        let _ = sway_windows::raise_window("Evermore AI");
+                                    }
+                                    ui.add_space(6.0);
+                                    ui.weak("AI");
+                                });
+                            });
                     });
                 return;
             }
-            egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(14, 10))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("\u{2039}")
-                            .on_hover_text("Collapse the AI drawer")
-                            .clicked()
-                        {
-                            self.ai_drawer_collapsed = true;
-                            self.ai_drawer_positioned = false;
-                            self.ai_drawer_position_deadline = None;
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                                egui::vec2(40.0, 680.0),
-                            ));
-                            let _ = sway_windows::raise_window("Evermore AI");
-                        }
-                    });
+            egui::Drawer::new(egui::Id::unique("ai-drawer"))
+                .edge(egui::DrawerEdge::Left)
+                .extent(400.0)
+                .show(ui.ctx(), |drawer_ui| {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(drawer_ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button("\u{2039}")
+                                    .on_hover_text("Collapse the AI drawer")
+                                    .clicked()
+                                {
+                                    self.ai_drawer_collapsed = true;
+                                    self.ai_drawer_positioned = false;
+                                    self.ai_drawer_position_deadline = None;
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                        egui::vec2(40.0, 680.0),
+                                    ));
+                                    let _ = sway_windows::raise_window("Evermore AI");
+                                }
+                            });
+                        });
+                    self.ai_drawer_ui(drawer_ui);
                 });
-            self.ai_drawer_ui(ui);
             return;
         } else {
             // Rail width per the design note: 220px labelled above a
@@ -3645,8 +4047,28 @@ impl eframe::App for PanelApp {
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 18)))
                 .show(ui, |ui| {
                     if labelled {
-                        ui.label(egui::RichText::new("Evermore").strong().size(15.0));
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Evermore").strong().size(15.0));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Close Evermore")
+                                        .clicked()
+                                    {
+                                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                },
+                            );
+                        });
                         ui.add_space(16.0);
+                    } else if ui
+                        .small_button("×")
+                        .on_hover_text("Close Evermore")
+                        .clicked()
+                    {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (tab, icon_id, icon, label) in [
@@ -3655,6 +4077,7 @@ impl eframe::App for PanelApp {
                         (Tab::Notifications, "bell", ICON_BELL, "Notifications"),
                         (Tab::Ai, "sparkles", ICON_SPARKLES, "AI"),
                         (Tab::Agents, "agents", ICON_AGENTS, "Agents"),
+                        (Tab::Help, "help", ICON_HELP, "Help"),
                     ] {
                         if nav_item(ui, self.tab == tab, icon_id, icon, label, labelled) {
                             self.tab = tab;
@@ -3752,6 +4175,8 @@ impl eframe::App for PanelApp {
                 }
 
                 ui.add_space(12.0);
+                profile_settings::ui(ui, &visible, &mut self.profile_settings);
+                ui.add_space(12.0);
                 advanced_details(ui, "identity_debug", |ui| {
                     ui.label(format!(
                         "signer socket: {}",
@@ -3764,6 +4189,9 @@ impl eframe::App for PanelApp {
                     self.refresh_theme();
                     apply_theme_settings(ui.ctx(), &self.theme_domain);
                 }
+                if !self.identities_loaded {
+                    self.refresh_identities();
+                }
                 if !self.relays_loaded {
                     self.refresh_external_relays();
                 }
@@ -3771,10 +4199,31 @@ impl eframe::App for PanelApp {
                     self.refresh_notification_preferences();
                 }
                 self.poll_relay_tests(ui.ctx());
+                self.load_trusted_publishers();
+                self.poll_trusted_publishers(ui.ctx());
+                self.poll_package_update_plan();
+                if !self.ai_retention_loaded {
+                    self.load_ai_retention();
+                }
                 ui.heading("Settings");
                 ui.weak(
                     "Appearance follows your identity across devices. Desktop and hardware preferences stay on this device.",
                 );
+                ui.add_space(12.0);
+
+                system_settings::ui(ui, &mut self.system_settings);
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    let identities: Vec<String> = self
+                        .identities
+                        .iter()
+                        .filter(|identity| !is_system_identity(&identity.name))
+                        .map(|identity| identity.name.clone())
+                        .collect();
+                    blossom_status::ui(ui, &mut self.blossom_status, &identities);
+                });
+
                 ui.add_space(12.0);
 
                 if let Some(err) = self.settings_error.clone() {
@@ -4004,8 +4453,13 @@ impl eframe::App for PanelApp {
                             }
                         }
                     });
+                    if self.relay_restart_needed
+                        && ui.button("Restart Notifications").clicked()
+                    {
+                        self.restart_notifications();
+                    }
                     ui.weak(
-                        "Relay subscription changes take effect after the Notifications service restarts. Testing checks relay connectivity without publishing.",
+                        "Testing checks relay connectivity without publishing. Relay changes apply after restarting Notifications.",
                     );
                 });
 
@@ -4013,7 +4467,7 @@ impl eframe::App for PanelApp {
                 open_section(ui, |ui| {
                     section_heading(ui, "Notification sources");
                     ui.weak(
-                        "Choose which Evermore sources appear in the inbox. Other desktop apps are unaffected.",
+                        "These source choices sync with your identity. Other desktop apps are unaffected.",
                     );
                     let mut schedule_enabled = self
                         .notification_preferences
@@ -4045,7 +4499,7 @@ impl eframe::App for PanelApp {
                         }
                     });
                     ui.weak(
-                        "Uses this device's local time. Quiet hours control SwayNC DND; scheduled changes are checked every 30 seconds.",
+                        "Quiet hours sync with your identity and use this device's local time. They control SwayNC DND; scheduled changes are checked every 30 seconds.",
                     );
                     for (key, label) in [
                         ("local_enabled", "Local system notices"),
@@ -4072,6 +4526,235 @@ impl eframe::App for PanelApp {
                         }
                     }
                 });
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    section_heading(ui, "AI conversation retention");
+                    ui.weak("The retention choice syncs by identity. Conversation content stays on this device; expired sessions are removed locally when the preference is applied.");
+                    let mut selected_days = self.ai_retention_days;
+                    egui::ComboBox::from_label("Keep local conversations")
+                        .selected_text(match selected_days {
+                            0 => "Forever".to_owned(),
+                            7 => "7 days".to_owned(),
+                            30 => "30 days".to_owned(),
+                            90 => "90 days".to_owned(),
+                            other => format!("{other} days"),
+                        })
+                        .show_ui(ui, |ui| {
+                            for (days, label) in [
+                                (0, "Forever"),
+                                (7, "7 days"),
+                                (30, "30 days"),
+                                (90, "90 days"),
+                            ] {
+                                ui.selectable_value(&mut selected_days, days, label);
+                            }
+                        });
+                    if selected_days != self.ai_retention_days {
+                        self.pending_ai_retention = Some(selected_days);
+                    }
+                    if let Some(error) = &self.ai_retention_error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        if ui.button("Retry retention preference").clicked() {
+                            self.load_ai_retention();
+                        }
+                    }
+                    if let Some(status) = &self.ai_retention_status {
+                        ui.label(status);
+                    }
+                });
+
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    section_heading(ui, "Software and trust");
+                    ui.weak("Packages and models are verified against publisher keys trusted by your identity.");
+                    if ui
+                        .add_enabled(self.package_update_rx.is_none(), egui::Button::new("Check package and model updates"))
+                        .clicked()
+                    {
+                        self.refresh_package_update_plan();
+                    }
+                    if self.package_update_rx.is_some() {
+                        ui.weak("Checking trusted package sources…");
+                    }
+                    if let Some(error) = &self.package_update_error {
+                        ui.colored_label(ui.visuals().error_fg_color, "Update check failed.");
+                        ui.weak(error);
+                    }
+                    if let Some(plan) = &self.package_update_plan {
+                        ui.label(format!("{} update(s) available", plan.get("count").and_then(Value::as_u64).unwrap_or(0)));
+                        if let Some(updates) = plan.get("updates").and_then(Value::as_array) {
+                            for update in updates {
+                                let name = update.get("name").and_then(Value::as_str).unwrap_or("package");
+                                let current = update.get("current_version").and_then(Value::as_str).unwrap_or("unknown");
+                                let available = update.get("available_version").and_then(Value::as_str).unwrap_or("unknown");
+                                ui.label(format!("{name}: {current} → {available}"));
+                            }
+                        }
+                        if let Some(revoked) = plan.get("revoked").and_then(Value::as_array) {
+                            if !revoked.is_empty() {
+                                ui.colored_label(ui.visuals().error_fg_color, format!("{} installed release(s) have been revoked.", revoked.len()));
+                            }
+                        }
+                        if let Some(errors) = plan.get("errors").and_then(Value::as_array) {
+                            if !errors.is_empty() {
+                                ui.weak(format!("{} package(s) could not be checked.", errors.len()));
+                            }
+                        }
+                    } else {
+                        ui.weak("Update checks are read-only. Installing an update still requires its normal review and approval.");
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("Refresh trusted publishers").clicked() {
+                        self.trusted_publishers_loaded = false;
+                        self.trusted_publishers_error = None;
+                        self.load_trusted_publishers();
+                    }
+                    if let Some(error) = self.trusted_publishers_error.clone() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Couldn't load trusted publishers.",
+                        );
+                        ui.weak(error);
+                        if ui.button("Retry publisher list").clicked() {
+                            self.trusted_publishers_loaded = false;
+                            self.trusted_publishers_error = None;
+                            self.load_trusted_publishers();
+                        }
+                    } else if self.trusted_publishers_rx.is_some() {
+                        ui.weak("Loading trusted publishers…");
+                    } else if self.trusted_publishers.is_empty() {
+                        ui.weak("No trusted publishers are configured.");
+                    } else {
+                        for publisher in &self.trusted_publishers {
+                            ui.horizontal(|ui| {
+                                ui.monospace(publisher);
+                                if ui.small_button("Copy").clicked() {
+                                    ui.ctx().copy_text(publisher.clone());
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.trusted_publishers_rx.is_none(),
+                                        egui::Button::new("Revoke").small(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pending_trust_change = Some((publisher.clone(), false));
+                                    self.publisher_action_error = None;
+                                }
+                            });
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.trusted_publisher_input)
+                                .hint_text("Publisher public key (hex)"),
+                        );
+                        if ui
+                            .add_enabled(
+                                self.trusted_publishers_rx.is_none(),
+                                egui::Button::new("Review trust"),
+                            )
+                            .clicked()
+                        {
+                            let pubkey = self
+                                .trusted_publisher_input
+                                .trim()
+                                .to_ascii_lowercase();
+                            if is_valid_pubkey_hex(&pubkey) {
+                                if self.trusted_publishers.iter().any(|trusted| trusted == &pubkey) {
+                                    self.publisher_action_error =
+                                        Some("That publisher is already trusted.".into());
+                                } else {
+                                    self.pending_trust_change = Some((pubkey, true));
+                                    self.publisher_action_error = None;
+                                }
+                            } else {
+                                self.publisher_action_error = Some(
+                                    "Enter a 64-character hexadecimal public key.".into(),
+                                );
+                            }
+                        }
+                    });
+                    if let Some(error) = &self.publisher_action_error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    if ui.button("Open software manager").clicked() {
+                        spawn_npack_gui();
+                    }
+                    ui.weak("Publisher trust changes are confirmed here. The software manager handles package and model discovery, installation, and removal. Revoking trust blocks future releases from that key; it does not remove packages already installed.");
+                });
+
+                if let Some((pubkey, trusted)) = self.pending_trust_change.clone() {
+                    let mut confirm = false;
+                    let mut cancel = false;
+                    egui::Window::new("Review publisher trust")
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            if trusted {
+                                ui.label("Trust signed packages and models from this publisher?");
+                            } else {
+                                ui.label("Revoke this publisher's trust?");
+                            }
+                            ui.monospace(&pubkey);
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(if trusted { "Trust publisher" } else { "Revoke trust" }).clicked() {
+                                    confirm = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel = true;
+                                }
+                            });
+                        });
+                    if confirm {
+                        self.pending_trust_change = None;
+                        self.trusted_publisher_input.clear();
+                        self.start_trust_change(pubkey, trusted);
+                    } else if cancel {
+                        self.pending_trust_change = None;
+                    }
+                }
+
+                if let Some(days) = self.pending_ai_retention {
+                    let mut confirm = false;
+                    let mut cancel = false;
+                    egui::Window::new("Confirm AI retention change")
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            ui.label(if days == 0 {
+                                "Save the identity preference to keep AI conversations indefinitely?"
+                            } else {
+                                "Save this identity-wide retention choice and remove older local conversations?"
+                            });
+                            ui.label(if days == 0 { "Forever".to_owned() } else { format!("{days} days") });
+                            ui.horizontal(|ui| {
+                                if ui.button("Save retention").clicked() { confirm = true; }
+                                if ui.button("Cancel").clicked() { cancel = true; }
+                            });
+                        });
+                    if confirm {
+                        self.pending_ai_retention = None;
+                        match settings_client::set("ai-privacy", "retention_days", Value::from(days)) {
+                            Ok(()) => {
+                                self.ai_retention_days = days;
+                                self.ai_retention_error = None;
+                                let removed = self.prune_expired_ai_sessions();
+                                self.ai_retention_status = Some(format!(
+                                    "Retention preference saved for identity sync; removed {removed} expired local conversation(s)."
+                                ));
+                            }
+                            Err(error) => {
+                                self.ai_retention_error = Some(error);
+                                self.ai_retention_status = None;
+                            }
+                        }
+                    } else if cancel {
+                        self.pending_ai_retention = None;
+                    }
+                }
 
                 if let Some(status) = &self.settings_status {
                     ui.add_space(6.0);
@@ -4158,6 +4841,9 @@ impl eframe::App for PanelApp {
                 }
                 self.agents_ui(ui);
                 self.agent_wizard_ui(ui.ctx());
+            }
+            Tab::Help => {
+                self.help_ui(ui);
             }
             Tab::Ai => {
                 if !self.operations_loaded {
@@ -4523,6 +5209,13 @@ impl eframe::App for PanelApp {
                             serde_json::to_string_pretty(&pending.arguments).unwrap_or_default(),
                         );
                         ui.horizontal(|ui| {
+                                if ui
+                                    .small_button("×")
+                                    .on_hover_text("Close the AI drawer")
+                                    .clicked()
+                                {
+                                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
                             if ui
                                 .add_enabled(
                                     !self.approval_identity.is_empty()
@@ -5198,8 +5891,20 @@ fn build_visuals(dark: bool, accent_name: &str) -> egui::Visuals {
             egui::Color32::from_rgb(210, 214, 219),
         )
     };
-    let accent = egui::Color32::from_rgb(110, 168, 254);
-    let accent_strong = egui::Color32::from_rgb(139, 183, 255);
+    let (accent, accent_strong) = match accent_name {
+        "teal" => (
+            egui::Color32::from_rgb(54, 190, 174),
+            egui::Color32::from_rgb(100, 218, 202),
+        ),
+        "amber" => (
+            egui::Color32::from_rgb(218, 165, 76),
+            egui::Color32::from_rgb(241, 195, 112),
+        ),
+        _ => (
+            egui::Color32::from_rgb(110, 168, 254),
+            egui::Color32::from_rgb(139, 183, 255),
+        ),
+    };
 
     visuals.panel_fill = chrome;
     visuals.window_fill = chrome;
@@ -5288,7 +5993,10 @@ fn apply_theme_settings(
     ctx: &egui::Context,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) {
-    let accent = settings.get("accent").and_then(|v| v.as_str()).unwrap_or("blue");
+    let accent = settings
+        .get("accent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("blue");
     let text_scale = settings
         .get("text_scale")
         .and_then(serde_json::Value::as_f64)
@@ -5304,7 +6012,10 @@ fn apply_theme_settings(
         let style = build_style(&ctx.style_of(theme), text_scale, compact, reduced_motion);
         ctx.set_style_of(theme, style);
     }
-    let mode = settings.get("mode").and_then(|v| v.as_str()).unwrap_or("dark");
+    let mode = settings
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("dark");
     ctx.set_theme(if mode == "light" {
         egui::ThemePreference::Light
     } else {
@@ -5702,385 +6413,3 @@ mod tests {
         assert_eq!(truncate_picker_text("short", 5), "short");
     }
 }
-const ICON_HELP: &[u8] = include_bytes!("../assets/icons/help.svg");
-fn is_valid_pubkey_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn export_diagnostics() -> Result<std::path::PathBuf, String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let directory = evermore_common::user_data_home().join("evermore/diagnostics");
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| error.to_string())?;
-
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_secs();
-    let path = directory.join(format!("diagnostics-{timestamp}.txt"));
-    let mut report = String::from("Evermore diagnostic summary\n");
-
-    let kernel = std::process::Command::new("uname")
-        .args(["-s", "-r", "-m"])
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_else(|_| "unavailable".into());
-    report.push_str(&format!("Kernel: {kernel}\n"));
-
-    let units = std::process::Command::new("systemctl")
-        .args([
-            "--user",
-            "--no-pager",
-            "--plain",
-            "--no-legend",
-            "list-units",
-            "--all",
-            "--type=service",
-        ])
-        .output();
-    report.push_str("Evermore user services:\n");
-    if let Ok(output) = units {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let mut fields = line.split_whitespace();
-            let Some(unit) = fields.next() else { continue };
-            if !unit.starts_with("evermore-") && unit != "npackd.service" {
-                continue;
-            }
-            let load = fields.next().unwrap_or("unknown");
-            let active = fields.next().unwrap_or("unknown");
-            let sub = fields.next().unwrap_or("unknown");
-            let normalized_unit = unit
-                .split_once('@')
-                .map(|(base, _)| format!("{base}@*"))
-                .unwrap_or_else(|| unit.to_owned());
-            report.push_str(&format!("  {normalized_unit}: {load}/{active}/{sub}\n"));
-        }
-    } else {
-        report.push_str("  unavailable\n");
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|error| error.to_string())?;
-    use std::io::Write;
-    file.write_all(report.as_bytes())
-        .map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
-    Ok(path)
-}
-
-    relay_restart_needed: bool,
-    trusted_publishers: Vec<String>,
-    trusted_publishers_loaded: bool,
-    trusted_publishers_error: Option<String>,
-    trusted_publishers_rx: Option<Receiver<Result<Vec<String>, String>>>,
-    trusted_publishers_action: bool,
-    trusted_publisher_input: String,
-    pending_trust_change: Option<(String, bool)>,
-    publisher_action_error: Option<String>,
-    help_query: String,
-    diagnostics_status: Option<String>,
-    fn help_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Help and diagnostics");
-        ui.weak("Search common setup and recovery questions. Export diagnostics only when you choose to share them.");
-        ui.add_space(12.0);
-        ui.text_edit_singleline(&mut self.help_query);
-
-        let topics = [
-            (
-                "Settings or relay status is unavailable",
-                "Retry from Settings. The local control-plane relay and settings service are separate from external relays; ordinary desktop apps continue to work when optional relays are offline.",
-            ),
-            (
-                "External relay changes have not appeared",
-                "External relay list changes are saved by identity. Restart the evermore-notifyd identity instance to replace its running subscriptions.",
-            ),
-            (
-                "Quiet hours are not suppressing notifications",
-                "Quiet hours use this device's local clock and control SwayNotificationCenter Do Not Disturb. Check that evermore-notifyd and swaync are running.",
-            ),
-            (
-                "A file or source is unavailable to local AI",
-                "Check the AI Context sources allowlist and session grants. Files must be in an indexed scope, use a supported text format, and not have a matching .no-ai sidecar. Secret-shaped text is redacted before local inference.",
-            ),
-            (
-                "A package or model is not offered",
-                "Evermore only discovers releases signed by a trusted publisher. Review the publisher key before trusting it. Revoking trust blocks future releases from that key but leaves already installed packages in place.",
-            ),
-        ];
-        let query = self.help_query.trim().to_lowercase();
-        for (title, body) in topics {
-            if query.is_empty()
-                || title.to_lowercase().contains(&query)
-                || body.to_lowercase().contains(&query)
-            {
-                ui.collapsing(title, |ui| {
-                    ui.label(body);
-                });
-            }
-        }
-
-        ui.add_space(12.0);
-        if ui.button("Export diagnostics").clicked() {
-            self.diagnostics_status = Some(match export_diagnostics() {
-                Ok(path) => {
-                    if let Err(error) = std::process::Command::new("xdg-open").arg(&path).spawn() {
-                        format!("Saved {}. Couldn't open it automatically: {error}", path.display())
-                    } else {
-                        format!("Saved sanitized diagnostics to {}.", path.display())
-                    }
-                }
-                Err(error) => format!("Couldn't export diagnostics: {error}"),
-            });
-        }
-        ui.weak("The export contains OS/kernel details and Evermore service names with active states. It does not include logs, relay addresses, public or secret keys, or message content.");
-        if let Some(status) = &self.diagnostics_status {
-            ui.label(status);
-        }
-    }
-
-                self.relay_restart_needed = true;
-    fn restart_notifications(&mut self) {
-        let Some(identity) = self.owner_identity_name() else {
-            self.relays_error = Some("No active identity is available to restart Notifications.".into());
-            return;
-        };
-        let unit = format!("evermore-notifyd@{identity}.service");
-        match std::process::Command::new("systemctl")
-            .args(["--user", "restart", &unit])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                self.relay_restart_needed = false;
-                self.settings_status = Some("Notifications restarted with the updated relay list.".into());
-                self.relays_error = None;
-            }
-            Ok(output) => {
-                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                self.relays_error = Some(if error.is_empty() {
-                    format!("systemctl could not restart {unit}.")
-                } else {
-                    error
-                });
-            }
-            Err(error) => self.relays_error = Some(format!("couldn't start systemctl: {error}")),
-        }
-    }
-
-    fn load_trusted_publishers(&mut self) {
-        if self.trusted_publishers_rx.is_some() || self.trusted_publishers_loaded {
-            return;
-        }
-        if !self.identities_loaded {
-            self.refresh_identities();
-        }
-        let Some(identity) = self.owner_identity_name() else {
-            self.trusted_publishers_loaded = true;
-            self.trusted_publishers_error = Some("No owner identity is available.".into());
-            return;
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.trusted_publishers_rx = Some(rx);
-        self.trusted_publishers_action = false;
-        std::thread::spawn(move || {
-            let _ = tx.send(npack_client::trusted_publishers(&identity));
-        });
-    }
-
-    fn owner_identity_name(&self) -> Option<String> {
-        let owner_identity = self.approval_identity.clone();
-        self.identities
-            .iter()
-            .find(|identity| identity.name == owner_identity && !is_system_identity(&identity.name))
-            .or_else(|| {
-                self.identities
-                    .iter()
-                    .find(|identity| !is_system_identity(&identity.name))
-            })
-            .map(|identity| identity.name.clone())
-    }
-
-    fn start_trust_change(&mut self, pubkey: String, trusted: bool) {
-        if self.trusted_publishers_rx.is_some() {
-            return;
-        }
-        let Some(identity) = self.owner_identity_name() else {
-            self.trusted_publishers_error = Some("No owner identity is available.".into());
-            return;
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.trusted_publishers_rx = Some(rx);
-        self.trusted_publishers_action = true;
-        self.trusted_publishers_error = None;
-        std::thread::spawn(move || {
-            let result = npack_client::set_publisher_trust(&identity, &pubkey, trusted)
-                .and_then(|_| npack_client::trusted_publishers(&identity));
-            let _ = tx.send(result);
-        });
-    }
-
-    fn poll_trusted_publishers(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.trusted_publishers_rx else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(Ok(publishers)) => {
-                self.trusted_publishers = publishers;
-                self.trusted_publishers_error = None;
-                self.trusted_publishers_loaded = true;
-                if self.trusted_publishers_action {
-                    self.settings_status = Some("Publisher trust list updated and synced.".into());
-                }
-                self.trusted_publishers_action = false;
-                self.trusted_publishers_rx = None;
-            }
-            Ok(Err(error)) => {
-                self.trusted_publishers_error = Some(error);
-                self.trusted_publishers_loaded = true;
-                self.trusted_publishers_action = false;
-                self.trusted_publishers_rx = None;
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.trusted_publishers_error = Some("Publisher lookup stopped unexpectedly.".into());
-                self.trusted_publishers_loaded = true;
-                self.trusted_publishers_action = false;
-                self.trusted_publishers_rx = None;
-            }
-        }
-    }
-
-                        (Tab::Help, "help", ICON_HELP, "Help"),
-                self.load_trusted_publishers();
-                self.poll_trusted_publishers(ui.ctx());
-                    if self.relay_restart_needed
-                        && ui.button("Restart Notifications").clicked()
-                    {
-                        self.restart_notifications();
-                    }
-                ui.add_space(12.0);
-                open_section(ui, |ui| {
-                    section_heading(ui, "Software and trust");
-                    ui.weak("Packages and models are verified against publisher keys trusted by your identity.");
-                    if ui.button("Refresh trusted publishers").clicked() {
-                        self.trusted_publishers_loaded = false;
-                        self.trusted_publishers_error = None;
-                        self.load_trusted_publishers();
-                    }
-                    if let Some(error) = self.trusted_publishers_error.clone() {
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            "Couldn't load trusted publishers.",
-                        );
-                        ui.weak(error);
-                        if ui.button("Retry publisher list").clicked() {
-                            self.trusted_publishers_loaded = false;
-                            self.trusted_publishers_error = None;
-                            self.load_trusted_publishers();
-                        }
-                    } else if self.trusted_publishers_rx.is_some() {
-                        ui.weak("Loading trusted publishers…");
-                    } else if self.trusted_publishers.is_empty() {
-                        ui.weak("No trusted publishers are configured.");
-                    } else {
-                        for publisher in &self.trusted_publishers {
-                            ui.horizontal(|ui| {
-                                ui.monospace(publisher);
-                                if ui.small_button("Copy").clicked() {
-                                    ui.ctx().copy_text(publisher.clone());
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.trusted_publishers_rx.is_none(),
-                                        egui::Button::new("Revoke").small(),
-                                    )
-                                    .clicked()
-                                {
-                                    self.pending_trust_change = Some((publisher.clone(), false));
-                                    self.publisher_action_error = None;
-                                }
-                            });
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.trusted_publisher_input)
-                                .hint_text("Publisher public key (hex)"),
-                        );
-                        if ui
-                            .add_enabled(
-                                self.trusted_publishers_rx.is_none(),
-                                egui::Button::new("Review trust"),
-                            )
-                            .clicked()
-                        {
-                            let pubkey = self
-                                .trusted_publisher_input
-                                .trim()
-                                .to_ascii_lowercase();
-                            if is_valid_pubkey_hex(&pubkey) {
-                                if self.trusted_publishers.iter().any(|trusted| trusted == &pubkey) {
-                                    self.publisher_action_error =
-                                        Some("That publisher is already trusted.".into());
-                                } else {
-                                    self.pending_trust_change = Some((pubkey, true));
-                                    self.publisher_action_error = None;
-                                }
-                            } else {
-                                self.publisher_action_error = Some(
-                                    "Enter a 64-character hexadecimal public key.".into(),
-                                );
-                            }
-                        }
-                    });
-                    if let Some(error) = &self.publisher_action_error {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                    }
-                    if ui.button("Open software manager").clicked() {
-                        spawn_npack_gui();
-                    }
-                    ui.weak("Publisher trust changes are confirmed here. The software manager handles package and model discovery, installation, and removal. Revoking trust blocks future releases from that key; it does not remove packages already installed.");
-                });
-
-                if let Some((pubkey, trusted)) = self.pending_trust_change.clone() {
-                    let mut confirm = false;
-                    let mut cancel = false;
-                    egui::Window::new("Review publisher trust")
-                        .collapsible(false)
-                        .resizable(false)
-                        .show(ui.ctx(), |ui| {
-                            if trusted {
-                                ui.label("Trust signed packages and models from this publisher?");
-                            } else {
-                                ui.label("Revoke this publisher's trust?");
-                            }
-                            ui.monospace(&pubkey);
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                if ui.button(if trusted { "Trust publisher" } else { "Revoke trust" }).clicked() {
-                                    confirm = true;
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    cancel = true;
-                                }
-                            });
-                        });
-                    if confirm {
-                        self.pending_trust_change = None;
-                        self.trusted_publisher_input.clear();
-                        self.start_trust_change(pubkey, trusted);
-                    } else if cancel {
-                        self.pending_trust_change = None;
-                    }
-                }
-
-            Tab::Help => {
-                self.help_ui(ui);
-            }

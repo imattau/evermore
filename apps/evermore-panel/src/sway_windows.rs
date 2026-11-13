@@ -83,7 +83,11 @@ pub fn window_exists(title: &str) -> bool {
 /// reservation already ran) would anchor 40px short of the true edge,
 /// compounding on every toggle. Adding the reserved amount back cancels out
 /// our own earlier reservation so the target always reflects the true edge.
-pub fn anchor_to_right_edge(pid: u32, expected_width: f32, reserved_gap: f32) -> Result<(), String> {
+pub fn anchor_to_right_edge(
+    pid: u32,
+    expected_width: f32,
+    reserved_gap: f32,
+) -> Result<(), String> {
     anchor_to(
         "Evermore feed",
         pid,
@@ -510,11 +514,12 @@ mod tests {
         // the workspace's top-left corner rather than assume resizing
         // alone keeps it there.
         let tree = feed_tree(40.0, 180.0);
-        let (con_id, x, y) = compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |workspace, _window| {
-            (workspace.x, workspace.y)
-        })
-        .unwrap()
-        .expect("recentered window should need a move back to the corner");
+        let (con_id, x, y) =
+            compute_anchor_move(&tree, "Evermore feed", 42, 40.0, |workspace, _window| {
+                (workspace.x, workspace.y)
+            })
+            .unwrap()
+            .expect("recentered window should need a move back to the corner");
         assert_eq!((con_id, x, y), (7, 0, 0));
     }
 

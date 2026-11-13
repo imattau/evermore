@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Evermore's Sway, Waybar, Wofi, Fuzzel, and SwayNC user configuration.
+# Install Evermore's Sway, Waybar, Fuzzel, and SwayNC user configuration.
 # Existing files are backed up before replacement; no packages are installed
 # and the user's main Sway config is never edited.
 set -euo pipefail
@@ -30,10 +30,6 @@ install_user_file "$REPO_ROOT/packaging/waybar/style.css" \
     "$CONFIG_HOME/waybar/style.css"
 install_user_file "$REPO_ROOT/packaging/fuzzel/fuzzel.ini" \
     "$CONFIG_HOME/fuzzel/fuzzel.ini"
-install_user_file "$REPO_ROOT/packaging/wofi/config" \
-    "$CONFIG_HOME/wofi/config"
-install_user_file "$REPO_ROOT/packaging/wofi/style.css" \
-    "$CONFIG_HOME/wofi/style.css"
 install_user_file "$REPO_ROOT/packaging/swaync/config.json" \
     "$CONFIG_HOME/swaync/config.json"
 install_user_file "$REPO_ROOT/packaging/swaync/style.css" \
@@ -55,4 +51,4 @@ printf '\nInstalled Evermore desktop configuration. Add these lines to %s/sway/c
     "$CONFIG_HOME"
 printf 'include %s/sway/evermore-desktop.conf\n' "$CONFIG_HOME"
 printf 'include %s/sway/evermore-waybar.conf\n' "$CONFIG_HOME"
-printf '\nRequired packages (install separately): waybar, wofi, fuzzel, swaync, wl-clipboard.\n'
+printf '\nRequired packages (install separately): waybar, fuzzel, swaync, wl-clipboard.\n'

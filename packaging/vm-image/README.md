@@ -21,6 +21,9 @@ The image also builds and installs upstream `npack` v0.9.4 (pinned to commit
 `900b836cc743d6036fe284750b8e688468e01685`), including `npack-gui`, its
 launcher and its per-user daemon. The daemon starts with each user session;
 new homes receive Evermore's default trusted-publisher and relay configuration.
+The eGUI application launcher is included as the `launcher` npack package and
+registered in each fresh user's package database; Super+Space opens it by
+default. Wofi is not included in the default image.
 
 This workflow does not touch `vm/.local` or the developer VM. The output has
 no human account, no SSH access, and no cloud-init provisioning state. On its

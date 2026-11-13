@@ -36,7 +36,7 @@ PUBLISHER="$(python3 -c 'import json; print(json.load(open("'"$ROOT"'/packaging/
 BIN_NAME="evermore-$PACKAGE"
 
 case "$PACKAGE" in
-  settingsd|notifyd|blossom-fs|contextd|indexd|inferd|operationsd|agentd|sway-ai-bridge|mcp|panel) ;;
+  settingsd|notifyd|blossom-fs|contextd|indexd|inferd|operationsd|agentd|sway-ai-bridge|mcp|panel|launcher) ;;
   *) echo "unknown package '$PACKAGE' -- see build-and-publish.sh's own list" >&2; exit 1 ;;
 esac
 

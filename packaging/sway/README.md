@@ -1,7 +1,8 @@
 # Sway desktop bindings
 
-Install `waybar`, `wofi`, `fuzzel`, `swaync`, and `wl-clipboard` from Arch's official
-repositories. From the checkout, run:
+Install `waybar`, `fuzzel`, `swaync`, and `wl-clipboard` from Arch's official
+repositories. Install `evermore-launcher` through npack or build it from the
+workspace. From the checkout, run:
 
 ```bash
 ./packaging/sway/install-desktop.sh
@@ -34,20 +35,17 @@ Waybar shows
 the live notification count; left click opens the inbox and right click
 toggles Do Not Disturb.
 
-Super+Space opens Wofi in desktop-application mode. Its empty-query view uses
-a five-column app grid, and typing switches to fuzzy matching over installed
-`.desktop` entries. The launcher has no generic command-runner provider or
-resident helper service. Desktop actions can be expanded with Tab. Fuzzel
-remains installed for Evermore's deterministic file and semantic-result
-pickers. The include disables Sway's stock Super+D binding, leaving one default
-launcher shortcut. Wofi's VM check verified Super+Space, the empty-query grid,
-immediate typed filtering, Enter launch, Escape dismissal, and outside-click
-focus dismissal. Explicit favourites and recent ordering are still open. The known
-`nwg-drawer` candidate was rejected because its focus handoff consumes the
-first typed character. The VM's default headless-only Sway session has no
-input devices, so `vm/phase10-launcher-waybar.sh` starts a temporary
-headless-plus-libinput Sway session that attaches the VM's AT keyboard. The
-default focus-mode toggle moves to `Super+Tab`.
+Super+Space opens Evermore's eGUI app launcher as a centered floating window.
+It discovers visible installed XDG applications, fuzzy-searches names and
+metadata, and presents a favorites row followed by the app grid. Favorites and
+recent ordering persist per user. Arrow keys move selection, Enter launches,
+Ctrl+D pins or unpins the selected app, and Escape or focus loss closes the
+launcher. It does not expose desktop actions or a command runner. Fuzzel stays
+available for deterministic file and semantic-result pickers. The include
+disables Sway's stock Super+D binding, leaving one default launcher shortcut.
+The disposable VM check exercises the launcher and Waybar in a temporary
+headless-plus-libinput Sway session because the regular VM Sway session has no
+input devices. The default focus-mode toggle moves to `Super+Tab`.
 `Super+Shift+F` opens deterministic search over files already
 selected in the local index; it uses Fuzzel's dmenu input and does not invoke
 embeddings or inference. Files marked with a `.no-ai` sidecar are excluded by
@@ -69,14 +67,19 @@ module boxes. The panel uses text labels, so it does not require a special icon
 font. Sway supervises Waybar through its native `swaybar_command` integration.
 Waybar's native module-group drawers can reveal a compact status cluster with
 a built-in transition if the panel later needs more room; they are not enabled
-in the default always-readable layout. The Waybar and Wofi themes share the
-graphite palette, cool-blue focus, and warm warning colors. Wofi uses a single
-soft floating surface with transparent app cells, a five-column grid, and an
-underline for the selected app; it appears only when invoked and keeps
-keyboard focus through native drun mode.
-Wofi uses Wayland layer-shell and exclusive keyboard focus; its drun mode is
-only application search. Fuzzel remains available for deterministic dmenu
-pickers. SwayNC stores the same D-Bus notifications sent as
+in the default always-readable layout. The Waybar and eGUI launcher themes
+share the graphite palette, cool-blue focus, and warm warning colors. The
+launcher uses a compact floating app grid with clear hover and keyboard
+selection states. It appears only when invoked and closes when it loses focus.
+The engineering image includes Firefox, NetworkManager's connection editor,
+Pavucontrol, Blueman, Wdisplays, Swaylock, and Brightnessctl. The launcher
+discovers their desktop entries. Waybar's network and audio labels open the
+matching upstream settings tools; the included Sway bindings provide screen
+lock (`Ctrl+Alt+L`), brightness, and audio controls from standard hardware
+keys. The image sets Firefox as the system XDG browser default; user-level
+desktop preferences can select a different installed browser.
+Fuzzel remains available for deterministic dmenu pickers. SwayNC stores the
+same D-Bus notifications sent as
 toasts, so the inbox has one notification-history surface. `evermore-notifyd`
 polls the read-only pending-operation list and posts a `Review` action for new
 requests; it opens a focused Evermore review card, where the owner still

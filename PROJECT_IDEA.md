@@ -1402,6 +1402,14 @@ config for the user to include explicitly. An isolated-XDG run verified the
 backup and idempotent rerun behavior; Sway parsed the installed includes with a
 normal `$mod` definition.
 
+**Launcher update (2026-11-13):** Super+Space now opens the dedicated
+`evermore-launcher` eGUI application. It reads installed XDG desktop entries,
+supports localized search, favorites, recent ordering, direct desktop-entry
+launch semantics, and an explicit no-results state. Fuzzel remains for
+deterministic dmenu pickers. The `launcher` npack package is included in the
+default image and user package database. The earlier Wofi descriptions below
+record the initial implementation and are historical.
+
 M8.3 uses SwayNotificationCenter for D-Bus toasts, history, grouping, and DND;
 the packaged CSS uses open graphite surfaces and unboxed notification rows.
 Owner approvals are critical urgency so they surface before ordinary
@@ -1664,6 +1672,88 @@ shell keyboard focus, exclusive-zone reflow, external drag-and-drop, and
 multi-output placement are known risks; validation tests focus early and
 defers external drag and persistent per-output drawers.
 
+### Phase 8.5: Application Readiness and Daily-Use Dogfooding
+
+**Goal:** Make the applications and desktop flows Evermore already has
+dependable for regular use before investing in a distribution installer. This
+phase is a hardening and product-scope phase, not a mandate to add more apps or
+features. A feature counts as supported only when its normal, failure, and
+recovery paths are documented and accepted below.
+
+The initial application inventory and daily-use scenario live in
+[`docs/application-readiness.md`](docs/application-readiness.md). It is a
+working status document; implemented features remain experimental until their
+acceptance criteria have evidence from the supported environment.
+
+**Implementation status (2026-11-13):** The first support inventory is in
+[`docs/application-readiness.md`](docs/application-readiness.md), with current
+engineering evidence kept distinct from supported status. The first-user
+enrollment helper now attempts to remove the account it just created when a
+later setup step fails, and the greeter packaging notes describe that behavior.
+This does not handle power loss during enrollment, and no Phase 8.5 acceptance
+scenario has been run yet; the applications remain experimental.
+
+**Scope:** The core Evermore-authored applications are the greeter/enrollment
+flow, signer and identity services, panel (settings, notifications, approvals,
+AI and file search), and `npack` software UI. The supported desktop baseline is
+the selected Sway/Waybar/Wofi/Fuzzel/SwayNC setup plus the upstream applications
+and integration hooks explicitly selected in the Application Set addendum.
+Anything else stays experimental or optional until it is deliberately added to
+this scope. Reuse upstream apps; this phase does not create Evermore versions
+of commodity applications.
+
+**Milestones:**
+
+- **M8.5.1 — Support contract and app inventory.** For each in-scope app and
+  end-to-end flow, record its owner, supported configuration, dependencies,
+  data/key ownership, user-visible failure behavior, recovery path, and current
+  evidence. Mark unfinished surfaces experimental in the UI/docs. Define the
+  release-blocking acceptance criteria before implementing fixes.
+- **M8.5.2 — Everyday desktop path.** Validate fresh login and logout, app
+  launch and focus, notifications and approvals, settings changes, identity
+  lock/unlock, and service restart/session recovery. Fix the failures and
+  confusing handoffs found in this path. Core use must remain functional when
+  relays or local inference are unavailable; optional Nostr and AI features
+  must fail clearly without blocking ordinary desktop use.
+- **M8.5.3 — Core app completeness.** Bring greeter/enrollment, signer and
+  identity management, panel surfaces, and `npack` UI to their documented
+  acceptance criteria. Make identity pairing, trust changes, package/model
+  install and removal, and consequential AI actions understandable and
+  reviewable in the UI. Remove routine dependence on developer scripts or
+  undocumented CLI steps. Do not expand scope with new app concepts until
+  existing flows meet their criteria.
+- **M8.5.4 — Reliability, upgrade, and recovery.** Exercise daemon crashes,
+  machine restart, interrupted enrollment, locked or unavailable identity,
+  relay/network loss, failed package/model operations, and repeated upgrades.
+  Preserve user settings and identity state across supported upgrades; provide
+  actionable errors and documented recovery for failures that cannot be
+  repaired automatically. Review key handling, permissions, and sensitive-data
+  boundaries for the supported flows.
+- **M8.5.5 — Dogfood acceptance.** Run the defined daily-use scenario on a
+  disposable install over repeated sessions, then repeat the critical flows on
+  a second device or clean user profile. Record defects and close all
+  release-blocking issues. Publish a short support matrix distinguishing
+  supported, experimental, and unavailable features, with the exact tested
+  hardware/session assumptions.
+
+**Validation:** Start from a clean development image and complete onboarding,
+login, ordinary app launch, settings, notification review, signer lock/unlock,
+one approved AI action, and signed package/model management. Repeat after a
+reboot and with network, relay, or inference unavailable. Inject an interrupted
+enrollment and failed install, recover without losing identity or user data,
+and confirm an upgrade preserves state. Capture the test environment, results,
+and unresolved non-blocking defects in the support matrix. Passing means every
+in-scope critical flow has an owner, observable success criteria, a tested
+failure response, and a recovery path; it does not mean every proposed feature
+is implemented.
+
+**Exit gate:** Phase 9 distribution work may continue as engineering
+infrastructure, but a public distro/installer release is gated on M8.5.5. The
+image must package the accepted application set and support matrix; packaging
+does not upgrade experimental apps to supported status. Keep distribution
+milestones behind this gate so image work cannot substitute for application
+readiness.
+
 ### Phase 9: Offline Distribution Image and Installer
 
 **Goal:** Turn the assembled components into a machine. A bootable `archiso`
@@ -1685,6 +1775,12 @@ settles M6.5's release-shape question for the first release: the ISO — not AUR
 packages — is the deliverable, with packages for stock Arch remaining a
 secondary path for contributors and dogfooding. The four scope decisions below
 are made; the rest of the phase is plan.
+
+**Readiness dependency:** This phase's build work may proceed in parallel, but
+the ISO/installer is not a supported public release until Phase 8.5's app
+support contract, daily-use hardening, recovery checks, and dogfood acceptance
+pass. The distribution image packages the supported app set; it does not
+replace that acceptance.
 
 **Decided scope:**
 
@@ -1815,6 +1911,14 @@ remains for Evermore's deterministic dmenu pickers. This closes the app-grid
 gap without custom launcher or layer-shell client code. Explicit
 favourites are still missing; Wofi's cache is not treated as a pinning or MRU
 contract until that ordering is separately validated.
+
+**Implementation update (2026-11-13):** The custom eGUI launcher now replaces
+Wofi on Super+Space. It is a normal frameless eframe window centered by Sway,
+with favorites, recent usage, metadata search, keyboard selection, and focus
+dismissal. Its dedicated `launcher` npack package is staged and installed in
+the default image. The current launcher intentionally exposes installed apps
+only; there is no command runner or per-app action menu. The earlier reuse
+assessment and M10.1–M10.3 entries below describe the Wofi-era decision history.
 
 **Reuse assessment:**
 
@@ -2644,10 +2748,12 @@ with a retry, never a bare red line.
   not outlined containers. The active workspace uses a short accent underline.
   Each module is a short, readable label; icons can be added with the system
   font once that dependency is packaged.
-- **Wofi:** 900×600, five columns, generous outer padding and gaps, 136×108 px
-  transparent app cells, 48 px icons, and a 48 px search field. Selection is
-  an underline and text accent, not a tile fill or border. Wofi has no footer,
-  so key hints stay out of the launcher until the egui launcher replaces it.
+- **Launcher:** 900×620 centered floating window, responsive icon grid,
+  graphite surface, focused search field, rounded tiles, visible keyboard
+  selection, and per-tile favorite control. Favorites lead the empty-query
+  view; the remaining apps follow by recent use and alphabetical tie-break.
+  Search covers desktop names, generic names, comments, keywords, and IDs.
+  Keep the surface limited to application launching.
 - **SwayNC:** 400×680, 12 px cards with 16 px padding, priority as a 3 px
   left border, and sticky group headers.
 - **Command palette:** 720×520; 48 px search field, 44 px rows grouped by

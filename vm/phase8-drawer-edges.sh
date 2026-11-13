@@ -96,22 +96,24 @@ import json, sys
 
 tree = json.load(open(sys.argv[1]))
 
-def walk(node, workspace=None):
+def walk(node, workspace=None, output=None):
+    if node.get("type") == "output":
+        output = node
     if node.get("type") == "workspace":
         workspace = node
-    yield node, workspace
+    yield node, workspace, output
     for child in node.get("nodes", []) + node.get("floating_nodes", []):
-        yield from walk(child, workspace)
+        yield from walk(child, workspace, output)
 
 found = {}
-for node, workspace in walk(tree):
+for node, workspace, output in walk(tree):
     if node.get("pid") and node.get("name") in ("Evermore AI", "Evermore feed"):
-        found.setdefault(node["name"], (node, workspace))
+        found.setdefault(node["name"], (node, workspace, output))
 
-ai, ai_workspace = found.get("Evermore AI", (None, None))
-feed, feed_workspace = found.get("Evermore feed", (None, None))
-assert ai and ai_workspace, "AI drawer window is missing"
-assert feed and feed_workspace, "Nostr feed window is missing"
+ai, ai_workspace, ai_output = found.get("Evermore AI", (None, None, None))
+feed, feed_workspace, feed_output = found.get("Evermore feed", (None, None, None))
+assert ai and ai_workspace and ai_output, "AI drawer window is missing"
+assert feed and feed_workspace and feed_output, "Nostr feed window is missing"
 
 def rect(node):
     r = node["rect"]
@@ -119,15 +121,17 @@ def rect(node):
 
 ai_x, ai_y, ai_w, ai_h = rect(ai)
 feed_x, feed_y, feed_w, feed_h = rect(feed)
-ws_x, ws_y, ws_w, ws_h = rect(ai_workspace)
+_, ai_ws_y, _, _ = rect(ai_workspace)
+output_x = rect(ai_output)[0]
+feed_output_x, _, feed_output_w, _ = rect(feed_output)
 
-assert ai_x == ws_x, f"AI drawer is at x={ai_x}, expected left edge {ws_x}"
-assert ai_y == ws_y, f"AI drawer is at y={ai_y}, expected workspace top {ws_y}"
+assert ai_x == output_x, f"AI drawer is at x={ai_x}, expected output edge {output_x}"
+assert ai_y == ai_ws_y, f"AI drawer is at y={ai_y}, expected workspace top {ai_ws_y}"
 assert (ai_w, ai_h) == (400, 680), f"AI drawer is {ai_w}x{ai_h}, expected 400x680"
 
-feed_ws_x, feed_ws_y, feed_ws_w, feed_ws_h = rect(feed_workspace)
-assert feed_x + feed_w == feed_ws_x + feed_ws_w, (
-    f"feed right edge is {feed_x + feed_w}, expected {feed_ws_x + feed_ws_w}"
+_, feed_ws_y, _, _ = rect(feed_workspace)
+assert feed_x + feed_w == feed_output_x + feed_output_w, (
+    f"feed right edge is {feed_x + feed_w}, expected output edge {feed_output_x + feed_output_w}"
 )
 assert feed_y == feed_ws_y, f"feed drawer is at y={feed_y}, expected workspace top {feed_ws_y}"
 assert (feed_w, feed_h) == (340, 680), f"feed drawer is {feed_w}x{feed_h}, expected 340x680"

@@ -86,7 +86,14 @@ service loads the identity key into the login session keyring after login.
 The system-wide signer unit is enabled for every user so the account does not
 need a Rust toolchain in its home.
 
-If enrollment fails, the greeter reports the helper error and allows retry.
-Failures after homed has created the account require inspecting the homed
-record and home before removing anything. The helper will not alter existing
-accounts.
+At sign-in, accounts enrolled with the phone factor show **Use phone** beside
+the passphrase action. Choosing it activates the home through the PKCS#11
+provider and waits for the paired NIP-46 signer to approve. The passphrase
+continues to work as the offline fallback.
+
+If enrollment fails after `systemd-homed` creates the new account, the helper
+attempts to remove that account and its greeter profile before allowing retry.
+If cleanup itself fails, the error names the account and says to inspect it
+before retrying. The helper never removes an account that existed before this
+enrollment attempt. Sudden power loss during setup is not yet automatically
+recovered; see [application readiness](../../docs/application-readiness.md).

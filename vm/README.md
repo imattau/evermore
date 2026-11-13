@@ -70,7 +70,7 @@ vm/
   phase8-ai-proposal.sh <- verify real-model proposal through signed owner approval
   phase8-desktop-integration.sh <- run Send to AI and output-focus checks in disposable Sway
   phase8-launcher-input.sh <- regression check for the current launcher and deterministic Fuzzel pickers
-  phase10-launcher-waybar.sh <- test Wofi app grid and Waybar in temporary input-enabled Sway
+  phase10-launcher-waybar.sh <- test eGUI app launcher and Waybar in temporary input-enabled Sway
   phase8-send-to-ai.sh      <- validate file-manager AI handoff and .no-ai refusal in Sway
   phase8-ai-output-focus.sh <- verify the AI drawer closes when focused Sway output changes
   phase8-ai-window-focus.sh <- verify the AI drawer survives same-output window focus
@@ -129,15 +129,15 @@ running when checking the packaged configuration.
 
 ## Phase 10 launcher and Waybar check
 
-Wofi is the Super+Space desktop-app launcher. This check uses a separate Sway
-session with libinput so it can send the hotkey, confirm the empty-query grid,
-type the first search characters, launch Foot, and verify Escape and
-outside-click dismissal. It also starts Waybar using the packaged configuration.
+The eGUI `evermore-launcher` is the Super+Space desktop-app launcher. This
+check uses a separate Sway session with libinput to exercise the app grid,
+filtering, launching, favorite persistence, no-results feedback, Escape, and
+focus-loss dismissal. It also starts Waybar using the packaged configuration.
 The temporary session and XDG config are removed on exit; the normal VM desktop
 is left alone.
 
 ```bash
-vm/sync-repo.sh "bash vm/phase10-launcher-waybar.sh"
+vm/sync-repo.sh "cargo build -p evermore-launcher && bash vm/phase10-launcher-waybar.sh"
 ```
 
 Set `EVERMORE_PHASE10_GRID_SCREENSHOT=/tmp/phase10-grid.png` or
@@ -159,7 +159,7 @@ running `create-vm.sh`.
   cloud-init seed that creates a `builder` user with passwordless sudo and
   installs `base-devel`, `git`, `rustup` (default toolchain set to stable),
   `rsync`, `llama-cpp`, `bubblewrap`, `iproute2`, the desktop
-  components (`waybar`, `wofi`, `fuzzel`, `swaync`, `wl-clipboard`, `wtype`), and the
+  components (`waybar`, `fuzzel`, `swaync`, `wl-clipboard`, `wtype`), and the
    GUI build dependencies egui/eframe need to compile
    (`wayland`, `wayland-protocols`, `libxkbcommon`, `mesa`, `fontconfig`) —
    boots QEMU directly, and polls until SSH answers. First boot takes roughly

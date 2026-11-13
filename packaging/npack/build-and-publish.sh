@@ -16,7 +16,8 @@
 #     [--secret-key <nsec-or-hex>] [--dry-run]
 #
 # <package> is one of: settingsd, notifyd, blossom-fs, contextd, indexd,
-# inferd, operationsd, agentd, sway-ai-bridge, mcp, panel. (Not greeter -- see
+# inferd, operationsd, agentd, sway-ai-bridge, mcp, panel, launcher. (Not
+# greeter -- see
 # README.md's caveat; not signer/relay/enroll/pkcs11 -- bootstrap-only,
 # never npack packages at all.)
 #
@@ -66,8 +67,8 @@ if [ "${NPACK_MAJOR:-0}" -eq 0 ] && [ "${NPACK_MINOR:-0}" -lt 8 ]; then
 fi
 
 # name, dependency names (space-separated, empty for none), systemd unit
-# filename under packaging/systemd/ (empty for none -- mcp and panel
-# aren't daemons).
+# filename under packaging/systemd/ (empty for none -- mcp, panel, and
+# launcher aren't daemons).
 case "$PACKAGE" in
   settingsd)      DEPS="";               UNIT="evermore-settingsd@.service" ;;
   notifyd)        DEPS="settingsd";      UNIT="evermore-notifyd@.service" ;;
@@ -80,6 +81,7 @@ case "$PACKAGE" in
   sway-ai-bridge) DEPS="contextd";       UNIT="evermore-sway-ai-bridge.service" ;;
   mcp)            DEPS="operationsd";    UNIT="" ;;
   panel)          DEPS="";               UNIT="" ;;
+  launcher)       DEPS="";               UNIT="" ;;
   *) echo "unknown package '$PACKAGE' -- see this script's own usage comment" >&2; exit 1 ;;
 esac
 

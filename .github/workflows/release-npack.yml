@@ -14,7 +14,7 @@ on:
       packages:
         description: "Space-separated package names (see packaging/npack/README.md's table); defaults to all of them"
         required: false
-        default: "settingsd notifyd blossom-fs contextd indexd inferd operationsd sway-ai-bridge mcp panel"
+        default: "settingsd notifyd blossom-fs contextd indexd inferd operationsd sway-ai-bridge mcp panel launcher"
       relays:
         description: "Space-separated relay URLs to publish the release events to"
         required: false
@@ -67,12 +67,22 @@ jobs:
         package: ${{ fromJSON(needs.plan.outputs.packages) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: evermore
+
+      # The workspace pins the project's eframe/egui fork by relative path.
+      # Keep this revision aligned with the workspace's tested GUI API.
+      - uses: actions/checkout@v4
+        with:
+          repository: imattau/egui
+          ref: c64ec5d7d4e670224e638fcd998783608a443dfd
+          path: egui
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install panel's GUI build dependencies (eframe/egui needs these headers to compile, even headless)
-        if: ${{ matrix.package == 'panel' }}
+      - name: Install eframe GUI build dependencies (needed by panel and launcher, even headless)
+        if: ${{ matrix.package == 'panel' || matrix.package == 'launcher' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -90,9 +100,11 @@ jobs:
 
       - name: Read the publisher identity
         id: publisher
+        working-directory: evermore
         run: echo "hex=$(jq -r .hex packaging/npack/publisher.json)" >> "$GITHUB_OUTPUT"
 
       - name: Build, pack, and publish ${{ matrix.package }}
+        working-directory: evermore
         env:
           GH_TOKEN: ${{ github.token }}
           EVERMORE_NPACK_SECRET_KEY: ${{ secrets.EVERMORE_NPACK_SECRET_KEY }}
@@ -123,5 +135,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: npack-dry-run-${{ matrix.package }}
-          path: "*.dry-run/*"
+          path: "evermore/*.dry-run/*"
           if-no-files-found: warn

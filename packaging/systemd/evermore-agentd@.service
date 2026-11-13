@@ -23,7 +23,7 @@ ProtectHome=read-only
 # user_data_home() in evermore-common.
 ReadWritePaths=%h/.local/share/evermore
 PrivateTmp=true
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET
 
 [Install]
 WantedBy=default.target

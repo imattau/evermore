@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["apps/evermore-greeter", "apps/evermore-panel", "crates/evermore-agentd", "crates/evermore-blossom-fs", "crates/evermore-common", "crates/evermore-contextd", "crates/evermore-enroll", "crates/evermore-indexd", "crates/evermore-inferd", "crates/evermore-mcp", "crates/evermore-notifyd", "crates/evermore-npack", "crates/evermore-operationsd", "crates/evermore-pam-phone", "crates/evermore-pkcs11", "crates/evermore-settingsd", "crates/evermore-signer", "crates/evermore-sway-ai-bridge", "tools/adapter-training"]
+members = ["apps/evermore-greeter", "apps/evermore-launcher", "apps/evermore-panel", "crates/evermore-agentd", "crates/evermore-blossom-fs", "crates/evermore-common", "crates/evermore-contextd", "crates/evermore-enroll", "crates/evermore-indexd", "crates/evermore-inferd", "crates/evermore-mcp", "crates/evermore-notifyd", "crates/evermore-npack", "crates/evermore-operationsd", "crates/evermore-pam-phone", "crates/evermore-pkcs11", "crates/evermore-settingsd", "crates/evermore-signer", "crates/evermore-sway-ai-bridge", "tools/adapter-training"]
 
 [workspace.package]
 edition = "2024"
 
 [patch.crates-io]
-eframe = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
-egui = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
-egui-wgpu = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
-egui-winit = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
-egui_extras = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
-egui_glow = { git = "https://github.com/imattau/egui", branch = "codex/adaptive-layout" }
+eframe = { path = "../egui/crates/eframe" }
+egui = { path = "../egui/crates/egui" }
+egui-wgpu = { path = "../egui/crates/egui-wgpu" }
+egui-winit = { path = "../egui/crates/egui-winit" }
+egui_extras = { path = "../egui/crates/egui_extras" }
+egui_glow = { path = "../egui/crates/egui_glow" }

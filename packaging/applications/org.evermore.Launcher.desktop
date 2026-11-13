@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Evermore Apps
+Comment=Search and launch installed applications
+Exec=evermore-launcher
+TryExec=evermore-launcher
+Icon=applications-system
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=org.evermore.Launcher

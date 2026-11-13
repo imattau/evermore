@@ -13,6 +13,7 @@ struct UnitStatus {
 #[derive(Default)]
 pub(crate) struct State {
     statuses: HashMap<String, Result<UnitStatus, String>>,
+    recent_failures: HashMap<String, Result<Vec<String>, String>>,
     storage: Option<Result<(u64, u64), String>>,
     action_status: Option<String>,
 }
@@ -20,10 +21,13 @@ pub(crate) struct State {
 impl State {
     fn refresh(&mut self, identities: &[String]) {
         self.statuses.clear();
+        self.recent_failures.clear();
         self.storage = Some(local_storage_usage());
         for identity in identities {
             self.statuses
                 .insert(identity.clone(), read_status(identity));
+            self.recent_failures
+                .insert(identity.clone(), read_recent_failures(identity));
         }
     }
 }
@@ -116,6 +120,52 @@ fn read_status(identity: &str) -> Result<UnitStatus, String> {
     Ok(UnitStatus { active, sub, load })
 }
 
+fn read_recent_failures(identity: &str) -> Result<Vec<String>, String> {
+    let unit = unit_name(identity)?;
+    let output = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            &unit,
+            "--since",
+            "24 hours ago",
+            "--no-pager",
+            "--output=cat",
+            "-n",
+            "200",
+        ])
+        .output()
+        .map_err(|error| format!("couldn't read service journal: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let failures: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            [
+                "couldn't upload ",
+                "couldn't download ",
+                "couldn't write ",
+                "couldn't remove synced deletion ",
+                "couldn't publish index: ",
+                "couldn't sign index event: ",
+            ]
+            .iter()
+            .any(|marker| line.contains(marker))
+                || line.contains("failed its SHA-256 check")
+        })
+        .map(|line| {
+            let line = line.trim();
+            if line.chars().count() > 300 {
+                format!("{}…", line.chars().take(300).collect::<String>())
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    Ok(failures.into_iter().rev().take(5).collect())
+}
+
 fn open_logs(identity: &str) -> Result<(), String> {
     let unit = unit_name(identity)?;
     let args = ["--user", "-u", &unit, "-n", "100", "--no-pager"];
@@ -195,6 +245,26 @@ pub(crate) fn ui(ui: &mut egui::Ui, state: &mut State, identities: &[String]) {
             }
         });
     }
+    for identity in identities {
+        match state.recent_failures.get(identity) {
+            Some(Ok(failures)) if !failures.is_empty() => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Recent sync failures for {identity}"),
+                );
+                for failure in failures {
+                    ui.weak(failure);
+                }
+            }
+            Some(Err(error)) => {
+                ui.weak(format!(
+                    "Couldn't read recent sync errors for {identity}: {error}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    ui.weak("Recent file upload/download failures are read from the last 24 hours of this service's journal; entries older than journal retention cannot be shown here.");
     ui.weak("If the service is missing or failed, configure BLOSSOM_URL in its user-unit override before enabling or restarting it.");
     if let Some(status) = &state.action_status {
         ui.label(status);

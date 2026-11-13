@@ -370,6 +370,7 @@ struct PanelApp {
     // theme already switches via ctx.set_theme() on click regardless.
     theme_mode_override: Option<String>,
     settings_error: Option<String>,
+    settings_status: Option<String>,
     settings_loaded: bool,
     notifications_error: Option<String>,
     operations: Vec<Definition>,
@@ -993,8 +994,34 @@ impl PanelApp {
 
     fn set_theme_mode(&mut self, mode: &str) {
         match settings_client::set("theme", "mode", serde_json::Value::String(mode.to_string())) {
-            Ok(()) => self.refresh_theme(),
-            Err(e) => self.settings_error = Some(e),
+            Ok(()) => {
+                self.settings_status = Some("Appearance saved and synced.".into());
+                self.refresh_theme();
+            }
+            Err(e) => {
+                self.settings_status = None;
+                self.settings_error = Some(e);
+            }
+        }
+    }
+
+    fn set_appearance_value(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        match settings_client::set("theme", key, value) {
+            Ok(()) => {
+                self.settings_error = None;
+                self.settings_status = Some("Appearance saved and synced.".into());
+                self.refresh_theme();
+                apply_theme_settings(ctx, &self.theme_domain);
+            }
+            Err(error) => {
+                self.settings_status = None;
+                self.settings_error = Some(error);
+            }
         }
     }
 
@@ -3537,9 +3564,12 @@ impl eframe::App for PanelApp {
             Tab::Settings => {
                 if !self.settings_loaded {
                     self.refresh_theme();
+                    apply_theme_settings(ui.ctx(), &self.theme_domain);
                 }
                 ui.heading("Settings");
-                ui.weak("Preferences for this identity, kept in sync across your devices.");
+                ui.weak(
+                    "Appearance follows your identity across devices. Desktop and hardware preferences stay on this device.",
+                );
                 ui.add_space(12.0);
 
                 if let Some(err) = self.settings_error.clone() {
@@ -3575,16 +3605,110 @@ impl eframe::App for PanelApp {
                             ui.ctx().set_theme(egui::ThemePreference::Dark);
                             self.theme_mode_override = Some("dark".to_string());
                             self.set_theme_mode("dark");
+                            apply_theme_settings(ui.ctx(), &self.theme_domain);
                         }
                         if ui.selectable_label(current_mode == "light", "Light").clicked() {
                             ui.ctx().set_theme(egui::ThemePreference::Light);
                             self.theme_mode_override = Some("light".to_string());
                             self.set_theme_mode("light");
+                            apply_theme_settings(ui.ctx(), &self.theme_domain);
                         }
                     });
                     ui.add_space(4.0);
                     ui.weak("Synced to every device signed in with this identity.");
+                    ui.add_space(8.0);
+
+                    let accent = self
+                        .theme_domain
+                        .get("accent")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("blue")
+                        .to_owned();
+                    ui.horizontal(|ui| {
+                        ui.label("Accent");
+                        for (value, label) in
+                            [("blue", "Blue"), ("teal", "Teal"), ("amber", "Amber")]
+                        {
+                            if ui.selectable_label(accent == value, label).clicked() {
+                                self.set_appearance_value(ui.ctx(), "accent", value.into());
+                            }
+                        }
+                    });
+
+                    let density = self
+                        .theme_domain
+                        .get("density")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("comfortable")
+                        .to_owned();
+                    ui.horizontal(|ui| {
+                        ui.label("Density");
+                        for (value, label) in
+                            [("comfortable", "Comfortable"), ("compact", "Compact")]
+                        {
+                            if ui.selectable_label(density == value, label).clicked() {
+                                self.set_appearance_value(ui.ctx(), "density", value.into());
+                            }
+                        }
+                    });
+
+                    let mut text_scale = self
+                        .theme_domain
+                        .get("text_scale")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(1.0) as f32;
+                    ui.horizontal(|ui| {
+                        ui.label("Text size");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut text_scale, 0.85..=1.5)
+                                    .step_by(0.05)
+                                    .suffix("×"),
+                            )
+                            .changed()
+                        {
+                            self.set_appearance_value(ui.ctx(), "text_scale", text_scale.into());
+                        }
+                    });
+
+                    let reduced_motion = self
+                        .theme_domain
+                        .get("reduced_motion")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let mut reduced_motion_value = reduced_motion;
+                    if ui.checkbox(&mut reduced_motion_value, "Reduce motion").changed() {
+                        self.set_appearance_value(ui.ctx(), "reduced_motion", reduced_motion_value.into());
+                    }
+
+                    if ui.button("Reset appearance").clicked() {
+                        let defaults = [
+                            ("mode", serde_json::json!("dark")),
+                            ("accent", serde_json::json!("blue")),
+                            ("density", serde_json::json!("comfortable")),
+                            ("text_scale", serde_json::json!(1.0)),
+                            ("reduced_motion", serde_json::json!(false)),
+                        ];
+                        for (key, value) in defaults {
+                            if let Err(error) = settings_client::set("theme", key, value) {
+                                self.settings_error = Some(error);
+                                self.settings_status = None;
+                                break;
+                            }
+                        }
+                        self.theme_mode_override = None;
+                        self.refresh_theme();
+                        apply_theme_settings(ui.ctx(), &self.theme_domain);
+                        if self.settings_error.is_none() {
+                            self.settings_status = Some("Appearance reset and synced.".into());
+                        }
+                    }
                 });
+
+                if let Some(status) = &self.settings_status {
+                    ui.add_space(6.0);
+                    ui.colored_label(egui::Color32::from_rgb(95, 190, 140), status);
+                }
 
                 ui.add_space(12.0);
                 advanced_details(ui, "settings_debug", |ui| {
@@ -4669,7 +4793,7 @@ fn advanced_details(
 /// instead of hardcoding dark values in each surface"), so this keeps the
 /// same structure (canvas/chrome/card/hover tones, one accent) just
 /// inverted in lightness rather than picking new hues.
-fn build_visuals(dark: bool) -> egui::Visuals {
+fn build_visuals(dark: bool, accent_name: &str) -> egui::Visuals {
     let mut visuals = if dark {
         egui::Visuals::dark()
     } else {
@@ -4746,48 +4870,79 @@ fn build_visuals(dark: bool) -> egui::Visuals {
 
 /// Type scale and spacing per the Evermore Graphite design note; shared by
 /// both themes since only color changes between dark and light.
-fn build_style(base: &egui::Style) -> egui::Style {
+fn build_style(
+    base: &egui::Style,
+    text_scale: f32,
+    compact: bool,
+    reduced_motion: bool,
+) -> egui::Style {
     let mut style = base.clone();
-    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    let density_scale = if compact { 0.78 } else { 1.0 };
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0) * density_scale;
+    style.spacing.button_padding = egui::vec2(12.0, 7.0) * density_scale;
     style.spacing.window_margin = egui::Margin::same(16);
     let inter_medium = egui::FontFamily::Name("inter-medium".into());
     let inter_semibold = egui::FontFamily::Name("inter-semibold".into());
     style.text_styles = [
         (
             egui::TextStyle::Small,
-            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            egui::FontId::new(12.0 * text_scale, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Body,
-            egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            egui::FontId::new(13.0 * text_scale, egui::FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Button,
-            egui::FontId::new(13.0, inter_medium),
+            egui::FontId::new(13.0 * text_scale, inter_medium),
         ),
         (
             egui::TextStyle::Heading,
-            egui::FontId::new(18.0, inter_semibold),
+            egui::FontId::new(18.0 * text_scale, inter_semibold),
         ),
         (
             egui::TextStyle::Monospace,
-            egui::FontId::new(13.0, egui::FontFamily::Monospace),
+            egui::FontId::new(13.0 * text_scale, egui::FontFamily::Monospace),
         ),
     ]
     .into();
+    if reduced_motion {
+        style.animation_time = 0.0;
+    }
     style
 }
 
 fn apply_theme(ctx: &egui::Context) {
+    apply_theme_settings(ctx, &serde_json::Map::new());
+}
+
+fn apply_theme_settings(
+    ctx: &egui::Context,
+    settings: &serde_json::Map<String, serde_json::Value>,
+) {
+    let accent = settings.get("accent").and_then(|v| v.as_str()).unwrap_or("blue");
+    let text_scale = settings
+        .get("text_scale")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0)
+        .clamp(0.85, 1.5) as f32;
+    let compact = settings.get("density").and_then(|v| v.as_str()) == Some("compact");
+    let reduced_motion = settings
+        .get("reduced_motion")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     for (theme, dark) in [(egui::Theme::Dark, true), (egui::Theme::Light, false)] {
-        ctx.set_visuals_of(theme, build_visuals(dark));
-        let style = build_style(&ctx.style_of(theme));
+        ctx.set_visuals_of(theme, build_visuals(dark, accent));
+        let style = build_style(&ctx.style_of(theme), text_scale, compact, reduced_motion);
         ctx.set_style_of(theme, style);
     }
-    // Dark-first per the design note; Settings' Dark/Light toggle switches
-    // this live via `ctx.set_theme`.
-    ctx.set_theme(egui::ThemePreference::Dark);
+    let mode = settings.get("mode").and_then(|v| v.as_str()).unwrap_or("dark");
+    ctx.set_theme(if mode == "light" {
+        egui::ThemePreference::Light
+    } else {
+        egui::ThemePreference::Dark
+    });
+    ctx.set_zoom_factor(text_scale);
 }
 
 /// Bundles Inter (UI, three weights) and JetBrains Mono (code/mono) per the

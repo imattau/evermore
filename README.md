@@ -52,6 +52,8 @@ give people more choice over the services and information they use.
 ## Follow the project
 
 - [Project ideas and roadmap](PROJECT_IDEA.md)
+- [Evermore basics implementation roadmap](docs/evermore-basics-roadmap.md)
+- [Evermore basics checklist](docs/evermore-basics-checklist.md)
 - [Development VM notes](vm/README.md) — for people helping build or test it
 - [Browse the source code](https://github.com/imattau/evermore)
 - [Share feedback or report a problem](https://github.com/imattau/evermore/issues)

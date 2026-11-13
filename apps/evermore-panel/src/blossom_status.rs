@@ -14,6 +14,7 @@ struct UnitStatus {
 pub(crate) struct State {
     statuses: HashMap<String, Result<UnitStatus, String>>,
     recent_failures: HashMap<String, Result<Vec<String>, String>>,
+    recent_conflicts: HashMap<String, Result<Vec<String>, String>>,
     storage: Option<Result<(u64, u64), String>>,
     action_status: Option<String>,
 }
@@ -22,12 +23,15 @@ impl State {
     fn refresh(&mut self, identities: &[String]) {
         self.statuses.clear();
         self.recent_failures.clear();
+        self.recent_conflicts.clear();
         self.storage = Some(local_storage_usage());
         for identity in identities {
             self.statuses
                 .insert(identity.clone(), read_status(identity));
             self.recent_failures
                 .insert(identity.clone(), read_recent_failures(identity));
+            self.recent_conflicts
+                .insert(identity.clone(), read_recent_conflicts(identity));
         }
     }
 }
@@ -166,6 +170,37 @@ fn read_recent_failures(identity: &str) -> Result<Vec<String>, String> {
     Ok(failures.into_iter().rev().take(5).collect())
 }
 
+fn read_recent_conflicts(identity: &str) -> Result<Vec<String>, String> {
+    let unit = unit_name(identity)?;
+    let output = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            &unit,
+            "--since",
+            "24 hours ago",
+            "--no-pager",
+            "--output=cat",
+            "-n",
+            "200",
+        ])
+        .output()
+        .map_err(|error| format!("couldn't read service journal: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            line.contains("preserving local edit for ")
+                || line.contains("preserving local deletion for ")
+        })
+        .map(str::to_owned)
+        .rev()
+        .take(5)
+        .collect())
+}
+
 fn open_logs(identity: &str) -> Result<(), String> {
     let unit = unit_name(identity)?;
     let args = ["--user", "-u", &unit, "-n", "100", "--no-pager"];
@@ -264,7 +299,20 @@ pub(crate) fn ui(ui: &mut egui::Ui, state: &mut State, identities: &[String]) {
             _ => {}
         }
     }
-    ui.weak("Recent file upload/download failures are read from the last 24 hours of this service's journal; entries older than journal retention cannot be shown here.");
+    for identity in identities {
+        if let Some(Ok(conflicts)) = state.recent_conflicts.get(identity) {
+            if !conflicts.is_empty() {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Local files preserved during remote updates for {identity}"),
+                );
+                for conflict in conflicts {
+                    ui.weak(conflict);
+                }
+            }
+        }
+    }
+    ui.weak("Recent file upload/download failures and preserved local changes are read from the last 24 hours of each service journal.");
     ui.weak("If the service is missing or failed, configure BLOSSOM_URL in its user-unit override before enabling or restarting it.");
     if let Some(status) = &state.action_status {
         ui.label(status);

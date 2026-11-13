@@ -124,9 +124,10 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
 - Settings can inspect the per-identity Blossom sync systemd service, open its
   recent journal output, and explain the `BLOSSOM_URL` setup requirement. It
   distinguishes a missing unit from a running or failed unit, and reports the
-  local `~/Nostr` file count and size, and recent upload/download failures from
-  the service journal. Durable per-file outcomes and conflict recovery remain
-  open.
+  local `~/Nostr` file count and size, recent upload/download failures, and
+  local edits preserved when remote updates arrive. Journal visibility is
+  limited to retained entries; durable per-file outcomes and guided conflict
+  resolution remain open.
 - The project readiness notes identify interruption, unavailable-service,
   keyboard/focus, accessible error recovery, and settings persistence as areas
   that still need end-to-end acceptance.

@@ -273,6 +273,15 @@ fn on_index_event(shared: &Shared, event: Event) {
                 None => !manifest.contains_key(filename),
             };
             if !local_is_clean {
+                if local.is_some() {
+                    eprintln!(
+                        "evermore-blossom-fs: preserving local edit for {filename}; remote update was not written"
+                    );
+                } else {
+                    eprintln!(
+                        "evermore-blossom-fs: preserving local deletion for {filename}; remote file was not restored"
+                    );
+                }
                 manifest.insert(filename.clone(), entry.clone());
                 continue;
             }

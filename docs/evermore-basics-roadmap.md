@@ -31,9 +31,10 @@ their phase gate has evidence in `application-readiness.md`.
 - **Phase 5:** searchable in-panel troubleshooting and an opt-in sanitized
   diagnostic export are implemented. Settings also reports per-identity
   Blossom sync service health with recent-log access, setup guidance, and local
-  sync-folder file count and size, and recent file errors from the systemd
-  journal. Durable per-file outcomes and conflict recovery remain open, along
-  with accessibility review and localization preparation.
+  sync-folder file count and size, recent file errors, and local changes
+  preserved during remote updates. Durable per-file outcomes and guided
+  conflict recovery remain open, along with accessibility review and
+  localization preparation.
 - **Phase 6:** acceptance remains open; no readiness gate has been verified.
 
 ## Phase 1 — Settings foundation and appearance

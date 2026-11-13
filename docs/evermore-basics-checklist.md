@@ -121,6 +121,10 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
 - The panel has searchable setup/recovery guidance and an opt-in diagnostics
   export. The report contains kernel details and normalized Evermore service
   states; it excludes logs, relay addresses, keys, and message content.
+- Settings can inspect the per-identity Blossom sync systemd service and
+  distinguish a missing unit from a running or failed unit. This is service
+  health only; it does not yet report per-file upload/download failures, local
+  storage use, or conflict recovery.
 - The project readiness notes identify interruption, unavailable-service,
   keyboard/focus, accessible error recovery, and settings persistence as areas
   that still need end-to-end acceptance.

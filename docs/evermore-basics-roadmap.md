@@ -29,8 +29,10 @@ their phase gate has evidence in `application-readiness.md`.
   graphical power policy, onboarding, and complete daily-use recovery remain
   open.
 - **Phase 5:** searchable in-panel troubleshooting and an opt-in sanitized
-  diagnostic export are implemented. Storage/sync conflict recovery,
-  accessibility review, and localization preparation remain open.
+  diagnostic export are implemented. Settings also reports per-identity
+  Blossom sync service health; file-level outcomes, local storage use, and
+  conflict recovery remain open, along with accessibility review and
+  localization preparation.
 - **Phase 6:** acceptance remains open; no readiness gate has been verified.
 
 ## Phase 1 — Settings foundation and appearance

@@ -13,6 +13,7 @@ struct UnitStatus {
 #[derive(Default)]
 pub(crate) struct State {
     statuses: HashMap<String, Result<UnitStatus, String>>,
+    action_status: Option<String>,
 }
 
 impl State {
@@ -25,7 +26,7 @@ impl State {
     }
 }
 
-fn read_status(identity: &str) -> Result<UnitStatus, String> {
+fn unit_name(identity: &str) -> Result<String, String> {
     let escaped = Command::new("systemd-escape")
         .args(["--template=evermore-blossom-fs@.service", identity])
         .output()
@@ -37,7 +38,11 @@ fn read_status(identity: &str) -> Result<UnitStatus, String> {
     if unit.is_empty() || !unit.starts_with("evermore-blossom-fs@") {
         return Err("couldn't resolve this identity's sync service name".into());
     }
+    Ok(unit)
+}
 
+fn read_status(identity: &str) -> Result<UnitStatus, String> {
+    let unit = unit_name(identity)?;
     let output = Command::new("systemctl")
         .args([
             "--user",
@@ -66,6 +71,24 @@ fn read_status(identity: &str) -> Result<UnitStatus, String> {
     Ok(UnitStatus { active, sub, load })
 }
 
+fn open_logs(identity: &str) -> Result<(), String> {
+    let unit = unit_name(identity)?;
+    let args = ["--user", "-u", &unit, "-n", "100", "--no-pager"];
+    for (terminal, prefix) in [("foot", vec!["-e"]), ("xterm", vec!["-e"])] {
+        match Command::new(terminal)
+            .args(prefix)
+            .arg("journalctl")
+            .args(args)
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("couldn't open service logs: {error}")),
+        }
+    }
+    Err("no supported terminal was found (install foot or xterm)".into())
+}
+
 pub(crate) fn ui(ui: &mut egui::Ui, state: &mut State, identities: &[String]) {
     ui.horizontal(|ui| {
         ui.strong("Blossom file sync");
@@ -86,6 +109,12 @@ pub(crate) fn ui(ui: &mut egui::Ui, state: &mut State, identities: &[String]) {
     for identity in identities {
         ui.horizontal(|ui| {
             ui.label(identity);
+            if ui.small_button("View logs").clicked() {
+                state.action_status = Some(match open_logs(identity) {
+                    Ok(()) => format!("Opened recent logs for {identity}."),
+                    Err(error) => error,
+                });
+            }
             match state.statuses.get(identity) {
                 Some(Ok(status)) if status.load == "not-found" => {
                     ui.weak("not enabled");
@@ -107,5 +136,9 @@ pub(crate) fn ui(ui: &mut egui::Ui, state: &mut State, identities: &[String]) {
                 }
             }
         });
+    }
+    ui.weak("If the service is missing or failed, configure BLOSSOM_URL in its user-unit override before enabling or restarting it.");
+    if let Some(status) = &state.action_status {
+        ui.label(status);
     }
 }

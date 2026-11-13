@@ -22,8 +22,9 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
   controls, and whether optional relay notifications are enabled.
 - [ ] **Network and relays:** show local relay status; list configured external
   relays; add, remove, reorder, and test a relay; explain offline behaviour.
-- [ ] **Identity and devices:** show the active public identity, signer/lock
-  status, linked devices, last sync, and a safe way to revoke a device.
+- [ ] **Identity and devices:** show the active public identity and editable
+  public NIP-01 profile, signer/lock status, linked devices, last sync, and a
+  safe way to revoke a device.
 - [ ] **Privacy and AI:** choose which folders or sources AI can use, show
   exclusions such as `.no-ai`, configure redaction and retention, and expose
   the active model and whether inference is local.
@@ -34,6 +35,15 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
   and conflict/recovery actions for Blossom files.
 - [ ] **Accounts and access:** show the current user/session and provide clear
   lock, sign-out, and identity recovery paths. Avoid exposing secret keys.
+- [ ] **Language and region:** choose an installed operating-system locale,
+  preview regional date/time conventions, and state which apps and users are
+  affected. Keep the Evermore display language explicit and fall back safely.
+- [ ] **Date and time:** show current local time, time zone, and automatic
+  synchronization status; allow authorized time-zone and synchronization
+  changes, sync these preferences by identity, and explain how they affect
+  local schedules such as quiet hours.
+- [ ] **Power and devices:** surface battery/power status and provide working
+  links to network, audio, display, Bluetooth, and screen-lock controls.
 
 ### Every setting should
 
@@ -89,12 +99,22 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
 - AI context already has source allowlisting, one-turn/pinned scopes,
   `.no-ai` enforcement, redaction, and local model selection. Settings now
   shows the active identity's trusted publisher list, confirms add/revoke
-  actions, and opens the existing software manager. AI retention and
-  package/model update status remain open.
+  actions, and opens the existing software manager. AI conversation retention
+  is selected from identity-synced Settings and applied to local session data;
+  package/model update status remains open.
 - The engineering image now packages Firefox, NetworkManager's connection
   editor, Pavucontrol, Blueman, Wdisplays, Swaylock, and Brightnessctl.
   Waybar opens network/audio tools; the Sway profile binds hardware keys for
   lock, brightness, and audio. Firefox is the system XDG browser default.
+- Settings now shows the current Linux user, confirmed lock/sign-out actions,
+  generated system locales, installed time zones, automatic time-sync state,
+  and entry points to upstream network/audio/display/Bluetooth tools. The
+  engineering image generates `en_US.UTF-8` and starts the LXQt Polkit agent
+  for authorized system changes. Locale and time-zone preferences use the
+  identity settings relay domain; automatic clock-sync preference also syncs.
+  Applying these choices remains a confirmed OS action on each device.
+  Evermore itself remains English-only; additional Linux
+  account management and graphical power-policy settings remain open.
 - The panel has searchable setup/recovery guidance and an opt-in diagnostics
   export. The report contains kernel details and normalized Evermore service
   states; it excludes logs, relay addresses, keys, and message content.

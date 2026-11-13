@@ -31,7 +31,7 @@ use tungstenite::Message;
 const PROFILES_DIR: &str = "/var/lib/evermore-profiles";
 const DEFAULT_RELAY_URL: &str = "ws://127.0.0.1:4869";
 
-#[derive(serde::Serialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct ProfileCache {
     name: String,
     avatar: Option<String>,
@@ -47,6 +47,7 @@ pub fn set_profile(
     keys: &Keys,
     display_name: &str,
     avatar_path: Option<&Path>,
+    picture_url: Option<&str>,
 ) -> Result<(), String> {
     let pubkey_hex = keys.public_key().to_hex();
     let dir = PathBuf::from(PROFILES_DIR).join(&pubkey_hex);
@@ -55,7 +56,7 @@ pub fn set_profile(
 
     let avatar_filename = match avatar_path {
         Some(src) => Some(copy_avatar(src, &dir)?),
-        None => None,
+        None => cached_avatar(&dir),
     };
 
     write_cache_file(
@@ -67,7 +68,9 @@ pub fn set_profile(
     )?;
 
     let mut metadata = serde_json::json!({ "name": display_name });
-    if let Some(avatar_filename) = &avatar_filename {
+    if let Some(picture_url) = picture_url {
+        metadata["picture"] = serde_json::json!(picture_url);
+    } else if let Some(avatar_filename) = &avatar_filename {
         metadata["picture"] =
             serde_json::json!(format!("file://{}/{avatar_filename}", dir.display()));
     }
@@ -77,6 +80,19 @@ pub fn set_profile(
     publish_best_effort(&event);
 
     Ok(())
+}
+
+/// A name-only profile update should not silently remove an avatar that was
+/// previously selected on this device.
+fn cached_avatar(dir: &Path) -> Option<String> {
+    let cache: ProfileCache =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("profile.json")).ok()?).ok()?;
+    let filename = cache.avatar?;
+    let path = Path::new(&filename);
+    if path.file_name()?.to_str()? != filename.as_str() || !dir.join(&filename).is_file() {
+        return None;
+    }
+    Some(filename)
 }
 
 fn copy_avatar(src: &Path, dir: &Path) -> Result<String, String> {

@@ -58,12 +58,13 @@ fn main() {
                               signing requests for a paired identity fail with\n\
                               a clear error until it is.\n\
                  list-remote  list identities paired to a remote signer\n\
-                 set-profile NAME --display-name NAME [--avatar PATH]\n\
+                 set-profile NAME --display-name NAME [--avatar PATH | --picture-url URL]\n\
                               set this identity's display name/avatar: writes\n\
                               the pre-login cache evermore-greeter reads\n\
                               (/var/lib/evermore-profiles/<pubkey-hex>/) and\n\
                               best-effort publishes a kind:0 event to the\n\
-                              local relay. --avatar must be .png/.jpg/.jpeg."
+                              local relay. --avatar must be .png/.jpg/.jpeg;\n\
+                              --picture-url preserves a public picture URL."
             );
             std::process::exit(2);
         }
@@ -195,6 +196,10 @@ fn set_profile(name: Option<&String>, args: &[String]) -> Result<(), String> {
         .ok_or_else(|| "missing identity name".to_string())?;
     let display_name = require_flag(args, "--display-name")?;
     let avatar = flag_value(args, "--avatar").map(PathBuf::from);
+    let picture_url = flag_value(args, "--picture-url");
+    if avatar.is_some() && picture_url.is_some() {
+        return Err("use either --avatar or --picture-url, not both".into());
+    }
 
     let bytes = keyring_store::load(name)
         .map_err(|e| e.to_string())?
@@ -204,7 +209,12 @@ fn set_profile(name: Option<&String>, args: &[String]) -> Result<(), String> {
     let secret_key = SecretKey::from_slice(&bytes).map_err(|e| e.to_string())?;
     let keys = Keys::new(secret_key);
 
-    profile::set_profile(&keys, &display_name, avatar.as_deref())?;
+    profile::set_profile(
+        &keys,
+        &display_name,
+        avatar.as_deref(),
+        picture_url.as_deref(),
+    )?;
     println!("profile set for '{name}' ({})", keys.public_key().to_hex());
     Ok(())
 }

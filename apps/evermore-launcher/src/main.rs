@@ -506,28 +506,6 @@ impl eframe::App for Launcher {
                         );
                     }
                 } else {
-                    let favorites = self.favorite_indices();
-                    if !favorites.is_empty() {
-                        ui.label(
-                            egui::RichText::new("FAVORITES")
-                                .small()
-                                .strong()
-                                .color(muted),
-                        );
-                        self.draw_grid(
-                            ui,
-                            "favorites",
-                            &favorites,
-                            TilePalette {
-                                card,
-                                line,
-                                text,
-                                accent,
-                            },
-                            &mut pending,
-                        );
-                        ui.add_space(8.0);
-                    }
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new("ALL APPS")
@@ -541,11 +519,10 @@ impl eframe::App for Launcher {
                                 .color(muted),
                         );
                     });
-                    let all = self.all_app_indices();
                     self.draw_grid(
                         ui,
                         "all-apps",
-                        &all,
+                        &visible,
                         TilePalette {
                             card,
                             line,
@@ -616,43 +593,6 @@ impl Launcher {
                 .then_with(|| app_a.name.to_lowercase().cmp(&app_b.name.to_lowercase()))
         });
         scored.into_iter().map(|(_, index)| index).collect()
-    }
-
-    fn favorite_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<_> = self
-            .apps
-            .iter()
-            .enumerate()
-            .filter_map(|(index, app)| self.favorites.app_ids.contains(&app.id).then_some(index))
-            .collect();
-        indices.sort_by(|a, b| {
-            self.apps[*a]
-                .name
-                .to_lowercase()
-                .cmp(&self.apps[*b].name.to_lowercase())
-        });
-        indices
-    }
-
-    fn all_app_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<_> = self
-            .apps
-            .iter()
-            .enumerate()
-            .filter_map(|(index, app)| (!self.favorites.app_ids.contains(&app.id)).then_some(index))
-            .collect();
-        indices.sort_by(|a, b| {
-            self.usage_for(&self.apps[*b].id)
-                .last_launched
-                .cmp(&self.usage_for(&self.apps[*a].id).last_launched)
-                .then_with(|| {
-                    self.apps[*a]
-                        .name
-                        .to_lowercase()
-                        .cmp(&self.apps[*b].name.to_lowercase())
-                })
-        });
-        indices
     }
 
     fn usage_for(&self, id: &str) -> Usage {
@@ -1188,5 +1128,41 @@ mod tests {
         );
         let argv = app.desktop.parse_exec().unwrap();
         assert_eq!(argv, ["tool", "--message", "hello world"]);
+    }
+
+    #[test]
+    fn favorited_apps_stay_at_start_of_full_list() {
+        let dir = temp_dir();
+        let launcher = Launcher {
+            apps: vec![
+                entry(
+                    "alpha",
+                    "[Desktop Entry]\nType=Application\nName=Alpha\nExec=alpha\n",
+                ),
+                entry(
+                    "beta",
+                    "[Desktop Entry]\nType=Application\nName=Beta\nExec=beta\n",
+                ),
+                entry(
+                    "gamma",
+                    "[Desktop Entry]\nType=Application\nName=Gamma\nExec=gamma\n",
+                ),
+            ],
+            favorites: FavoritesFile {
+                version: 1,
+                app_ids: BTreeSet::from(["gamma".to_owned()]),
+            },
+            favorites_path: dir.join("launcher.json"),
+            history_path: dir.join("launcher-history.json"),
+            ..Default::default()
+        };
+
+        let ordered: Vec<&str> = launcher
+            .visible_indices()
+            .into_iter()
+            .map(|index| launcher.apps[index].id.as_str())
+            .collect();
+        assert_eq!(ordered, ["gamma", "alpha", "beta"]);
+        let _ = fs::remove_dir_all(dir);
     }
 }

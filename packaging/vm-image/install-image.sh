@@ -67,6 +67,7 @@ sed -e 's/@VERSION@/0.9.4/' -e "s/@DATE@/$(date -u +%F)/" \
   "$STAGE/share/io.npack.Gui.metainfo.xml" > /usr/share/metainfo/io.npack.Gui.metainfo.xml
 install -m 0644 "$STAGE/systemd/user/npackd.service" /usr/lib/systemd/user/
 install -m 0644 "$ROOT/packaging/npack/default-config.toml" /etc/skel/.config/npack/config.toml
+install -D -m 0644 "$ROOT/packaging/xdg/mimeapps.list" /etc/xdg/mimeapps.list
 desktop-file-validate /usr/share/applications/io.npack.Gui.desktop
 update-desktop-database /usr/share/applications
 install -m 0755 "$STAGE/lib/evermore-pkcs11.so" /usr/lib/pkcs11/evermore-pkcs11.so

@@ -46,7 +46,8 @@
     "format-wifi": "Wi-Fi {essid} · {signalStrength}%",
     "format-ethernet": "Network {ipaddr}",
     "format-disconnected": "Network offline",
-    "tooltip-format": "{ifname}: {ipaddr}/{cidr}"
+    "tooltip-format": "{ifname}: {ipaddr}/{cidr}",
+    "on-click": "nm-connection-editor"
   },
   "custom/notification": {
     "format": "Inbox {0}",
@@ -60,7 +61,8 @@
   "pulseaudio": {
     "format": "Audio {volume}%",
     "format-muted": "Audio muted",
-    "scroll-step": 5
+    "scroll-step": 5,
+    "on-click": "pavucontrol"
   },
   "battery": {
     "states": {

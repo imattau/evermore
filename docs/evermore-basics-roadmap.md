@@ -11,7 +11,18 @@ their phase gate has evidence in `application-readiness.md`.
 - **Phase 2:** external relay management/testing, notification source controls,
   and local-time quiet-hours DND are implemented. Identity/device management,
   live relay subscription refresh, and the phase acceptance gate remain open.
-- **Phases 3–6:** planned; implementation and acceptance evidence remain open.
+- **Phase 3:** AI source scopes, `.no-ai`, redaction, local model selection, and
+  trusted-publisher visibility and confirmed trust/revoke actions are present.
+  Retention controls, package/model update status, and phase acceptance remain
+  open.
+- **Phase 4:** the engineering image now includes Firefox and upstream network,
+  audio, Bluetooth, display, lock, and brightness tools with Waybar/hardware
+  entry points, and sets Firefox as the system XDG browser default. Onboarding
+  and complete daily-use recovery remain open.
+- **Phase 5:** searchable in-panel troubleshooting and an opt-in sanitized
+  diagnostic export are implemented. Storage/sync conflict recovery,
+  accessibility review, and localization preparation remain open.
+- **Phase 6:** acceptance remains open; no readiness gate has been verified.
 
 ## Phase 1 — Settings foundation and appearance
 

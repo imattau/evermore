@@ -84,8 +84,20 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
   save feedback, and reset controls, alongside its technical debug disclosure.
 - Settings now includes external relay add/remove/reorder and connection
   checks, source-level notification controls, and scheduled quiet hours using
-  local device time. External relay subscription changes require restarting
-  `evermore-notifyd`; source toggles and the DND schedule take effect live.
+  local device time. The panel now offers to restart `evermore-notifyd` after
+  relay changes; source toggles and the DND schedule take effect live.
+- AI context already has source allowlisting, one-turn/pinned scopes,
+  `.no-ai` enforcement, redaction, and local model selection. Settings now
+  shows the active identity's trusted publisher list, confirms add/revoke
+  actions, and opens the existing software manager. AI retention and
+  package/model update status remain open.
+- The engineering image now packages Firefox, NetworkManager's connection
+  editor, Pavucontrol, Blueman, Wdisplays, Swaylock, and Brightnessctl.
+  Waybar opens network/audio tools; the Sway profile binds hardware keys for
+  lock, brightness, and audio. Firefox is the system XDG browser default.
+- The panel has searchable setup/recovery guidance and an opt-in diagnostics
+  export. The report contains kernel details and normalized Evermore service
+  states; it excludes logs, relay addresses, keys, and message content.
 - The project readiness notes identify interruption, unavailable-service,
   keyboard/focus, accessible error recovery, and settings persistence as areas
   that still need end-to-end acceptance.

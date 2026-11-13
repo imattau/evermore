@@ -5702,3 +5702,385 @@ mod tests {
         assert_eq!(truncate_picker_text("short", 5), "short");
     }
 }
+const ICON_HELP: &[u8] = include_bytes!("../assets/icons/help.svg");
+fn is_valid_pubkey_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn export_diagnostics() -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let directory = evermore_common::user_data_home().join("evermore/diagnostics");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    let path = directory.join(format!("diagnostics-{timestamp}.txt"));
+    let mut report = String::from("Evermore diagnostic summary\n");
+
+    let kernel = std::process::Command::new("uname")
+        .args(["-s", "-r", "-m"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|_| "unavailable".into());
+    report.push_str(&format!("Kernel: {kernel}\n"));
+
+    let units = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "--no-pager",
+            "--plain",
+            "--no-legend",
+            "list-units",
+            "--all",
+            "--type=service",
+        ])
+        .output();
+    report.push_str("Evermore user services:\n");
+    if let Ok(output) = units {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let Some(unit) = fields.next() else { continue };
+            if !unit.starts_with("evermore-") && unit != "npackd.service" {
+                continue;
+            }
+            let load = fields.next().unwrap_or("unknown");
+            let active = fields.next().unwrap_or("unknown");
+            let sub = fields.next().unwrap_or("unknown");
+            let normalized_unit = unit
+                .split_once('@')
+                .map(|(base, _)| format!("{base}@*"))
+                .unwrap_or_else(|| unit.to_owned());
+            report.push_str(&format!("  {normalized_unit}: {load}/{active}/{sub}\n"));
+        }
+    } else {
+        report.push_str("  unavailable\n");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    use std::io::Write;
+    file.write_all(report.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+    relay_restart_needed: bool,
+    trusted_publishers: Vec<String>,
+    trusted_publishers_loaded: bool,
+    trusted_publishers_error: Option<String>,
+    trusted_publishers_rx: Option<Receiver<Result<Vec<String>, String>>>,
+    trusted_publishers_action: bool,
+    trusted_publisher_input: String,
+    pending_trust_change: Option<(String, bool)>,
+    publisher_action_error: Option<String>,
+    help_query: String,
+    diagnostics_status: Option<String>,
+    fn help_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Help and diagnostics");
+        ui.weak("Search common setup and recovery questions. Export diagnostics only when you choose to share them.");
+        ui.add_space(12.0);
+        ui.text_edit_singleline(&mut self.help_query);
+
+        let topics = [
+            (
+                "Settings or relay status is unavailable",
+                "Retry from Settings. The local control-plane relay and settings service are separate from external relays; ordinary desktop apps continue to work when optional relays are offline.",
+            ),
+            (
+                "External relay changes have not appeared",
+                "External relay list changes are saved by identity. Restart the evermore-notifyd identity instance to replace its running subscriptions.",
+            ),
+            (
+                "Quiet hours are not suppressing notifications",
+                "Quiet hours use this device's local clock and control SwayNotificationCenter Do Not Disturb. Check that evermore-notifyd and swaync are running.",
+            ),
+            (
+                "A file or source is unavailable to local AI",
+                "Check the AI Context sources allowlist and session grants. Files must be in an indexed scope, use a supported text format, and not have a matching .no-ai sidecar. Secret-shaped text is redacted before local inference.",
+            ),
+            (
+                "A package or model is not offered",
+                "Evermore only discovers releases signed by a trusted publisher. Review the publisher key before trusting it. Revoking trust blocks future releases from that key but leaves already installed packages in place.",
+            ),
+        ];
+        let query = self.help_query.trim().to_lowercase();
+        for (title, body) in topics {
+            if query.is_empty()
+                || title.to_lowercase().contains(&query)
+                || body.to_lowercase().contains(&query)
+            {
+                ui.collapsing(title, |ui| {
+                    ui.label(body);
+                });
+            }
+        }
+
+        ui.add_space(12.0);
+        if ui.button("Export diagnostics").clicked() {
+            self.diagnostics_status = Some(match export_diagnostics() {
+                Ok(path) => {
+                    if let Err(error) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                        format!("Saved {}. Couldn't open it automatically: {error}", path.display())
+                    } else {
+                        format!("Saved sanitized diagnostics to {}.", path.display())
+                    }
+                }
+                Err(error) => format!("Couldn't export diagnostics: {error}"),
+            });
+        }
+        ui.weak("The export contains OS/kernel details and Evermore service names with active states. It does not include logs, relay addresses, public or secret keys, or message content.");
+        if let Some(status) = &self.diagnostics_status {
+            ui.label(status);
+        }
+    }
+
+                self.relay_restart_needed = true;
+    fn restart_notifications(&mut self) {
+        let Some(identity) = self.owner_identity_name() else {
+            self.relays_error = Some("No active identity is available to restart Notifications.".into());
+            return;
+        };
+        let unit = format!("evermore-notifyd@{identity}.service");
+        match std::process::Command::new("systemctl")
+            .args(["--user", "restart", &unit])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                self.relay_restart_needed = false;
+                self.settings_status = Some("Notifications restarted with the updated relay list.".into());
+                self.relays_error = None;
+            }
+            Ok(output) => {
+                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                self.relays_error = Some(if error.is_empty() {
+                    format!("systemctl could not restart {unit}.")
+                } else {
+                    error
+                });
+            }
+            Err(error) => self.relays_error = Some(format!("couldn't start systemctl: {error}")),
+        }
+    }
+
+    fn load_trusted_publishers(&mut self) {
+        if self.trusted_publishers_rx.is_some() || self.trusted_publishers_loaded {
+            return;
+        }
+        if !self.identities_loaded {
+            self.refresh_identities();
+        }
+        let Some(identity) = self.owner_identity_name() else {
+            self.trusted_publishers_loaded = true;
+            self.trusted_publishers_error = Some("No owner identity is available.".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.trusted_publishers_rx = Some(rx);
+        self.trusted_publishers_action = false;
+        std::thread::spawn(move || {
+            let _ = tx.send(npack_client::trusted_publishers(&identity));
+        });
+    }
+
+    fn owner_identity_name(&self) -> Option<String> {
+        let owner_identity = self.approval_identity.clone();
+        self.identities
+            .iter()
+            .find(|identity| identity.name == owner_identity && !is_system_identity(&identity.name))
+            .or_else(|| {
+                self.identities
+                    .iter()
+                    .find(|identity| !is_system_identity(&identity.name))
+            })
+            .map(|identity| identity.name.clone())
+    }
+
+    fn start_trust_change(&mut self, pubkey: String, trusted: bool) {
+        if self.trusted_publishers_rx.is_some() {
+            return;
+        }
+        let Some(identity) = self.owner_identity_name() else {
+            self.trusted_publishers_error = Some("No owner identity is available.".into());
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.trusted_publishers_rx = Some(rx);
+        self.trusted_publishers_action = true;
+        self.trusted_publishers_error = None;
+        std::thread::spawn(move || {
+            let result = npack_client::set_publisher_trust(&identity, &pubkey, trusted)
+                .and_then(|_| npack_client::trusted_publishers(&identity));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_trusted_publishers(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.trusted_publishers_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(publishers)) => {
+                self.trusted_publishers = publishers;
+                self.trusted_publishers_error = None;
+                self.trusted_publishers_loaded = true;
+                if self.trusted_publishers_action {
+                    self.settings_status = Some("Publisher trust list updated and synced.".into());
+                }
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+            Ok(Err(error)) => {
+                self.trusted_publishers_error = Some(error);
+                self.trusted_publishers_loaded = true;
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.trusted_publishers_error = Some("Publisher lookup stopped unexpectedly.".into());
+                self.trusted_publishers_loaded = true;
+                self.trusted_publishers_action = false;
+                self.trusted_publishers_rx = None;
+            }
+        }
+    }
+
+                        (Tab::Help, "help", ICON_HELP, "Help"),
+                self.load_trusted_publishers();
+                self.poll_trusted_publishers(ui.ctx());
+                    if self.relay_restart_needed
+                        && ui.button("Restart Notifications").clicked()
+                    {
+                        self.restart_notifications();
+                    }
+                ui.add_space(12.0);
+                open_section(ui, |ui| {
+                    section_heading(ui, "Software and trust");
+                    ui.weak("Packages and models are verified against publisher keys trusted by your identity.");
+                    if ui.button("Refresh trusted publishers").clicked() {
+                        self.trusted_publishers_loaded = false;
+                        self.trusted_publishers_error = None;
+                        self.load_trusted_publishers();
+                    }
+                    if let Some(error) = self.trusted_publishers_error.clone() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Couldn't load trusted publishers.",
+                        );
+                        ui.weak(error);
+                        if ui.button("Retry publisher list").clicked() {
+                            self.trusted_publishers_loaded = false;
+                            self.trusted_publishers_error = None;
+                            self.load_trusted_publishers();
+                        }
+                    } else if self.trusted_publishers_rx.is_some() {
+                        ui.weak("Loading trusted publishers…");
+                    } else if self.trusted_publishers.is_empty() {
+                        ui.weak("No trusted publishers are configured.");
+                    } else {
+                        for publisher in &self.trusted_publishers {
+                            ui.horizontal(|ui| {
+                                ui.monospace(publisher);
+                                if ui.small_button("Copy").clicked() {
+                                    ui.ctx().copy_text(publisher.clone());
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.trusted_publishers_rx.is_none(),
+                                        egui::Button::new("Revoke").small(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pending_trust_change = Some((publisher.clone(), false));
+                                    self.publisher_action_error = None;
+                                }
+                            });
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.trusted_publisher_input)
+                                .hint_text("Publisher public key (hex)"),
+                        );
+                        if ui
+                            .add_enabled(
+                                self.trusted_publishers_rx.is_none(),
+                                egui::Button::new("Review trust"),
+                            )
+                            .clicked()
+                        {
+                            let pubkey = self
+                                .trusted_publisher_input
+                                .trim()
+                                .to_ascii_lowercase();
+                            if is_valid_pubkey_hex(&pubkey) {
+                                if self.trusted_publishers.iter().any(|trusted| trusted == &pubkey) {
+                                    self.publisher_action_error =
+                                        Some("That publisher is already trusted.".into());
+                                } else {
+                                    self.pending_trust_change = Some((pubkey, true));
+                                    self.publisher_action_error = None;
+                                }
+                            } else {
+                                self.publisher_action_error = Some(
+                                    "Enter a 64-character hexadecimal public key.".into(),
+                                );
+                            }
+                        }
+                    });
+                    if let Some(error) = &self.publisher_action_error {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    if ui.button("Open software manager").clicked() {
+                        spawn_npack_gui();
+                    }
+                    ui.weak("Publisher trust changes are confirmed here. The software manager handles package and model discovery, installation, and removal. Revoking trust blocks future releases from that key; it does not remove packages already installed.");
+                });
+
+                if let Some((pubkey, trusted)) = self.pending_trust_change.clone() {
+                    let mut confirm = false;
+                    let mut cancel = false;
+                    egui::Window::new("Review publisher trust")
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ui.ctx(), |ui| {
+                            if trusted {
+                                ui.label("Trust signed packages and models from this publisher?");
+                            } else {
+                                ui.label("Revoke this publisher's trust?");
+                            }
+                            ui.monospace(&pubkey);
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(if trusted { "Trust publisher" } else { "Revoke trust" }).clicked() {
+                                    confirm = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    cancel = true;
+                                }
+                            });
+                        });
+                    if confirm {
+                        self.pending_trust_change = None;
+                        self.trusted_publisher_input.clear();
+                        self.start_trust_change(pubkey, trusted);
+                    } else if cancel {
+                        self.pending_trust_change = None;
+                    }
+                }
+
+            Tab::Help => {
+                self.help_ui(ui);
+            }

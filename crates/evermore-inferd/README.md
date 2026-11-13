@@ -26,7 +26,8 @@ Other settings: `EVERMORE_LLAMA_SERVER_BIN` (default `llama-server`),
 `EVERMORE_INFER_MAX_MODELS` (default 2, clamped to 1–8),
 `EVERMORE_INFER_READY_TIMEOUT_SECS` (default 120), and
 `EVERMORE_INFER_LOG_DIR` for child logs (default
-`$XDG_RUNTIME_DIR/evermore/llama-server`). The user service unit is
+`$XDG_DATA_HOME/evermore/llama-server`, normally
+`~/.local/share/evermore/llama-server`). The user service unit is
 `evermore-inferd.service`.
 
 ## Socket protocol

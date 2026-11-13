@@ -137,7 +137,12 @@ impl Pool {
         let args = command_args(model, addr.port(), backend, &api_key);
         let log_path = log_path(model);
         if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "cannot create llama-server log directory {}: {error}",
+                    parent.display()
+                )
+            })?;
         }
         let log = std::fs::OpenOptions::new()
             .create(true)
@@ -300,14 +305,16 @@ fn random_key() -> String {
     hex::encode(hasher.finalize())
 }
 
+fn log_dir(override_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    override_dir.map(PathBuf::from).unwrap_or_else(|| {
+        evermore_common::user_data_home()
+            .join("evermore")
+            .join("llama-server")
+    })
+}
+
 fn log_path(model: &InstalledModel) -> PathBuf {
-    let base = std::env::var_os("EVERMORE_INFER_LOG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("XDG_RUNTIME_DIR")
-                .map(|dir| PathBuf::from(dir).join("evermore").join("llama-server"))
-        })
-        .unwrap_or_else(|| std::env::temp_dir().join("evermore-llama-server"));
+    let base = log_dir(std::env::var_os("EVERMORE_INFER_LOG_DIR").as_deref());
     let safe: String = model
         .name()
         .chars()
@@ -423,5 +430,21 @@ mod tests {
             pool.endpoint_for_backend("evermore/not-loaded", Backend::Auto)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn default_log_dir_uses_user_data_home_not_runtime_dir() {
+        let dir = log_dir(None);
+        assert_eq!(
+            dir,
+            evermore_common::user_data_home()
+                .join("evermore")
+                .join("llama-server")
+        );
+        if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR")
+            && runtime_dir != evermore_common::user_data_home()
+        {
+            assert!(!dir.starts_with(PathBuf::from(runtime_dir)));
+        }
     }
 }

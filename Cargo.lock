@@ -1566,6 +1566,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "evermore-pam-phone"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
 name = "evermore-panel"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ app showing each identity's `kind:0`-derived name/avatar, run inside
 - `cage` (official Arch package) -- the kiosk compositor evermore-greeter runs inside
 - `evermore-greeter` itself on `$PATH` (built from `apps/evermore-greeter`)
 - `evermore-enroll` and `evermore-signer` in `/usr/bin` for first-user setup and login key loading
+- `pam_evermore_phone.so` in `/usr/lib/security` for the greeter's explicit phone-login route
 - `qrencode` (official Arch package) for the first-user NIP-46 pairing QR
 - `sudo` for the greeter's restricted first-user helper commands
 
@@ -21,17 +22,22 @@ the setup wizard to offer phone approval:
 
 ```sh
 cargo build --release -p evermore-pkcs11
+cargo build --release -p evermore-pam-phone
 sudo install -Dm0755 target/release/libevermore_pkcs11.so /usr/lib/pkcs11/evermore-pkcs11.so
+sudo install -Dm0755 target/release/libpam_evermore_phone.so /usr/lib/security/pam_evermore_phone.so
 sudo install -Dm0644 packaging/pkcs11/evermore-pkcs11.module /usr/share/p11-kit/modules/evermore-pkcs11.module
 sudo p11-kit list-modules
 ```
 
-The module provides homed's PKCS#11 unlock factor. The greeter pairs the
-device's NIP-46 client identity with a phone, validates the connect secret and
-`get_public_key` response, and stores the remote signer and relay in the
-root-only device state. The homed record receives both the PKCS#11 factor and
-the regular passphrase factor. If the relay is offline or the user skips
-pairing, setup continues with the passphrase factor alone.
+The module provides homed's PKCS#11 unlock factor. Each account gets a
+separate NIP-46 client identity, relay, and remote signer pairing under
+`/var/lib/evermore/users/<username>` with root-only permissions. The greeter
+selects the account's pairing at unlock time, and the phone approval request
+names the account. The homed record receives that account's PKCS#11 factor
+and keeps its regular passphrase factor. Pairing is available during
+first-user setup; the root enrollment helper accepts a username so the same
+flow can be wired into multi-account provisioning. If the relay is offline
+or the user skips pairing, setup continues with the passphrase factor alone.
 
 On real hardware with a GPU, that's everything: `cage` picks up the
 real GPU driver automatically. **On a headless VM with no GPU (e.g.

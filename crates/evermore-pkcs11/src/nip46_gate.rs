@@ -7,18 +7,12 @@
 //! Two Nostr identities are involved here, both already established
 //! elsewhere in the project rather than invented for this module:
 //!
-//! - the device-root identity: `evermore-signer`'s `device_identity.rs`
-//!   bootstraps and owns `/var/lib/evermore/device-identity` (a
-//!   root-owned, 0600, hex-encoded secret key -- same trust boundary as
-//!   an SSH host key). This module runs inside `systemd-homework`, with
-//!   no running `evermore-signer` daemon or session keyring to call
-//!   into, so it reads that same file directly rather than depending on
-//!   `evermore-signer` as a library or duplicating its bootstrap logic
-//!   (bootstrapping stays that crate's job; this one only ever reads).
-//! - the paired remote signer's pubkey + relay: configured separately
-//!   from `evermore-signer`'s per-identity `backing::Backing::Remote`
-//!   records, because this gates the *device's own* unlock rather than
-//!   any one human identity's signing, via `pkcs11-nip46-pairing.json`
+//! - a per-user NIP-46 client identity stored at
+//!   `/var/lib/evermore/users/<username>/device-identity`. This module
+//!   runs inside `systemd-homework`, with no running user signer daemon
+//!   or session keyring, so it reads the root-owned 0600 key directly.
+//! - that account's remote signer pubkey + relay, stored beside its
+//!   client identity in `pkcs11-nip46-pairing.json`
 //!   (or `EVERMORE_PKCS11_NIP46_RELAY`/`EVERMORE_PKCS11_NIP46_REMOTE_PUBKEY`
 //!   for testing).
 //!
@@ -66,7 +60,11 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/var/lib/evermore"))
 }
 
-fn load_pairing() -> Result<Pairing, String> {
+fn user_state_dir(username: &str) -> PathBuf {
+    state_dir().join("users").join(username)
+}
+
+fn load_pairing(username: &str) -> Result<Pairing, String> {
     if let (Ok(relay), Ok(pk_hex)) = (
         std::env::var("EVERMORE_PKCS11_NIP46_RELAY"),
         std::env::var("EVERMORE_PKCS11_NIP46_REMOTE_PUBKEY"),
@@ -79,7 +77,7 @@ fn load_pairing() -> Result<Pairing, String> {
         });
     }
 
-    let path = state_dir().join("pkcs11-nip46-pairing.json");
+    let path = user_state_dir(username).join("pkcs11-nip46-pairing.json");
     let text = std::fs::read_to_string(&path).map_err(|e| {
         format!(
             "no NIP-46 pairing configured (reading {}: {e}) -- unlock via this path refuses by \
@@ -97,12 +95,11 @@ fn load_pairing() -> Result<Pairing, String> {
     })
 }
 
-/// Reads the device-root identity directly from
-/// `evermore-signer`'s state file. Read-only: if it doesn't exist, the
-/// device hasn't been bootstrapped yet and this errors rather than
-/// generating a second, competing device key.
-fn load_device_keys() -> Result<Keys, String> {
-    let path = state_dir().join("device-identity");
+/// Reads this user's root-managed NIP-46 client identity. Pairing creates
+/// it before the encrypted home is created, so it is available to homed
+/// during the next pre-mount unlock.
+fn load_device_keys(username: &str) -> Result<Keys, String> {
+    let path = user_state_dir(username).join("device-identity");
     let hex = std::fs::read_to_string(&path).map_err(|e| {
         format!(
             "reading {}: {e} -- run `evermore-signer bootstrap-device` first",
@@ -225,9 +222,9 @@ fn try_parse_response(
 /// if a validly-signed, correctly-addressed response comes back within
 /// the timeout; anything else -- decline, timeout, mismatch -- is an
 /// `Err`, which `functions.rs` turns into a decrypt failure.
-pub fn approve_unlock() -> Result<(), String> {
-    let pairing = load_pairing()?;
-    let our_keys = load_device_keys()?;
+pub fn approve_unlock(username: &str) -> Result<(), String> {
+    let pairing = load_pairing(username)?;
+    let our_keys = load_device_keys(username)?;
     let device_pubkey_hex = our_keys.public_key().to_hex();
     let mut ws = connect_and_subscribe(
         &pairing.relay,
@@ -256,8 +253,9 @@ pub fn approve_unlock() -> Result<(), String> {
         rand::thread_rng().fill_bytes(&mut bytes);
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
-    let content =
-        format!("evermore: approve LUKS unlock for device {device_pubkey_hex} (nonce {nonce})");
+    let content = format!(
+        "evermore: approve LUKS unlock for account {username} on device {device_pubkey_hex} (nonce {nonce})"
+    );
     let mut unsigned = UnsignedEvent::new(
         signer_pubkey,
         Timestamp::now(),
@@ -523,8 +521,9 @@ mod tests {
             std::env::set_var("EVERMORE_DEVICE_STATE_DIR", tmp.path());
         }
         let device_keys = Keys::generate();
+        std::fs::create_dir_all(tmp.path().join("users/alice")).unwrap();
         std::fs::write(
-            tmp.path().join("device-identity"),
+            tmp.path().join("users/alice/device-identity"),
             device_keys.secret_key().to_secret_hex(),
         )
         .unwrap();
@@ -557,7 +556,7 @@ mod tests {
         // real request these ephemeral events depend on being seen live.
         std::thread::sleep(Duration::from_millis(300));
 
-        let result = approve_unlock();
+        let result = approve_unlock("alice");
         stop.store(true, Ordering::Relaxed);
         relay_stop.store(true, Ordering::Relaxed);
         let _ = signer_handle.join();
@@ -575,6 +574,6 @@ mod tests {
         unsafe {
             std::env::set_var("EVERMORE_DEVICE_STATE_DIR", tmp.path());
         }
-        assert!(approve_unlock().is_err());
+        assert!(approve_unlock("alice").is_err());
     }
 }

@@ -22,6 +22,9 @@ pub struct HomedUser {
     /// non-Evermore homed account -- still listed, just with no
     /// profile to look up.
     pub pubkey_hex: Option<String>,
+    /// True when the account record includes Evermore's PKCS#11 unlock
+    /// factor. The greeter uses this to expose the explicit phone option.
+    pub phone_unlock_available: bool,
 }
 
 /// `ListHomes`'s tuple order (`a(susussso)`), confirmed by reading
@@ -49,17 +52,18 @@ pub fn list_users() -> Result<Vec<HomedUser>, String> {
 
     let mut users = Vec::with_capacity(entries.len());
     for (user_name, _uid, state, ..) in entries {
-        let pubkey_hex = get_user_record_pubkey(&connection, &user_name);
+        let (pubkey_hex, phone_unlock_available) = get_user_record_details(&connection, &user_name);
         users.push(HomedUser {
             user_name,
             state,
             pubkey_hex,
+            phone_unlock_available,
         });
     }
     Ok(users)
 }
 
-fn get_user_record_pubkey(connection: &Connection, user_name: &str) -> Option<String> {
+fn get_user_record_details(connection: &Connection, user_name: &str) -> (Option<String>, bool) {
     let reply = connection
         .call_method(
             Some(DESTINATION),
@@ -68,13 +72,26 @@ fn get_user_record_pubkey(connection: &Connection, user_name: &str) -> Option<St
             "GetUserRecordByName",
             &(user_name,),
         )
-        .ok()?;
+        .ok();
+    let Some(reply) = reply else {
+        return (None, false);
+    };
     let (user_record_json, _incomplete, _path): (String, bool, zbus::zvariant::OwnedObjectPath) =
-        reply.body().deserialize().ok()?;
-    let record: serde_json::Value = serde_json::from_str(&user_record_json).ok()?;
-    record
-        .get("evermore")?
-        .get("pubkeyHex")?
-        .as_str()
-        .map(str::to_string)
+        match reply.body().deserialize() {
+            Ok(record) => record,
+            Err(_) => return (None, false),
+        };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&user_record_json) else {
+        return (None, false);
+    };
+    let pubkey = record
+        .get("evermore")
+        .and_then(|evermore| evermore.get("pubkeyHex"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let phone_unlock_available = record
+        .get("pkcs11TokenUri")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|uris| !uris.is_empty());
+    (pubkey, phone_unlock_available)
 }

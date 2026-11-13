@@ -245,10 +245,23 @@ pub extern "C" fn c_login(
     pin: *mut CK_BYTE,
     pin_len: CK_ULONG,
 ) -> CK_RV {
-    // The random PIN is stored only in homed's short-lived secret record
-    // and satisfies its normal PKCS#11 login call. The security decision
-    // occurs in C_Decrypt, where the paired signer must approve the unlock.
     if pin.is_null() || pin_len == 0 {
+        return CKR_PIN_INCORRECT;
+    }
+    // Enrollment uses a random PIN only to let homed read the public key
+    // and generate its encrypted key blob. Phone activation supplies the
+    // tagged PIN below so the decrypt operation is bound to one account.
+    let pin = unsafe { slice::from_raw_parts(pin, pin_len as usize) };
+    let username = std::str::from_utf8(pin)
+        .ok()
+        .and_then(|pin| pin.strip_prefix("evermore-phone-approval:"));
+    if let Some(username) = username
+        && (username.is_empty()
+            || username.len() > 32
+            || !username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
         return CKR_PIN_INCORRECT;
     }
     let mut provider = state::provider().lock().unwrap();
@@ -256,6 +269,7 @@ pub extern "C" fn c_login(
         return CKR_SESSION_HANDLE_INVALID;
     };
     s.logged_in = true;
+    s.approval_username = username.map(str::to_owned);
     CKR_OK
 }
 
@@ -265,6 +279,7 @@ pub extern "C" fn c_logout(session: CK_SESSION_HANDLE) -> CK_RV {
         return CKR_SESSION_HANDLE_INVALID;
     };
     s.logged_in = false;
+    s.approval_username = None;
     CKR_OK
 }
 
@@ -463,17 +478,20 @@ pub extern "C" fn c_decrypt(
         return CKR_ARGUMENTS_BAD;
     }
     let provider = state::provider().lock().unwrap();
-    let hash = match provider.sessions.get(&session) {
-        Some(s) if s.logged_in && s.decrypting => s.decrypt_hash,
+    let (hash, username) = match provider.sessions.get(&session) {
+        Some(s) if s.logged_in && s.decrypting => (s.decrypt_hash, s.approval_username.clone()),
         Some(_) => return CKR_USER_NOT_LOGGED_IN,
         None => return CKR_SESSION_HANDLE_INVALID,
+    };
+    let Some(username) = username else {
+        return CKR_USER_NOT_LOGGED_IN;
     };
     let Some(hash) = hash else {
         return CKR_ARGUMENTS_BAD;
     };
     drop(provider);
 
-    if let Err(e) = crate::nip46_gate::approve_unlock() {
+    if let Err(e) = crate::nip46_gate::approve_unlock(&username) {
         eprintln!("evermore-pkcs11: NIP-46 unlock approval failed: {e}");
         let mut provider = state::provider().lock().unwrap();
         if let Some(s) = provider.sessions.get_mut(&session) {

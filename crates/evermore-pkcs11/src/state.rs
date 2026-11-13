@@ -1,10 +1,7 @@
-//! Provider state: a single RSA-2048 keypair representing the one
-//! virtual "token" this module exposes, plus the open-session table.
-//!
-//! The provider persists one RSA keypair and one token identity. Its
-//! decrypt path requires approval from the separately configured device
-//! NIP-46 pairing before performing RSA-OAEP. The pairing is device-wide
-//! and intentionally separate from per-user remote-signing records.
+//! Provider state: a single RSA-2048 keypair representing the virtual
+//! token, plus open sessions. Each decrypt session carries the account
+//! selector supplied by homed's activation PIN; the NIP-46 gate then loads
+//! that account's root-managed pairing and client identity.
 
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
@@ -67,6 +64,7 @@ pub enum OaepHash {
 #[derive(Default)]
 pub struct Session {
     pub logged_in: bool,
+    pub approval_username: Option<String>,
     pub decrypting: bool,
     /// The OAEP hash algorithm negotiated by `C_DecryptInit`'s mechanism
     /// parameter -- `homed` probes and picks SHA-1 or SHA-256 per

@@ -18,6 +18,7 @@ use nostr::prelude::*;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -126,7 +127,9 @@ fn setup_sidebar(ui: &mut egui::Ui, current_step: usize) {
         let label_pos = egui::pos2(rect.left() + STEP_CIRCLE_SIZE + 14.0, center.y);
         let (color, strong) = match step_number.cmp(&current_step) {
             std::cmp::Ordering::Equal => (ui.visuals().strong_text_color(), true),
-            std::cmp::Ordering::Less => (ui.visuals().weak_text_color.unwrap_or(Color32::GRAY), false),
+            std::cmp::Ordering::Less => {
+                (ui.visuals().weak_text_color.unwrap_or(Color32::GRAY), false)
+            }
             std::cmp::Ordering::Greater => (TEXT_FAINT, false),
         };
         let font = if strong {
@@ -421,7 +424,11 @@ struct UserEntry {
     user_name: String,
     display_name: String,
     avatar_path: Option<PathBuf>,
+    phone_unlock_available: bool,
 }
+
+const PHONE_LOGIN_SENTINEL: &str = "__EVERMORE_NIP46_PHONE_LOGIN__";
+const PHONE_LOGIN_PROMPT: &str = "Passphrase, or choose Use phone: ";
 
 enum Screen {
     FirstUser(FirstUserSetup),
@@ -443,6 +450,9 @@ enum Screen {
         /// defeating every way to actually submit the form -- a real
         /// bug found live-testing on the VM, not a hypothetical.
         focus_requested: bool,
+    },
+    PhoneWaiting {
+        user_name: String,
     },
     Starting,
     /// Something unrelated to a specific login attempt went wrong
@@ -590,7 +600,12 @@ impl FirstUserSetup {
             return Ok(());
         }
         let mut child = std::process::Command::new("sudo")
-            .args(["-n", "/usr/bin/evermore-enroll", "first-user-pair"])
+            .args([
+                "-n",
+                "/usr/bin/evermore-enroll",
+                "phone-pair",
+                self.username.trim(),
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -687,6 +702,7 @@ struct GreeterApp {
     avatars: HashMap<String, Option<TextureHandle>>,
     screen: Screen,
     client: Option<GreetdClient>,
+    phone_auth_result: Option<Receiver<(GreetdClient, Result<AuthStep, String>)>>,
     background: Option<TextureHandle>,
 }
 
@@ -700,6 +716,16 @@ impl GreeterApp {
                     .filter(|u| u.state != "absent")
                     .map(|u| {
                         let cached = u.pubkey_hex.as_deref().and_then(profile::load);
+                        let phone_unlock_available = u.phone_unlock_available
+                            && Command::new("/usr/bin/sudo")
+                                .args([
+                                    "-n",
+                                    "/usr/bin/evermore-enroll",
+                                    "phone-unlock-ready",
+                                    &u.user_name,
+                                ])
+                                .status()
+                                .is_ok_and(|status| status.success());
                         UserEntry {
                             display_name: cached
                                 .as_ref()
@@ -707,6 +733,7 @@ impl GreeterApp {
                                 .unwrap_or_else(|| u.user_name.clone()),
                             avatar_path: cached.and_then(|p| p.avatar_path),
                             user_name: u.user_name,
+                            phone_unlock_available,
                         }
                     })
                     .collect();
@@ -719,6 +746,7 @@ impl GreeterApp {
                         Screen::FirstUser(FirstUserSetup::new())
                     },
                     client: None,
+                    phone_auth_result: None,
                     background,
                 }
             }
@@ -727,6 +755,7 @@ impl GreeterApp {
                 avatars: HashMap::new(),
                 screen: Screen::FatalError(format!("listing homed users failed: {e}")),
                 client: None,
+                phone_auth_result: None,
                 background,
             },
         }
@@ -767,6 +796,36 @@ impl GreeterApp {
         };
         let step = client.respond(response);
         self.handle_step(client, user_name, step);
+    }
+
+    fn start_phone_auth(&mut self, user_name: &str) {
+        let Some(mut client) = self.client.take() else {
+            self.screen = Screen::FatalError("lost connection to greetd".to_string());
+            return;
+        };
+        let user_name = user_name.to_owned();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = client.respond(Some(PHONE_LOGIN_SENTINEL));
+            let _ = sender.send((client, result));
+        });
+        self.phone_auth_result = Some(receiver);
+        self.screen = Screen::PhoneWaiting { user_name };
+    }
+
+    fn poll_phone_auth(&mut self) {
+        let result = self
+            .phone_auth_result
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok());
+        if let Some((client, step)) = result {
+            self.phone_auth_result = None;
+            let user_name = match &self.screen {
+                Screen::PhoneWaiting { user_name } => user_name.clone(),
+                _ => return,
+            };
+            self.handle_step(client, &user_name, step);
+        }
     }
 
     fn handle_step(
@@ -946,6 +1005,7 @@ fn initial_color(name: &str) -> Color32 {
 
 impl eframe::App for GreeterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_phone_auth();
         let ctx = ui.ctx().clone();
         // The root `Ui` eframe hands `App::ui` has no fixed width of
         // its own to center against (see its doc comment: "no margin
@@ -969,33 +1029,60 @@ impl eframe::App for GreeterApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).fill(Color32::TRANSPARENT))
             .show(ui, |ui| {
-            match std::mem::replace(&mut self.screen, Screen::Starting) {
-                Screen::FirstUser(setup) => self.ui_first_user(ui, setup),
-                Screen::Picker { error } => self.ui_picker(ui, &ctx, error),
-                Screen::Auth {
-                    user_name,
-                    prompt,
-                    secret,
-                    input,
-                    focus_requested,
-                } => self.ui_auth(ui, user_name, prompt, secret, input, focus_requested),
-                Screen::Starting => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(200.0);
-                        ui.label("Starting session...");
-                    });
-                    self.screen = Screen::Starting;
+                match std::mem::replace(&mut self.screen, Screen::Starting) {
+                    Screen::FirstUser(setup) => self.ui_first_user(ui, setup),
+                    Screen::Picker { error } => self.ui_picker(ui, &ctx, error),
+                    Screen::Auth {
+                        user_name,
+                        prompt,
+                        secret,
+                        input,
+                        focus_requested,
+                    } => {
+                        let phone_unlock_available = self
+                            .users
+                            .iter()
+                            .find(|user| user.user_name == user_name)
+                            .is_some_and(|user| user.phone_unlock_available);
+                        self.ui_auth(
+                            ui,
+                            user_name,
+                            prompt,
+                            secret,
+                            input,
+                            focus_requested,
+                            phone_unlock_available,
+                        );
+                    }
+                    Screen::PhoneWaiting { user_name } => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(180.0);
+                            ui.heading("Approve sign-in on your phone");
+                            ui.add_space(10.0);
+                            ui.label(format!("Waiting for NIP-46 approval for {user_name}…"));
+                            ui.add_space(16.0);
+                            ui.add(egui::Spinner::new().size(28.0));
+                        });
+                        self.screen = Screen::PhoneWaiting { user_name };
+                        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    Screen::Starting => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(200.0);
+                            ui.label("Starting session...");
+                        });
+                        self.screen = Screen::Starting;
+                    }
+                    Screen::FatalError(error) => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(80.0);
+                            ui.colored_label(ui.visuals().error_fg_color, "evermore-greeter error");
+                            ui.label(&error);
+                        });
+                        self.screen = Screen::FatalError(error);
+                    }
                 }
-                Screen::FatalError(error) => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(80.0);
-                        ui.colored_label(ui.visuals().error_fg_color, "evermore-greeter error");
-                        ui.label(&error);
-                    });
-                    self.screen = Screen::FatalError(error);
-                }
-            }
-        });
+            });
         ctx.request_repaint();
     }
 }
@@ -1393,14 +1480,21 @@ impl GreeterApp {
         secret: bool,
         mut input: String,
         mut focus_requested: bool,
+        phone_unlock_available: bool,
     ) {
         let mut submit = false;
         let mut cancel = false;
+        let mut phone_login = false;
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
             ui.heading(&user_name);
             ui.add_space(20.0);
-            ui.label(&prompt);
+            let visible_prompt = if prompt == PHONE_LOGIN_PROMPT && !phone_unlock_available {
+                "Passphrase: "
+            } else {
+                &prompt
+            };
+            ui.label(visible_prompt);
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input)
                     .password(secret)
@@ -1422,11 +1516,25 @@ impl GreeterApp {
                 submit = true;
             }
             ui.add_space(8.0);
-            let pad = centered_row_padding(ui, &["Log in", "Cancel"]);
+            let show_phone_button = phone_unlock_available && prompt == PHONE_LOGIN_PROMPT;
+            let row_labels: &[&str] = if show_phone_button {
+                &["Log in", "Use phone", "Cancel"]
+            } else {
+                &["Log in", "Cancel"]
+            };
+            let pad = centered_row_padding(ui, row_labels);
             ui.horizontal(|ui| {
                 ui.add_space(pad);
                 if ui.button("Log in").clicked() {
                     submit = true;
+                }
+                if show_phone_button
+                    && ui
+                        .button("Use phone")
+                        .on_hover_text("Request approval from your paired NIP-46 signer")
+                        .clicked()
+                {
+                    phone_login = true;
                 }
                 if ui.button("Cancel").clicked() {
                     cancel = true;
@@ -1448,6 +1556,8 @@ impl GreeterApp {
                 focus_requested,
             };
             self.submit(&user_name, Some(&input));
+        } else if phone_login {
+            self.start_phone_auth(&user_name);
         } else {
             self.screen = Screen::Auth {
                 user_name,

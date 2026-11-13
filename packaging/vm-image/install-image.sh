@@ -13,6 +13,7 @@ for bin in "${bins[@]}"; do
   [[ -x "$STAGE/bin/$bin" ]] || { echo "missing staged executable: $STAGE/bin/$bin" >&2; exit 1; }
 done
 [[ -s "$STAGE/lib/evermore-pkcs11.so" ]] || { echo 'missing staged PKCS#11 module' >&2; exit 1; }
+[[ -s "$STAGE/lib/pam_evermore_phone.so" ]] || { echo 'missing staged phone-auth PAM module' >&2; exit 1; }
 for file in "$STAGE/systemd/user/npackd.service" "$STAGE/share/io.npack.Gui.desktop" \
   "$STAGE/share/io.npack.Gui.svg" "$STAGE/share/io.npack.Gui.metainfo.xml"; do
   [[ -s "$file" ]] || { echo "missing staged npack desktop asset: $file" >&2; exit 1; }
@@ -26,7 +27,7 @@ for task in mcp panel; do
 done
 [[ -s "$MODEL_STORE/p7.model.bge-1.0.0/manifest.json" ]] || { echo 'missing BGE manifest' >&2; exit 1; }
 
-install -d /usr/bin /usr/lib/pkcs11 /usr/share/p11-kit/modules /usr/lib/systemd/user \
+install -d /usr/bin /usr/lib/pkcs11 /usr/lib/security /usr/share/p11-kit/modules /usr/lib/systemd/user \
   /etc/greetd /etc/sudoers.d /etc/skel/.config/sway /etc/skel/.config/waybar \
   /etc/skel/.config/wofi /etc/skel/.config/fuzzel /etc/skel/.config/swaync \
   /etc/skel/.config/evermore /etc/skel/.config/npack \
@@ -69,6 +70,7 @@ install -m 0644 "$ROOT/packaging/npack/default-config.toml" /etc/skel/.config/np
 desktop-file-validate /usr/share/applications/io.npack.Gui.desktop
 update-desktop-database /usr/share/applications
 install -m 0755 "$STAGE/lib/evermore-pkcs11.so" /usr/lib/pkcs11/evermore-pkcs11.so
+install -m 0755 "$STAGE/lib/pam_evermore_phone.so" /usr/lib/security/pam_evermore_phone.so
 # Not /var/lib/evermore/models: evermore-pkcs11 and evermore-signer's
 # device-identity bootstrap both reset /var/lib/evermore to 0700 on every
 # run, which would lock every non-root reader (evermore-inferd included)

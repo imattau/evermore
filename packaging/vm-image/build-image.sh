@@ -102,6 +102,7 @@ for name in evermore-greeter evermore-enroll evermore-signer evermore-panel ever
 done
 install -m 0755 "$IMAGE_DIR/evermore-relay-supervisor" "$STAGE/bin/evermore-relay-supervisor"
 install -m 0755 "$ROOT/target/release/libevermore_pkcs11.so" "$STAGE/lib/evermore-pkcs11.so"
+install -m 0755 "$ROOT/target/release/libpam_evermore_phone.so" "$STAGE/lib/pam_evermore_phone.so"
 if [[ ! -f "$BASE" ]]; then
   if [[ -f "$BASE_SOURCE" ]]; then cp --reflink=auto "$BASE_SOURCE" "$BASE"
   else curl -fSL "$BASE_URL" -o "$BASE"

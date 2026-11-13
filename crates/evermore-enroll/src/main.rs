@@ -37,7 +37,8 @@ fn main() {
         Some("create") => create(&args[2..]),
         Some("first-user") => first_user(),
         Some("first-user-create") => first_user_create(),
-        Some("first-user-pair") => first_user_pair(),
+        Some("phone-pair") => phone_pair(&args[2..]),
+        Some("phone-unlock-ready") => phone_unlock_ready(&args[2..]),
         Some("activate") => activate(&args[2..]),
         Some("deactivate") => deactivate(&args[2..]),
         Some("remove") => remove(&args[2..]),
@@ -249,14 +250,14 @@ fn first_user_create() -> Result<(), String> {
 /// Begin the NIP-46 connection as the persistent device client identity.
 /// The first JSON line contains the QR payload; the second reports a
 /// validated connect + get_public_key exchange.
-fn first_user_pair() -> Result<(), String> {
+fn phone_pair(args: &[String]) -> Result<(), String> {
     if !nix_is_root() || std::env::var("SUDO_USER").as_deref() != Ok("greeter") {
-        return Err("first-user-pair may only be called by the greeter through sudo".into());
+        return Err("phone-pair may only be called by the greeter through sudo".into());
     }
-    if !list_homes()?.is_empty() || PathBuf::from("/var/lib/evermore/first-user-enrolled").exists()
-    {
-        return Err("first-user pairing is only available during first-user setup".into());
-    }
+    let [username] = args else {
+        return Err("phone-pair requires one username".into());
+    };
+    validate_username(username)?;
     ensure_pkcs11_module()?;
     let mut relay = String::new();
     io::stdin()
@@ -264,22 +265,16 @@ fn first_user_pair() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let relay = relay.trim();
 
-    let bootstrap = std::process::Command::new("/usr/bin/evermore-signer")
-        .arg("bootstrap-device")
-        .output()
-        .map_err(|e| format!("starting device identity bootstrap: {e}"))?;
-    if !bootstrap.status.success() {
-        return Err(format!(
-            "device identity bootstrap failed: {}",
-            String::from_utf8_lossy(&bootstrap.stderr).trim()
-        ));
-    }
-    let state_dir = PathBuf::from("/var/lib/evermore");
-    let key_text = Zeroizing::new(
-        std::fs::read_to_string(state_dir.join("device-identity"))
-            .map_err(|e| format!("reading device identity: {e}"))?,
-    );
-    let keys = Keys::new(SecretKey::parse(key_text.trim()).map_err(|e| e.to_string())?);
+    let keys = Keys::generate();
+    let state_dir = user_phone_state_dir(username);
+    std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(
+        "/var/lib/evermore/users",
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| e.to_string())?;
     let (remote, user_pubkey) = pair_over_relay(relay, &keys, |uri| {
         #[derive(serde::Serialize)]
         struct Waiting<'a> {
@@ -296,12 +291,89 @@ fn first_user_pair() -> Result<(), String> {
         println!("{}", message.as_str());
         io::stdout().flush().map_err(|e| e.to_string())
     })?;
+    write_device_identity(&state_dir, &keys)?;
     write_pairing(&state_dir, relay, &remote.to_hex())?;
     println!(
         "{}",
         serde_json::json!({"state":"paired", "remote_signer_pubkey":remote.to_hex(), "user_pubkey":user_pubkey})
     );
     Ok(())
+}
+
+/// Read-only readiness probe for the greeter. It intentionally reports only
+/// whether the complete phone unlock path is configured, never pairing data.
+fn phone_unlock_ready(args: &[String]) -> Result<(), String> {
+    if !nix_is_root() || std::env::var("SUDO_USER").as_deref() != Ok("greeter") {
+        return Err("phone-unlock-ready may only be called by the greeter through sudo".into());
+    }
+    let [username] = args else {
+        return Err("phone-unlock-ready requires one username".into());
+    };
+    validate_username(username)?;
+    if !list_homes()?.iter().any(|home| home.0 == *username) {
+        return Err("homed account is missing".into());
+    }
+    let connection = system_connection()?;
+    let reply = connection
+        .call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(INTERFACE),
+            "GetUserRecordByName",
+            &(username,),
+        )
+        .map_err(|e| format!("reading homed account: {e}"))?;
+    let (json, _, _): (String, bool, zbus::zvariant::OwnedObjectPath) =
+        reply.body().deserialize().map_err(|e| e.to_string())?;
+    let record: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    if !record
+        .get("pkcs11TokenUri")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|uris| !uris.is_empty())
+    {
+        return Err("homed account has no phone unlock factor".into());
+    }
+    ensure_pkcs11_module()?;
+    let state_dir = user_phone_state_dir(username);
+    if !state_dir.join("device-identity").is_file() {
+        return Err("device signer identity is missing".into());
+    }
+    let pairing: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join("pkcs11-nip46-pairing.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("phone pairing is invalid: {e}"))?;
+    let relay = pairing
+        .get("relay")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("phone pairing has no relay")?;
+    RelayUrl::parse(relay).map_err(|e| format!("phone pairing relay is invalid: {e}"))?;
+    let remote = pairing
+        .get("remote_signer_pubkey")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("phone pairing has no signer key")?;
+    PublicKey::from_hex(remote).map_err(|e| format!("phone pairing signer key is invalid: {e}"))?;
+    println!("ready");
+    Ok(())
+}
+
+fn user_phone_state_dir(username: &str) -> PathBuf {
+    PathBuf::from("/var/lib/evermore/users").join(username)
+}
+
+fn write_device_identity(dir: &std::path::Path, keys: &Keys) -> Result<(), String> {
+    let path = dir.join("device-identity");
+    let temp = dir.join("device-identity.tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    file.write_all(keys.secret_key().to_secret_hex().as_bytes())
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    std::fs::rename(temp, path).map_err(|e| e.to_string())
 }
 
 fn pair_over_relay(
@@ -537,7 +609,7 @@ fn create_first_user_account(
     let keys = Keys::new(secret_key);
     let password_hash = hash_password(password)?;
     let token_pin = if pairing_enabled {
-        ensure_pkcs11_pairing()?;
+        ensure_pkcs11_pairing(username)?;
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")
             .and_then(|mut f| f.read_exact(&mut bytes))
@@ -715,10 +787,16 @@ fn enable_identity_services(username: &str, uid: u32, gid: u32) -> Result<(), St
     Ok(())
 }
 
-fn ensure_pkcs11_pairing() -> Result<(), String> {
-    let pairing = PathBuf::from("/var/lib/evermore/pkcs11-nip46-pairing.json");
+fn ensure_pkcs11_pairing(username: &str) -> Result<(), String> {
+    let pairing = user_phone_state_dir(username).join("pkcs11-nip46-pairing.json");
     if !pairing.is_file() {
         return Err("phone pairing is missing; pair the phone again".into());
+    }
+    if !user_phone_state_dir(username)
+        .join("device-identity")
+        .is_file()
+    {
+        return Err("user phone identity is missing; pair the phone again".into());
     }
     ensure_pkcs11_module()
 }

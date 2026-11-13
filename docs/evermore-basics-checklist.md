@@ -29,8 +29,8 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
   exclusions such as `.no-ai`, configure redaction and retention, and expose
   the active model and whether inference is local.
 - [ ] **Software and trust:** link into package management; show trusted
-  publishers, package/model updates, and the consequences of trusting or
-  removing a publisher.
+  publishers and a read-only package/model update check, with the consequences
+  of trusting or removing a publisher.
 - [ ] **Storage and sync:** show sync state, local storage use, upload failures,
   and conflict/recovery actions for Blossom files.
 - [ ] **Accounts and access:** show the current user/session and provide clear
@@ -100,8 +100,11 @@ delivery gates in [`evermore-basics-roadmap.md`](evermore-basics-roadmap.md).
   `.no-ai` enforcement, redaction, and local model selection. Settings now
   shows the active identity's trusted publisher list, confirms add/revoke
   actions, and opens the existing software manager. AI conversation retention
-  is selected from identity-synced Settings and applied to local session data;
-  package/model update status remains open.
+  is selected from identity-synced Settings and applied to local session data.
+  Settings checks package/model updates through the local operations service,
+  reports available versions, revoked releases, and resolver failures, and
+  leaves installation behind its existing approval flow. Phase acceptance
+  remains open.
 - The engineering image now packages Firefox, NetworkManager's connection
   editor, Pavucontrol, Blueman, Wdisplays, Swaylock, and Brightnessctl.
   Waybar opens network/audio tools; the Sway profile binds hardware keys for

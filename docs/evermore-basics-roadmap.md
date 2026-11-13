@@ -15,8 +15,10 @@ their phase gate has evidence in `application-readiness.md`.
 - **Phase 3:** AI source scopes, `.no-ai`, redaction, local model selection, and
   trusted-publisher visibility and confirmed trust/revoke actions are present.
   A local conversation-retention choice now syncs by identity and prunes only
-  this device's expired history. Package/model update status and phase
-  acceptance remain open.
+  this device's expired history. Settings checks package/model updates
+  through the local operations service, reports available versions, revoked
+  releases, and resolver failures, and leaves installation behind its existing
+  approval flow. Phase acceptance remains open.
 - **Phase 4:** the engineering image now includes Firefox and upstream network,
   audio, Bluetooth, display, lock, and brightness tools with Waybar/hardware
   entry points, and sets Firefox as the system XDG browser default. Settings

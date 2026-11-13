@@ -117,6 +117,17 @@ pub fn configured_owner_pubkey() -> Result<String, String> {
         .ok_or_else(|| "operation daemon returned an invalid owner public key".into())
 }
 
+pub fn invoke_read(name: &str, arguments: Value) -> Result<Value, String> {
+    let definition = operations::find(name).ok_or("unknown operation")?;
+    if definition.access != operations::Access::Read {
+        return Err("only read operations can be invoked directly".into());
+    }
+    request(&Request::Invoke {
+        name: name.to_owned(),
+        arguments: operations::canonicalize_input(name, &arguments)?,
+    })
+}
+
 pub fn fetch_catalog() -> Result<Vec<Definition>, String> {
     let socket_path = operations::runtime_socket_path();
     let mut stream = UnixStream::connect(&socket_path)
